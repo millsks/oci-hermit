@@ -97,7 +97,10 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 - CLI front end and a small state store (images, containers, pods) under the user's data directory.
 - Image store: pulls and verifies images from registries, or loads OCI layouts and tarballs offline.
 - Layer builder: turns each layer into a read-only EROFS disk image, cached by digest.
-- Sandbox supervisor: launches and monitors one emulator process per sandbox, applies CPU and memory limits.
+- Sandbox supervisor: launches and monitors one emulator process per sandbox, applies CPU and memory limits. QEMU is
+  started with `-accel tcg -nodefaults -no-user-config -display none -no-reboot`, the console on a log file, and no
+  network yet. It exits with the host tool: `-run-with exit-with-parent=on` on Linux and macOS, a kill-on-close Job
+  Object on Windows. `oci-hermit machine boot` boots one sandbox until the agent is ready, as a self-check.
 - Control client: talks to the guest agent over virtio-serial.
 - 9P file server: serves bind-mounted folders and enforces the mount policy.
 - Port publisher: listens on 127.0.0.1 and relays connections into the guest.
@@ -180,6 +183,7 @@ oci-hermit compose down
 
 # Sandbox details
 oci-hermit machine info
+oci-hermit machine boot [--arch x86_64|aarch64]   # boot a sandbox until its agent is ready
 ```
 
 **Deliberate differences from Docker**

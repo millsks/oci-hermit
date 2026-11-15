@@ -190,6 +190,24 @@ pub enum ComposeCommand {
 pub enum MachineCommand {
     /// Show emulator, guest kernel and limits
     Info,
+    /// Boot a sandbox VM until its agent is ready, then stop it: a self-check of QEMU, kernel and agent
+    Boot(BootArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BootArgs {
+    /// Guest architecture (default: the host's)
+    #[arg(long, value_enum)]
+    pub arch: Option<crate::qemu::GuestArch>,
+    /// Memory for the sandbox, in MiB
+    #[arg(long, default_value_t = 512)]
+    pub memory: u32,
+    /// Number of emulated CPUs
+    #[arg(long, default_value_t = 1)]
+    pub cpus: u32,
+    /// Seconds to wait for the agent to be ready
+    #[arg(long, default_value_t = 120)]
+    pub timeout: u64,
 }
 
 #[cfg(test)]

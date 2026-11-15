@@ -4,13 +4,17 @@
 //! later milestone (see ROADMAP.md).
 
 mod cli;
+mod guest;
+mod initramfs;
 mod qemu;
+mod supervisor;
 
 use clap::Parser;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 const ROADMAP: &str = "https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md";
 
@@ -21,15 +25,21 @@ const NOT_IMPLEMENTED: u8 = 2;
 struct Env {
     /// The value of `OCI_HERMIT_QEMU_DIR`, if set.
     qemu_dir: Option<OsString>,
+    /// The value of `OCI_HERMIT_GUEST_DIR`, if set.
+    guest_dir: Option<OsString>,
     /// This executable's path.
     exe: PathBuf,
+    /// Where each sandbox gets a directory for its initramfs and logs.
+    run_base: PathBuf,
 }
 
 fn main() -> ExitCode {
     let cli = cli::Cli::parse();
     let env = Env {
         qemu_dir: std::env::var_os(qemu::DIR_ENV),
+        guest_dir: std::env::var_os(guest::DIR_ENV),
         exe: std::env::current_exe().unwrap_or_default(),
+        run_base: std::env::temp_dir().join("oci-hermit"),
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
 }
@@ -47,6 +57,7 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
             0
         }
         cli::Command::Machine(cli::MachineCommand::Info) => machine_info(env, out, err),
+        cli::Command::Machine(cli::MachineCommand::Boot(args)) => machine_boot(args, env, out, err),
         other => {
             let _ = writeln!(
                 err,
@@ -75,7 +86,7 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
                 let _ = writeln!(
                     out,
                     "{:<8} QEMU {} ({}), accel tcg",
-                    format!("{:?}:", emulator.arch).to_lowercase(),
+                    format!("{}:", emulator.arch.name()),
                     emulator.version.version,
                     emulator.version.marker.as_deref().unwrap_or_default()
                 );
@@ -87,6 +98,67 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
         }
     }
     status
+}
+
+/// `machine boot`: boot a sandbox until its agent is ready, then stop it.
+fn machine_boot(args: &cli::BootArgs, env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
+    let Some(arch) = args.arch.or_else(qemu::GuestArch::host) else {
+        let _ = writeln!(
+            err,
+            "oci-hermit: cannot tell the host architecture; pass --arch x86_64 or --arch aarch64"
+        );
+        return 1;
+    };
+    match boot(args, arch, env, out) {
+        Ok(()) => 0,
+        Err(e) => {
+            let _ = writeln!(err, "oci-hermit: {e}");
+            1
+        }
+    }
+}
+
+fn boot(
+    args: &cli::BootArgs,
+    arch: qemu::GuestArch,
+    env: &Env,
+    out: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe))?;
+    qemu::verify(&bundle, arch)?;
+    let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
+    let dir = supervisor::run_dir(&env.run_base)?;
+    let initrd = dir.join("initrd.cpio");
+    std::fs::write(&initrd, initramfs::build(&std::fs::read(&guest.agent)?))?;
+    let console = dir.join("console.log");
+    let qemu_log = dir.join("qemu.log");
+    let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
+        bundle: &bundle,
+        kernel: &guest.kernel,
+        initrd: &initrd,
+        console_log: &console,
+        spec: supervisor::MachineSpec {
+            arch,
+            memory_mib: args.memory,
+            cpus: args.cpus,
+        },
+    })?;
+    let _ = writeln!(
+        out,
+        "booting an {} sandbox; console log: {}",
+        arch.name(),
+        console.display()
+    );
+    let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log, &console)?;
+    let ready = sandbox.wait_for_console(hermit_proto::CONSOLE_READY, Duration::from_secs(args.timeout));
+    sandbox.stop()?;
+    match ready {
+        Ok(took) => {
+            let _ = writeln!(out, "agent ready after {:.1}s; sandbox stopped", took.as_secs_f64());
+            Ok(())
+        }
+        Err(e) => Err(format!("{e}; see {} and {}", console.display(), qemu_log.display()).into()),
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +177,20 @@ mod tests {
         let dir = qemu::testing::scratch(name);
         Env {
             qemu_dir: Some(dir.clone().into()),
+            guest_dir: Some(dir.clone().into()),
             exe: dir.join("bin").join("oci-hermit"),
+            run_base: dir.join("run"),
+        }
+    }
+
+    /// An environment whose QEMU bundle is the fake in `bundle`, with no guest unless `guest` is given.
+    #[cfg(unix)]
+    fn with_bundle(bundle: &std::path::Path, guest: Option<&std::path::Path>) -> Env {
+        Env {
+            qemu_dir: Some(bundle.into()),
+            guest_dir: guest.map(Into::into),
+            exe: PathBuf::from("/nowhere/bin/oci-hermit"),
+            run_base: bundle.join("run"),
         }
     }
 
@@ -141,10 +226,7 @@ mod tests {
         let _guard = qemu::testing::exec_lock();
         let dir = qemu::testing::scratch("main-ok");
         qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
-        let env = Env {
-            qemu_dir: Some(dir.clone().into()),
-            exe: PathBuf::from("/nowhere/bin/oci-hermit"),
-        };
+        let env = with_bundle(&dir, None);
         let (code, out, err) = run_with(&env, &["machine", "info"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert!(out.contains(&format!("qemu bundle: {}", dir.display())));
@@ -158,12 +240,88 @@ mod tests {
         let _guard = qemu::testing::exec_lock();
         let dir = qemu::testing::scratch("main-foreign");
         qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (Homebrew)", "tcg");
-        let env = Env {
-            qemu_dir: Some(dir.into()),
-            exe: PathBuf::from("/nowhere/bin/oci-hermit"),
-        };
+        let env = with_bundle(&dir, None);
         let (code, _, err) = run_with(&env, &["machine", "info"]);
         assert_eq!(code, 1);
         assert!(err.contains("is not the bundled QEMU"));
+    }
+
+    /// A guest directory holding a kernel and agent for both architectures.
+    #[cfg(unix)]
+    fn fake_guest(name: &str) -> PathBuf {
+        let dir = qemu::testing::scratch(name);
+        for arch in qemu::GuestArch::ALL {
+            let arch_dir = dir.join(arch.name());
+            std::fs::create_dir_all(&arch_dir).unwrap();
+            std::fs::write(arch_dir.join("kernel"), "kernel").unwrap();
+            std::fs::write(arch_dir.join("hermit-agent"), "agent").unwrap();
+        }
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_boot_waits_for_the_agent_then_stops() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-boot");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
+        let guest = fake_guest("main-boot-guest");
+        let env = with_bundle(&bundle, Some(&guest));
+        for arch in ["aarch64", "x86_64"] {
+            let (code, out, err) = run_with(&env, &["machine", "boot", "--arch", arch, "--timeout", "10"]);
+            assert_eq!((code, err.as_str()), (0, ""), "{arch}: {out}");
+            assert!(out.contains(&format!("booting an {arch} sandbox")));
+            assert!(out.contains("agent ready after"));
+            assert!(out.contains("sandbox stopped"));
+        }
+        // Each boot got its own directory with the initramfs it built from the agent.
+        let runs: Vec<_> = std::fs::read_dir(bundle.join("run")).unwrap().collect();
+        assert_eq!(runs.len(), 2);
+        let run = runs[0].as_ref().unwrap().path();
+        assert_eq!(
+            std::fs::read(run.join("initrd.cpio")).unwrap(),
+            initramfs::build(b"agent")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_boot_without_a_guest_names_the_variable() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-boot-noguest");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
+        let env = with_bundle(&bundle, None);
+        let (code, _, err) = run_with(&env, &["machine", "boot", "--arch", "aarch64"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no aarch64 guest kernel and agent found"));
+        assert!(err.contains(guest::DIR_ENV));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_boot_reports_a_guest_that_never_gets_ready() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-boot-slow");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
+        // Overwrite the emulator with one that never prints the ready line.
+        let x86 = bundle.join("bin").join(qemu::GuestArch::X86_64.binary_name());
+        let script = std::fs::read_to_string(&x86)
+            .unwrap()
+            .replace("sleep 30 ;;", "exit 3 ;;");
+        let script = script.replace("echo 'hermit-agent", "echo 'other");
+        std::fs::write(&x86, script).unwrap();
+        let guest = fake_guest("main-boot-slow-guest");
+        let env = with_bundle(&bundle, Some(&guest));
+        let (code, _, err) = run_with(&env, &["machine", "boot", "--arch", "x86_64", "--timeout", "10"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("QEMU exited before the guest was ready"), "{err}");
+        assert!(err.contains("console.log"));
+    }
+
+    #[test]
+    fn machine_boot_without_a_bundle_fails() {
+        let (code, _, err) = run_with(&no_qemu("main-none-4"), &["machine", "boot", "--arch", "x86_64"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no bundled QEMU found"));
     }
 }
