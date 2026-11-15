@@ -57,10 +57,7 @@ mod tests {
 
     #[test]
     fn messages_are_tagged() {
-        let line = encode(&GuestMessage::Error {
-            message: "nope".into(),
-        })
-        .unwrap();
+        let line = encode(&GuestMessage::Error { message: "nope".into() }).unwrap();
         assert!(line.contains("\"type\":\"error\""));
     }
 }

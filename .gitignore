@@ -1,10 +1,11 @@
-# Rust
+# Cargo
 /target/
 **/*.rs.bk
+*.pdb
 
-# pixi
-.pixi/
-*.egg-info/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
 
 # Guest build artifacts
 /guest/out/
@@ -12,6 +13,17 @@
 *.qcow2
 vmlinux*
 bzImage*
+
+# Local Claude overrides and worktrees
+CLAUDE.local.md
+.claude/worktrees/
+
+# Environment files
+.env
+.env.*
+
+# Triage reports
+triage-*.md
 
 # Editors and OS
 .vscode/
