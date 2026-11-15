@@ -15,5 +15,8 @@ path = "src/main.rs"
 [dependencies]
 hermit-proto.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+
 [lints]
 workspace = true

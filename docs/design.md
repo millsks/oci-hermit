@@ -112,6 +112,9 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 
 **Guest agent (Rust, static, PID 1).**
 
+- Boots as init: mounts `/proc`, `/sys`, devtmpfs on `/dev`, devpts, and tmpfs on `/run` and `/tmp` (an already-mounted target is skipped), logs line-oriented `hermit-agent: ...` messages to the console, and reaps orphaned children.
+- Never exits: on a shutdown request or any fatal setup error it logs, syncs and powers the VM off, because a PID 1 that exits or panics panics the kernel. Until the control protocol carries a shutdown message, the request is SIGTERM or SIGINT; the agent logs a `ready` line with the protocol version once it is waiting. Run anywhere other than as PID 1 on Linux, it refuses to start.
+- A static binary per guest architecture (`pixi run -e agent agent-build`, x86-64 and arm64). It is static glibc (`crt-static`, conda-forge's 2.39 sysroot) rather than musl, because conda-forge ships no musl Rust standard library.
 - Mounts the layer disks and builds an overlayfs root with a throwaway writable layer.
 - Mounts bind-mounted folders over 9P.
 - Generates OCI runtime bundles and starts containers with crun.
