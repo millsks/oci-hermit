@@ -30,7 +30,8 @@ done
 samples=""
 if [ "$result" = silent ]; then
   for _ in 1 2 3; do
-    samples="$samples $(printf 'info registers\n' | timeout 2 nc -U "$monitor" 2> /dev/null | grep -aoE 'RIP=[0-9a-f]+ RFL=[0-9a-f]+|CPL=[0-9]' | tr '\n' ' ')"
+    sample=$(printf 'info registers\n' | timeout 2 nc -U "$monitor" 2> /dev/null | grep -aoE 'RIP=[0-9a-f]+|CPL=[0-9]' | tr '\n' ' ' || true)
+    samples="$samples [${sample:-no monitor reply}]"
     sleep 1
   done
 fi

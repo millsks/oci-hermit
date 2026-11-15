@@ -11,6 +11,10 @@ static const char message[] = "hermit-agent: ready (control protocol 0.1) probe=
 
 void _start(void) {
     syscall3(1, 1, (long)message, sizeof message - 1); /* write(1, ...) */
+#ifdef EXIT_AFTER_WRITE
+    /* Exiting makes the kernel panic with "Attempted to kill init", which proves the write returned. */
+    syscall3(60, 0, 0, 0); /* exit(0) */
+#endif
     for (;;) {
         syscall3(34, 0, 0, 0); /* pause() */
     }

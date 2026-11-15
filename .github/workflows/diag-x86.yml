@@ -45,6 +45,8 @@ jobs:
         run: |
           mkdir -p diag
           pixi run -e agent cc -static -nostdlib -ffreestanding -fno-stack-protector -O2 -o diag/nolibc guest/diag/nolibc.c
+          pixi run -e agent cc -static -nostdlib -ffreestanding -fno-stack-protector -O2 -DEXIT_AFTER_WRITE \
+            -o diag/nolibc-exit guest/diag/nolibc.c
           pixi run -e agent cc -static -no-pie -O2 -o diag/glibc guest/diag/glibc.c
           pixi run -e agent agent-build
           cp target/x86_64-unknown-linux-gnu/release/hermit-agent diag/agent
@@ -52,7 +54,7 @@ jobs:
       - name: Boot each program on each CPU model
         run: |
           image=$(sed -n 's/^image=//p' guest/out/x86_64/BUNDLE.txt)
-          for program in nolibc glibc agent; do
+          for program in nolibc nolibc-exit glibc agent; do
             for cpu in qemu64 Haswell-v4 max; do
               bash guest/diag/run.sh "$program" "diag/$program" qemu/out "guest/out/x86_64/$image" "$cpu" \
                 "$RUNNER_TEMP/d" 30 | tee -a diag/results.txt
@@ -60,12 +62,14 @@ jobs:
           done
       - name: Name the faulting instructions
         run: |
-          # shellcheck disable=SC2013,SC2016 # one address per word; $1 and $2 are for the inner shell
-          for ip in $(grep -oE 'ip:[0-9a-f]+' diag/results.txt | sort -u | cut -d: -f2); do
-            for program in glibc agent; do
-              echo "== $program 0x$ip"
-              pixi run -e agent bash -c '"${ADDR2LINE:-addr2line}" -f -C -e "$1" "0x$2"' _ "diag/$program" "$ip" || true
-            done
+          # Nearest symbol at or below each trapping address, in the program that trapped.
+          # shellcheck disable=SC2016 # $1, $2 and $1 in awk belong to the inner shell and awk
+          grep -oE '^RESULT [a-z-]+ .*ip:[0-9a-f]+' diag/results.txt | sort -u | while read -r _ program rest; do
+            ip=${rest##*ip:}
+            echo "== $program 0x$ip"
+            pixi run -e agent bash -c '"${NM:-nm}" -n "$1" | awk -v ip="$2" '"'"'
+              { a = strtonum("0x" $1) } a <= strtonum("0x" ip) { best = $0 } END { print best }'"'"'' \
+              _ "diag/$program" "$ip" || true
           done
       - name: Summary
         if: ${{ !cancelled() }}
