@@ -12,11 +12,12 @@ use std::process::Command;
 /// The QEMU release `qemu/build.sh` builds.
 pub const QEMU_VERSION: &str = "11.1.3";
 /// The `--with-pkgversion` marker `qemu/build.sh` builds with.
-pub const BUNDLE_MARKER: &str = "oci-hermit-qemu-1";
+pub const BUNDLE_MARKER: &str = "oci-hermit-qemu-2";
 /// Environment variable naming a bundle directory, overriding the search.
 pub const DIR_ENV: &str = "OCI_HERMIT_QEMU_DIR";
-/// The firmware the x86 `microvm` machine boots with.
-pub const MICROVM_FIRMWARE: &str = "bios-microvm.bin";
+/// The firmware the x86 `microvm` machine boots with: its SeaBIOS, and the option ROM SeaBIOS needs to boot a
+/// `-kernel` bzImage.
+pub const MICROVM_FIRMWARE: [&str; 2] = ["bios-microvm.bin", "linuxboot_dma.bin"];
 
 /// The bundle's firmware directory. QEMU is always given it with `-L`: with the bundle's `/` prefix, QEMU's own
 /// relocation looks only in a literal `/share/qemu`.
@@ -122,7 +123,7 @@ pub struct VersionInfo {
     pub marker: Option<String>,
 }
 
-/// Parse the first line of `qemu-system-* --version`, e.g. `QEMU emulator version 11.1.3 (oci-hermit-qemu-1)`.
+/// Parse the first line of `qemu-system-* --version`, e.g. `QEMU emulator version 11.1.3 (oci-hermit-qemu-2)`.
 pub fn parse_version(output: &str) -> Option<VersionInfo> {
     let rest = output.lines().next()?.trim().strip_prefix("QEMU emulator version ")?;
     let (version, marker) = match rest.split_once(' ') {
@@ -169,9 +170,11 @@ fn output_of(binary: &Path, args: &[&str]) -> Result<String, QemuError> {
 pub fn verify(bundle: &Path, arch: GuestArch) -> Result<Emulator, QemuError> {
     let binary = bundle.join("bin").join(arch.binary_name());
     if arch == GuestArch::X86_64 {
-        let firmware = firmware_dir(bundle).join(MICROVM_FIRMWARE);
-        if !firmware.is_file() {
-            return Err(QemuError::MissingFirmware { path: firmware });
+        for name in MICROVM_FIRMWARE {
+            let firmware = firmware_dir(bundle).join(name);
+            if !firmware.is_file() {
+                return Err(QemuError::MissingFirmware { path: firmware });
+            }
         }
     }
     let reported = output_of(&binary, &["--version"])?;
@@ -224,7 +227,9 @@ pub(crate) mod testing {
         }
         let firmware = firmware_dir(dir);
         std::fs::create_dir_all(&firmware).unwrap();
-        std::fs::write(firmware.join(MICROVM_FIRMWARE), "").unwrap();
+        for name in MICROVM_FIRMWARE {
+            std::fs::write(firmware.join(name), "").unwrap();
+        }
         dir.to_path_buf()
     }
 }
@@ -236,9 +241,9 @@ mod tests {
 
     #[test]
     fn parses_bundled_version() {
-        let info = parse_version("QEMU emulator version 11.1.3 (oci-hermit-qemu-1)\nCopyright (c) 2003-2026").unwrap();
+        let info = parse_version("QEMU emulator version 11.1.3 (oci-hermit-qemu-2)\nCopyright (c) 2003-2026").unwrap();
         assert_eq!(info.version, "11.1.3");
-        assert_eq!(info.marker.as_deref(), Some("oci-hermit-qemu-1"));
+        assert_eq!(info.marker.as_deref(), Some("oci-hermit-qemu-2"));
     }
 
     #[test]
@@ -290,7 +295,7 @@ mod tests {
         assert!(
             unknown
                 .to_string()
-                .contains("expected version 11.1.3 (oci-hermit-qemu-1)")
+                .contains("expected version 11.1.3 (oci-hermit-qemu-2)")
         );
         assert!(
             QemuError::NoTcg { binary: binary.clone() }
@@ -317,7 +322,7 @@ mod tests {
         #[test]
         fn accepts_the_bundled_build() {
             let _guard = exec_lock();
-            let dir = fake_qemu("ok", "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "tcg");
+            let dir = fake_qemu("ok", "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
             let emulator = verify(&dir, GuestArch::X86_64).unwrap();
             assert_eq!(emulator.version.version, QEMU_VERSION);
             assert_eq!(emulator.arch, GuestArch::X86_64);
@@ -336,18 +341,22 @@ mod tests {
         #[test]
         fn refuses_a_build_without_tcg() {
             let _guard = exec_lock();
-            let dir = fake_qemu("notcg", "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "kvm");
+            let dir = fake_qemu("notcg", "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "kvm");
             assert!(matches!(verify(&dir, GuestArch::X86_64), Err(QemuError::NoTcg { .. })));
         }
 
         #[test]
         fn refuses_a_bundle_without_microvm_firmware() {
             let _guard = exec_lock();
-            let dir = fake_qemu("nofw", "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "tcg");
-            std::fs::remove_file(firmware_dir(&dir).join(MICROVM_FIRMWARE)).unwrap();
-            let err = verify(&dir, GuestArch::X86_64).unwrap_err();
-            assert!(err.to_string().contains("bios-microvm.bin is missing"));
-            assert!(verify(&dir, GuestArch::Aarch64).is_ok());
+            let dir = fake_qemu("nofw", "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
+            for name in MICROVM_FIRMWARE {
+                std::fs::write(firmware_dir(&dir).join(MICROVM_FIRMWARE[0]), "").unwrap();
+                std::fs::write(firmware_dir(&dir).join(MICROVM_FIRMWARE[1]), "").unwrap();
+                std::fs::remove_file(firmware_dir(&dir).join(name)).unwrap();
+                let err = verify(&dir, GuestArch::X86_64).unwrap_err();
+                assert!(err.to_string().contains(&format!("{name} is missing")), "{err}");
+                assert!(verify(&dir, GuestArch::Aarch64).is_ok());
+            }
         }
 
         #[test]
@@ -356,7 +365,9 @@ mod tests {
             let dir = scratch("absent");
             let firmware = firmware_dir(&dir);
             std::fs::create_dir_all(&firmware).unwrap();
-            std::fs::write(firmware.join(MICROVM_FIRMWARE), "").unwrap();
+            for name in MICROVM_FIRMWARE {
+                std::fs::write(firmware.join(name), "").unwrap();
+            }
             assert!(matches!(
                 verify(&dir, GuestArch::X86_64),
                 Err(QemuError::Unrunnable { .. })
