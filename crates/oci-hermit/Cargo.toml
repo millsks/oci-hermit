@@ -1,0 +1,19 @@
+[package]
+name = "oci-hermit"
+description = "Run OCI images in a sealed, software-emulated sandbox without root, admin or a hypervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "oci-hermit"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+hermit-proto.workspace = true
+
+[lints]
+workspace = true

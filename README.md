@@ -46,6 +46,10 @@ pixi global install oci-hermit
 conda install -c conda-forge oci-hermit
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Work is tracked in the [issues](https://github.com/millsks/oci-hermit/issues) by [milestone](https://github.com/millsks/oci-hermit/milestones).
+
 ## License
 
 [Apache-2.0](LICENSE). The bundled QEMU emulator runs as a separate process and keeps its own GPL-2.0 license.

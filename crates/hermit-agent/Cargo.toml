@@ -1,0 +1,19 @@
+[package]
+name = "hermit-agent"
+description = "oci-hermit guest agent: PID 1 inside the sandbox VM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "hermit-agent"
+path = "src/main.rs"
+
+[dependencies]
+hermit-proto.workspace = true
+
+[lints]
+workspace = true
