@@ -79,6 +79,26 @@ patchelf = "*"
 [feature.qemu-build.tasks]
 qemu-build = "bash qemu/build.sh qemu/out"
 
+# The static guest agent (`pixi run -e agent agent-build`), built natively on each Linux architecture. conda-forge
+# ships no musl Rust std, so it is a static glibc binary: crt-static, linked by the environment's `cc` (conda-forge
+# gcc) against conda-forge's 2.39 sysroot. Non-PIE (relocation-model=static): a static-pie build segfaults at startup.
+[feature.agent]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.agent.target.linux-64.dependencies]
+sysroot_linux-64 = "2.39.*"
+
+[feature.agent.target.linux-aarch64.dependencies]
+sysroot_linux-aarch64 = "2.39.*"
+
+[feature.agent.target.linux-64.tasks.agent-build]
+cmd = "cargo build -p hermit-agent --release --locked --target x86_64-unknown-linux-gnu"
+env = { CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C target-feature=+crt-static -C relocation-model=static" }
+
+[feature.agent.target.linux-aarch64.tasks.agent-build]
+cmd = "cargo build -p hermit-agent --release --locked --target aarch64-unknown-linux-gnu"
+env = { CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C target-feature=+crt-static -C relocation-model=static" }
+
 [feature.dev.tasks]
 ci = { depends-on = ["pre-commit-run", "build", "check", "lint", "cov"] }
 
@@ -87,3 +107,4 @@ default = ["lint", "cov", "dev"]
 lint = { features = ["lint"], no-default-feature = true }
 msrv = { features = ["msrv"], no-default-feature = true }
 qemu-build = { features = ["qemu-build"], no-default-feature = true }
+agent = ["agent"]

@@ -11,7 +11,7 @@ no admin, no hypervisor and no WSL.
 | Path | What it is |
 |---|---|
 | `crates/oci-hermit` | host tool and CLI (clap), Docker/Podman-style commands |
-| `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only |
+| `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
 | `crates/hermit-proto` | control protocol shared by host and agent (newline-delimited JSON over virtio-serial) |
 | `docs/design.md` | architecture, networking, mounts, security model |
 
@@ -26,6 +26,7 @@ Everything runs through pixi.
 | Full gate | `pixi run ci` (pre-commit, build, check, clippy, coverage ≥ 90%) |
 | Dependencies | `pixi run -e lint deny` |
 | MSRV | `pixi run -e msrv msrv-check` |
+| Static guest agent (Linux only) | `pixi run -e agent agent-build` (static glibc; conda-forge has no musl Rust std) |
 | Hooks | `pixi run bootstrap` once per clone |
 
 ## Workflow
@@ -44,3 +45,5 @@ Everything runs through pixi.
 - QEMU is GPL-2.0: it ships as a separate helper process and is never linked into a crate. `deny.toml` keeps GPL
   crates out.
 - No `unsafe` in host-side crates (`unsafe_code = "deny"` in the workspace lints).
+- The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
+  children inherit that mask, so anything it spawns must reset the signal mask before exec.
