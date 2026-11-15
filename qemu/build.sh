@@ -81,9 +81,29 @@ cd "$build"
 
 make -j"$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4)"
 
+exe=""
+[ "$os" = windows ] && exe=".exe"
+
 rm -rf "$out"
 mkdir -p "$out"
 make install DESTDIR="$out" > /dev/null
+
+# On Windows the `/` prefix resolves to the MSYS2 root, so DESTDIR nests the install under that path
+# (out/a/_temp/msys64/...). Wherever it landed, the directory holding bin/ becomes the bundle.
+installed=$(find "$out" -path "*/bin/qemu-system-x86_64$exe" | head -n 1)
+if [ -z "$installed" ]; then
+  echo "make install produced no bin/qemu-system-x86_64$exe under $out:" >&2
+  find "$out" -maxdepth 6 >&2
+  exit 1
+fi
+root=$(dirname "$(dirname "$installed")")
+if [ "$root" != "$out" ]; then
+  stage="$work/stage"
+  rm -rf "$stage"
+  mv "$root" "$stage"
+  rm -rf "$out"
+  mv "$stage" "$out"
+fi
 echo "installed:"
 find "$out" -maxdepth 2 | sed "s|^$out|  .|"
 
@@ -97,8 +117,6 @@ rm -rf "$out/include" "$out/libexec" "$out/var" "$out/share/applications" "$out/
 # Nothing QEMU installs under lib/ is needed at run time; bundle_libs fills it with what is.
 rm -rf "$out/lib"
 
-exe=""
-[ "$os" = windows ] && exe=".exe"
 binaries="$out/bin/qemu-system-x86_64$exe $out/bin/qemu-system-aarch64$exe"
 
 # Copy every shared library the binaries load from the build environment into the bundle, so it runs anywhere.
