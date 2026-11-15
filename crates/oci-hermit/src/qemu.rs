@@ -26,14 +26,33 @@ pub fn firmware_dir(bundle: &Path) -> PathBuf {
 }
 
 /// A guest CPU architecture, and so one of the two emulators in the bundle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum GuestArch {
+    #[value(name = "x86_64")]
     X86_64,
+    #[value(name = "aarch64")]
     Aarch64,
 }
 
 impl GuestArch {
     pub const ALL: [GuestArch; 2] = [GuestArch::X86_64, GuestArch::Aarch64];
+
+    /// The architecture's usual name: `x86_64` or `aarch64`.
+    pub fn name(self) -> &'static str {
+        match self {
+            GuestArch::X86_64 => "x86_64",
+            GuestArch::Aarch64 => "aarch64",
+        }
+    }
+
+    /// The host's own CPU architecture, if it is one of the two guest architectures.
+    pub fn host() -> Option<GuestArch> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some(GuestArch::X86_64),
+            "aarch64" => Some(GuestArch::Aarch64),
+            _ => None,
+        }
+    }
 
     /// The emulator's file name on this host.
     pub fn binary_name(self) -> String {
@@ -86,17 +105,22 @@ impl std::error::Error for QemuError {}
 
 /// The directories searched for a bundle, in order: the override, then the install layouts beside the executable.
 pub fn candidates(override_dir: Option<OsString>, exe: &Path) -> Vec<PathBuf> {
+    install_dirs(override_dir, exe, "qemu")
+}
+
+/// Where a part of oci-hermit named `leaf` (`qemu`, `guest`) is looked for: the override, then a prefix install
+/// (conda, pixi global: `<prefix>/bin/oci-hermit` and `<prefix>/libexec/oci-hermit/<leaf>`), then an unpacked
+/// release archive (`oci-hermit` beside a `<leaf>/` directory).
+pub fn install_dirs(override_dir: Option<OsString>, exe: &Path, leaf: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = override_dir.filter(|d| !d.is_empty()) {
         dirs.push(PathBuf::from(dir));
     }
     if let Some(bin) = exe.parent() {
-        // A prefix install (conda, pixi global): <prefix>/bin/oci-hermit and <prefix>/libexec/oci-hermit/qemu.
         if let Some(prefix) = bin.parent() {
-            dirs.push(prefix.join("libexec").join("oci-hermit").join("qemu"));
+            dirs.push(prefix.join("libexec").join("oci-hermit").join(leaf));
         }
-        // An unpacked release archive: oci-hermit beside a qemu/ directory.
-        dirs.push(bin.join("qemu"));
+        dirs.push(bin.join(leaf));
     }
     dirs
 }
@@ -212,13 +236,20 @@ pub(crate) mod testing {
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Shell scripts standing in for both emulators, answering `--version` and `-accel help`.
+    /// Shell scripts standing in for both emulators. They answer `--version` and `-accel help`; launched as a
+    /// sandbox, they write the agent's ready line to the console log named by `-chardev` and keep running.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        let ready = hermit_proto::CONSOLE_READY;
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version_line}'; \
-             else printf 'Accelerators supported in QEMU binary:\\n{accels}\\n'; fi\n"
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             --version) echo '{version_line}' ;;\n\
+             -accel) printf 'Accelerators supported in QEMU binary:\\n{accels}\\n' ;;\n\
+             *) for a in \"$@\"; do case \"$a\" in file,id=console,path=*) \
+             echo '{ready} 0.1)' >> \"${{a#file,id=console,path=}}\" ;; esac; done; sleep 30 ;;\n\
+             esac\n"
         );
         for arch in GuestArch::ALL {
             let path = dir.join("bin").join(arch.binary_name());

@@ -83,3 +83,10 @@ The design behind all of this is in [docs/design.md](docs/design.md).
 - User documentation
 - Optional `ohm` short alias
 - pixi-oci integration for build-then-smoke-test
+
+## Later: needs design
+
+Ideas beyond M7 that need a design decision before any work starts, tracked in the
+[Later: needs design](https://github.com/millsks/oci-hermit/milestone/9) milestone.
+
+- Build images from a Containerfile with a build-time network policy (#50)

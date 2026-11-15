@@ -283,6 +283,10 @@ mod tests {
         assert_eq!(mounts.len(), EARLY_MOUNTS.len());
         assert_eq!(sys.calls[0], "block");
         assert!(log.contains("ready (control protocol 0.1)"));
+        assert!(
+            log.contains(hermit_proto::CONSOLE_READY),
+            "the host waits for this line: {log}"
+        );
         assert!(log.contains("received SIGTERM, shutting down"));
         assert!(log.lines().all(|l| l.starts_with("hermit-agent: ")));
         assert!(ends_with_power_off(&sys.calls));

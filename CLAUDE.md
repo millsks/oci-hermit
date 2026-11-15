@@ -11,6 +11,10 @@ no admin, no hypervisor and no WSL.
 | Path | What it is |
 |---|---|
 | `crates/oci-hermit` | host tool and CLI (clap), Docker/Podman-style commands |
+| `crates/oci-hermit/src/qemu.rs` | finds and verifies the bundled QEMU (`$OCI_HERMIT_QEMU_DIR`, then install layouts) |
+| `crates/oci-hermit/src/guest.rs` | finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`) |
+| `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
+| `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
 | `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
 | `crates/hermit-proto` | control protocol shared by host and agent (newline-delimited JSON over virtio-serial) |
 | `docs/design.md` | architecture, networking, mounts, security model |
@@ -45,5 +49,9 @@ Everything runs through pixi.
 - QEMU is GPL-2.0: it ships as a separate helper process and is never linked into a crate. `deny.toml` keeps GPL
   crates out.
 - No `unsafe` in host-side crates (`unsafe_code = "deny"` in the workspace lints).
+- QEMU's `-run-with exit-with-parent=on` exists only on POSIX hosts; passing `-run-with` on Windows stops QEMU from
+  starting. Windows ties QEMU's lifetime to oci-hermit with a kill-on-close Job Object (`win32job`) instead.
+- The x86_64 guest CPU model (`supervisor::X86_64_CPU`) is not settled: the static agent needs AVX and does not yet
+  start under microvm (#54). CI boots a whole sandbox on aarch64 only until that is fixed.
 - The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
   children inherit that mask, so anything it spawns must reset the signal mask before exec.

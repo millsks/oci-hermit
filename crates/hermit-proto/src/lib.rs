@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 /// Protocol version. Host and agent refuse to talk if the major versions differ.
 pub const PROTOCOL_VERSION: (u16, u16) = (0, 1);
 
+/// What the agent prints on the guest console once the guest is set up and it is waiting for the host. The host
+/// watches the console for it until the control channel exists (#10).
+pub const CONSOLE_READY: &str = "hermit-agent: ready (control protocol";
+
 /// Messages sent from the host tool to the guest agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
