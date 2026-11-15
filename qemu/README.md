@@ -38,7 +38,8 @@ bin/qemu-system-x86_64[.exe]
 bin/qemu-system-aarch64[.exe]
 bin/*.dll                 Windows: the DLLs QEMU loads
 lib/                      Linux and macOS: the shared libraries QEMU loads, found through its rpath
-share/qemu/bios-microvm.bin
+share/qemu/bios-microvm.bin   microvm's SeaBIOS
+share/qemu/linuxboot_dma.bin  the option ROM SeaBIOS needs to boot a -kernel bzImage
 BUNDLE.txt                version, tarball sha256, marker, host
 ```
 

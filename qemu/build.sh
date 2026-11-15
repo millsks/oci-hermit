@@ -16,7 +16,7 @@ set -euo pipefail
 QEMU_VERSION=11.1.3
 QEMU_SHA256=5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
 # Bump when the configuration or bundling changes without a new QEMU release. The host tool checks this marker.
-BUNDLE_REVISION=1
+BUNDLE_REVISION=2
 PKGVERSION="oci-hermit-qemu-${BUNDLE_REVISION}"
 
 out=${1:?usage: qemu/build.sh <out-dir> [work-dir]}
@@ -108,18 +108,22 @@ fi
 echo "installed:"
 find "$out" -maxdepth 2 | sed "s|^$out|  .|"
 
-# Keep only the firmware oci-hermit boots: qboot for x86 microvm. aarch64 `virt` boots the kernel directly.
+# Keep only the firmware oci-hermit boots: microvm's SeaBIOS (bios-microvm.bin) and the option ROM it needs to boot a
+# -kernel bzImage (linuxboot_dma.bin). aarch64 `virt` boots the kernel directly.
 # Linux and macOS install firmware to share/qemu/, Windows to share/ itself; either way it ends up in share/qemu/.
-keep="bios-microvm.bin"
-found=$(find "$out/share" -name "$keep" | head -n 1)
-if [ -z "$found" ]; then
-  echo "make install produced no $keep under $out/share" >&2
-  exit 1
-fi
-mv "$found" "$work/$keep"
+keep="bios-microvm.bin linuxboot_dma.bin"
+mkdir -p "$work/firmware"
+for file in $keep; do
+  found=$(find "$out/share" -name "$file" | head -n 1)
+  if [ -z "$found" ]; then
+    echo "make install produced no $file under $out/share" >&2
+    exit 1
+  fi
+  mv "$found" "$work/firmware/$file"
+done
 rm -rf "$out/share"
 mkdir -p "$out/share/qemu"
-mv "$work/$keep" "$out/share/qemu/$keep"
+for file in $keep; do mv "$work/firmware/$file" "$out/share/qemu/$file"; done
 rm -rf "$out/include" "$out/libexec" "$out/var"
 # Nothing QEMU installs under lib/ is needed at run time; bundle_libs fills it with what is.
 rm -rf "$out/lib"
