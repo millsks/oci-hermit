@@ -200,6 +200,15 @@ pub(crate) mod testing {
         dir
     }
 
+    /// Held by every test that writes and then runs a fake emulator. On Linux, executing a script fails with
+    /// ETXTBSY while another thread's freshly forked child still holds it open for writing, so those tests run one
+    /// at a time.
+    #[cfg(unix)]
+    pub(crate) fn exec_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Shell scripts standing in for both emulators, answering `--version` and `-accel help`.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
@@ -298,7 +307,7 @@ mod tests {
     #[cfg(unix)]
     mod fake {
         use super::*;
-        use crate::qemu::testing::fake_bundle;
+        use crate::qemu::testing::{exec_lock, fake_bundle};
         use std::os::unix::fs::PermissionsExt;
 
         fn fake_qemu(name: &str, version_line: &str, accels: &str) -> PathBuf {
@@ -307,6 +316,7 @@ mod tests {
 
         #[test]
         fn accepts_the_bundled_build() {
+            let _guard = exec_lock();
             let dir = fake_qemu("ok", "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "tcg");
             let emulator = verify(&dir, GuestArch::X86_64).unwrap();
             assert_eq!(emulator.version.version, QEMU_VERSION);
@@ -315,6 +325,7 @@ mod tests {
 
         #[test]
         fn refuses_another_build_of_the_same_release() {
+            let _guard = exec_lock();
             let dir = fake_qemu("distro", "QEMU emulator version 11.1.3 (Debian 1:11.1.3+ds-1)", "tcg");
             assert!(matches!(
                 verify(&dir, GuestArch::X86_64),
@@ -324,12 +335,14 @@ mod tests {
 
         #[test]
         fn refuses_a_build_without_tcg() {
+            let _guard = exec_lock();
             let dir = fake_qemu("notcg", "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "kvm");
             assert!(matches!(verify(&dir, GuestArch::X86_64), Err(QemuError::NoTcg { .. })));
         }
 
         #[test]
         fn refuses_a_bundle_without_microvm_firmware() {
+            let _guard = exec_lock();
             let dir = fake_qemu("nofw", "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "tcg");
             std::fs::remove_file(firmware_dir(&dir).join(MICROVM_FIRMWARE)).unwrap();
             let err = verify(&dir, GuestArch::X86_64).unwrap_err();
@@ -339,6 +352,7 @@ mod tests {
 
         #[test]
         fn reports_a_missing_or_failing_binary() {
+            let _guard = exec_lock();
             let dir = scratch("absent");
             let firmware = firmware_dir(&dir);
             std::fs::create_dir_all(&firmware).unwrap();

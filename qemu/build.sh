@@ -49,36 +49,34 @@ fi
 src="$work/qemu-${QEMU_VERSION}"
 build="$work/build"
 stamp="$build/.oci-hermit-stamp"
-# A build directory configured for this exact version and revision is reused, so iterating on bundling does not
+
+# Everything off except what a sealed, headless, software-emulated sandbox needs: TCG (built in), user-mode
+# networking (slirp), and the device tree the aarch64 `virt` machine boots with (libfdt from the build
+# environment: the release tarball does not include the dtc subproject). No hypervisor accelerators, display,
+# audio, USB, tools, docs or guest agent. --disable-download keeps meson from fetching anything at build time.
+configure_flags="--prefix=/ --target-list=x86_64-softmmu,aarch64-softmmu --without-default-features \
+--enable-slirp --enable-fdt=system --disable-download --disable-docs --disable-tools --disable-guest-agent \
+--disable-werror"
+
+# A build directory configured with exactly these sources and flags is reused, so iterating on bundling does not
 # recompile QEMU. Anything else starts from a clean tree.
+want="$QEMU_VERSION $PKGVERSION $configure_flags"
 fresh=1
-[ -f "$stamp" ] && [ "$(cat "$stamp")" = "$QEMU_VERSION $PKGVERSION" ] && fresh=0
+[ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && fresh=0
 if [ "$fresh" = 1 ]; then
   rm -rf "$src" "$build"
-  # roms/ (firmware sources) and tests/lcitool/ (upstream CI) are never built here, and their symlinks cannot be
-  # created on Windows without developer mode.
-  tar -xJf "$tarball" -C "$work" --exclude="qemu-${QEMU_VERSION}/roms" --exclude="qemu-${QEMU_VERSION}/tests/lcitool"
+  # roms/ (firmware sources) and tests/lcitool/libvirt-ci/ (upstream CI) are never built here, and their
+  # symlinks cannot be created on Windows without developer mode. tests/lcitool/ itself stays: the Makefile
+  # includes it.
+  tar -xJf "$tarball" -C "$work" \
+    --exclude="qemu-${QEMU_VERSION}/roms" --exclude="qemu-${QEMU_VERSION}/tests/lcitool/libvirt-ci"
   mkdir -p "$build"
+  cd "$build"
+  # shellcheck disable=SC2086 # the flags are meant to split into words
+  "$src/configure" $configure_flags --with-pkgversion="$PKGVERSION"
+  echo "$want" > "$stamp"
 fi
 cd "$build"
-
-if [ "$fresh" = 1 ]; then
-  # Everything off except what a sealed, headless, software-emulated sandbox needs: TCG (built in), user-mode
-  # networking (slirp), and the device tree the aarch64 `virt` machine boots with. No hypervisor accelerators,
-  # display, audio, USB, tools, docs or guest agent.
-  "$src/configure" \
-    --prefix=/ \
-    --target-list=x86_64-softmmu,aarch64-softmmu \
-    --without-default-features \
-    --enable-slirp \
-    --enable-fdt=internal \
-    --disable-docs \
-    --disable-tools \
-    --disable-guest-agent \
-    --disable-werror \
-    --with-pkgversion="$PKGVERSION"
-  echo "$QEMU_VERSION $PKGVERSION" > "$stamp"
-fi
 
 make -j"$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4)"
 
@@ -93,7 +91,7 @@ if [ -d "$firmware" ]; then
   find "$firmware" -mindepth 1 -maxdepth 1 ! -name "$keep" -exec rm -rf {} +
 fi
 rm -rf "$out/include" "$out/libexec" "$out/var" "$out/share/applications" "$out/share/icons" "$out/share/man"
-# The internal libfdt installs a static library and pkg-config file; QEMU is already linked against them.
+# Nothing QEMU installs under lib/ is needed at run time; bundle_libs fills it with what is.
 rm -rf "$out/lib"
 
 exe=""

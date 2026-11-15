@@ -11,7 +11,8 @@ with:
 
 - targets `x86_64-softmmu` and `aarch64-softmmu` only
 - `--without-default-features`: no KVM, HVF, WHPX or Xen, no display, audio, USB, tools, docs or guest agent
-- user-mode networking (libslirp) and the internal device-tree library
+- user-mode networking (libslirp) and libfdt from the build environment, with `--disable-download` so nothing is
+  fetched at build time
 - the version marker `--with-pkgversion=oci-hermit-qemu-<revision>`
 
 The host tool refuses any QEMU whose `--version` does not report exactly `11.1.3 (oci-hermit-qemu-<revision>)`, or
@@ -24,7 +25,7 @@ that has no TCG accelerator (`crates/oci-hermit/src/qemu.rs`). Changing the conf
 | --- | --- | --- |
 | linux-64, linux-aarch64 | GitHub-hosted Ubuntu runners | conda-forge, via `pixi run -e qemu-build` |
 | osx-arm64, osx-64 | GitHub-hosted macOS runners | conda-forge, via `pixi run -e qemu-build` |
-| win-64 | GitHub-hosted Windows runner | MSYS2 UCRT64 (conda-forge has no libslirp for win-64, and QEMU does not build with MSVC) |
+| win-64 | GitHub-hosted Windows runner | MSYS2 UCRT64 (conda-forge has no libslirp for win-64, and QEMU does not build with MSVC), plus `qemu.qmp==0.0.6` from PyPI, which MSYS2 does not package |
 
 `.github/workflows/qemu.yml` builds all five, checks each with `oci-hermit machine info`, and uploads them as
 artifacts. Release packaging and signing come later (#39, #40, #41).

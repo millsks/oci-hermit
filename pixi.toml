@@ -56,12 +56,19 @@ platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
 
 [feature.qemu-build.dependencies]
 c-compiler = "*"
+# libfdt, for the aarch64 `virt` machine's device tree.
+dtc = ">=1.6"
 glib = ">=2.66"
 libslirp = ">=4.7"
 meson = ">=1.5"
 ninja = "*"
 pkg-config = "*"
 python = "3.14.*"
+# configure's Python venv; with --disable-download it must find these instead of fetching them from PyPI.
+"qemu.qmp" = "==0.0.6"
+setuptools = "*"
+wheel = "*"
+pip = "*"
 make = "*"
 # QEMU requires zlib; without it in the environment meson falls back to the host's /usr/include.
 zlib = "*"

@@ -100,8 +100,9 @@ mod tests {
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
     }
 
-    fn no_qemu() -> Env {
-        let dir = qemu::testing::scratch("main-none");
+    /// An environment with no QEMU bundle anywhere; `name` keeps each test's scratch directory its own.
+    fn no_qemu(name: &str) -> Env {
+        let dir = qemu::testing::scratch(name);
         Env {
             qemu_dir: Some(dir.clone().into()),
             exe: dir.join("bin").join("oci-hermit"),
@@ -110,7 +111,7 @@ mod tests {
 
     #[test]
     fn version_prints_crate_and_protocol_versions() {
-        let (code, out, err) = run_with(&no_qemu(), &["version"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
         assert!(out.contains("control protocol 0.1"));
@@ -119,7 +120,7 @@ mod tests {
 
     #[test]
     fn stub_commands_exit_not_implemented() {
-        let (code, out, err) = run_with(&no_qemu(), &["run", "-it", "alpine", "sh"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["run", "-it", "alpine", "sh"]);
         assert_eq!(code, NOT_IMPLEMENTED);
         assert!(out.is_empty());
         assert!(err.contains("`run` is not implemented yet"));
@@ -128,7 +129,7 @@ mod tests {
 
     #[test]
     fn machine_info_without_a_bundle_fails() {
-        let (code, out, err) = run_with(&no_qemu(), &["machine", "info"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-3"), &["machine", "info"]);
         assert_eq!(code, 1);
         assert!(out.is_empty());
         assert!(err.contains("no bundled QEMU found"));
@@ -137,6 +138,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn machine_info_reports_both_emulators() {
+        let _guard = qemu::testing::exec_lock();
         let dir = qemu::testing::scratch("main-ok");
         qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "tcg");
         let env = Env {
@@ -153,6 +155,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn machine_info_refuses_a_foreign_qemu() {
+        let _guard = qemu::testing::exec_lock();
         let dir = qemu::testing::scratch("main-foreign");
         qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (Homebrew)", "tcg");
         let env = Env {
