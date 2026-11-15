@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# pixi
+.pixi/
+*.egg-info/
+
+# Guest build artifacts
+/guest/out/
+*.erofs
+*.qcow2
+vmlinux*
+bzImage*
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
