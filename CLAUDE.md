@@ -51,7 +51,10 @@ Everything runs through pixi.
 - No `unsafe` in host-side crates (`unsafe_code = "deny"` in the workspace lints).
 - QEMU's `-run-with exit-with-parent=on` exists only on POSIX hosts; passing `-run-with` on Windows stops QEMU from
   starting. Windows ties QEMU's lifetime to oci-hermit with a kill-on-close Job Object (`win32job`) instead.
-- The x86_64 guest CPU model (`supervisor::X86_64_CPU`) is not settled: the static agent needs AVX and does not yet
-  start under microvm (#54). CI boots a whole sandbox on aarch64 only until that is fixed.
+- The x86_64 guest needs an x86-64-v3 CPU model (`supervisor::X86_64_CPU`): the agent's static glibc uses AVX in
+  `init_cpu_features`, so `qemu64` dies with SIGILL before any of our code runs.
+- The x86_64 kernel needs `CONFIG_PCI=y` although microvm has no PCI bus: without it ACPI fails to load, and the
+  serial console, RTC and virtio-mmio devices all break. Userspace console writes then fail with EIO while the
+  kernel's own messages still appear, which looks like a hang (#54).
 - The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
   children inherit that mask, so anything it spawns must reset the signal mask before exec.

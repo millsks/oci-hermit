@@ -74,12 +74,9 @@ jobs:
         run: |
           image=$(sed -n 's/^image=//p' "guest/out/${{ matrix.arch }}/BUNDLE.txt")
           bash guest/kernel/boot-test.sh "${{ matrix.arch }}" qemu/out "guest/out/${{ matrix.arch }}/$image" 180
-      # The x86_64 agent does not start under microvm yet (#54); until it does, only aarch64 boots a whole sandbox.
       - name: Build the guest agent
-        if: matrix.arch == 'aarch64'
         run: pixi run -e agent agent-build
       - name: Boot a sandbox through the supervisor
-        if: matrix.arch == 'aarch64'
         env:
           OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}/qemu/out
           OCI_HERMIT_GUEST_DIR: ${{ github.workspace }}/guest/out/sandbox
@@ -92,7 +89,7 @@ jobs:
           cp "target/$arch-unknown-linux-gnu/release/hermit-agent" "guest/out/sandbox/$arch/hermit-agent"
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
       - name: Show the sandbox console
-        if: ${{ !cancelled() && matrix.arch == 'aarch64' }}
+        if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true
       # Also when the boot test fails, so the kernel can be booted and debugged elsewhere.
       - if: ${{ !cancelled() && (steps.kernel.outcome == 'success' || steps.kernel-cache.outputs.cache-hit == 'true') }}

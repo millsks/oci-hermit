@@ -15,9 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The x86_64 guest CPU model. `qemu64` lacks the AVX the static agent's startup code uses; whether `max` is the
-/// right model is settled in #54.
-pub const X86_64_CPU: &str = "max";
+/// The x86_64 guest CPU model. The agent's static glibc needs x86-64-v3 (its `init_cpu_features` uses AVX, so
+/// `qemu64` dies with SIGILL), and this QEMU has no `x86-64-v3` model: Haswell-v4 is that level with a fixed feature
+/// set, unlike `max`. The four features TCG cannot emulate are turned off so QEMU does not warn about them (#54).
+pub const X86_64_CPU: &str = "Haswell-v4,pcid=off,tsc-deadline=off,invpcid=off,spec-ctrl=off";
 /// The aarch64 guest CPU model.
 pub const AARCH64_CPU: &str = "max";
 

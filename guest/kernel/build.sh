@@ -17,7 +17,7 @@ KERNEL_VERSION=6.18.63
 KERNEL_SHA256=81764a545072d160748beff4d9de2e7d95aa9f16e8261110288f067a2cc61d71
 # Bump when the configuration or build changes without a new kernel release. It ends up in the kernel release
 # string (uname -r) as -oci-hermit-<revision>.
-KERNEL_REVISION=1
+KERNEL_REVISION=2
 
 here=$(cd "$(dirname "$0")" && pwd)
 arch=${1:-$(uname -m)}
