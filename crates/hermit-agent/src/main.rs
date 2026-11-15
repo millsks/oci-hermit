@@ -1,52 +1,56 @@
 //! oci-hermit guest agent.
 //!
-//! Runs as PID 1 inside the sandbox VM. It will mount the layer disks and 9P
-//! shares, start containers with crun, and answer the host tool over the
-//! control channel. The real agent lands in milestone M1.
+//! Runs as PID 1 inside the sandbox VM: mounts the early filesystems, logs to the console, reaps children and
+//! powers off cleanly. Anywhere else (not PID 1, or not Linux) it refuses to start.
 
 use std::io::Write;
 use std::process::ExitCode;
 
+#[cfg(any(target_os = "linux", test))]
+mod init;
+#[cfg(target_os = "linux")]
+mod linux;
+
 fn main() -> ExitCode {
-    ExitCode::from(run(
-        cfg!(target_os = "linux"),
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
-    ))
+    #[cfg(target_os = "linux")]
+    if linux::is_pid1() {
+        linux::run_as_init();
+    }
+    ExitCode::from(refuse(cfg!(target_os = "linux"), &mut std::io::stderr()))
 }
 
-/// Run the agent, refusing to start outside a Linux guest, and return its exit code.
-fn run(on_linux: bool, out: &mut impl Write, err: &mut impl Write) -> u8 {
-    if !on_linux {
-        let _ = writeln!(err, "hermit-agent runs only inside the Linux guest VM");
-        return 1;
-    }
-    let (major, minor) = hermit_proto::PROTOCOL_VERSION;
+/// Explain why the agent will not start here, and return its exit code.
+fn refuse(on_linux: bool, err: &mut impl Write) -> u8 {
+    let reason = if on_linux {
+        "must run as PID 1 inside the Linux guest VM"
+    } else {
+        "runs only inside the Linux guest VM"
+    };
     let _ = writeln!(
-        out,
-        "hermit-agent {} (control protocol {major}.{minor}): not implemented yet",
+        err,
+        "hermit-agent {}: {reason}; refusing to start",
         env!("CARGO_PKG_VERSION")
     );
-    0
+    1
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn refuses_to_run_outside_linux() {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(run(false, &mut out, &mut err), 1);
-        assert!(out.is_empty());
-        assert!(String::from_utf8(err).unwrap().contains("only inside the Linux guest"));
+    fn refusal(on_linux: bool) -> String {
+        let mut err = Vec::new();
+        assert_eq!(refuse(on_linux, &mut err), 1);
+        String::from_utf8(err).unwrap()
     }
 
     #[test]
-    fn reports_its_version_on_linux() {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(run(true, &mut out, &mut err), 0);
-        assert!(String::from_utf8(out).unwrap().contains("control protocol 0.1"));
-        assert!(err.is_empty());
+    fn refuses_outside_linux() {
+        assert!(refusal(false).contains("only inside the Linux guest"));
+    }
+
+    #[test]
+    fn refuses_when_not_pid1() {
+        assert!(refusal(true).contains("must run as PID 1"));
     }
 }
