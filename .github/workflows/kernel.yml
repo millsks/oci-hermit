@@ -1,0 +1,66 @@
+name: Guest kernel
+
+# Builds the guest kernel (guest/kernel/build.sh) natively for each architecture and boot-tests it under the bundled
+# QEMU, built here the same way qemu.yml builds it. Runs when the kernel, its build environment or the QEMU build
+# changes, on main, and by hand.
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - guest/kernel/**
+      - qemu/**
+      - pixi.toml
+      - pixi.lock
+      - .github/workflows/kernel.yml
+  pull_request:
+    paths:
+      - guest/kernel/**
+      - qemu/**
+      - pixi.toml
+      - pixi.lock
+      - .github/workflows/kernel.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    name: Build and boot (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          environments: kernel-build qemu-build
+          cache: true
+      - name: Cache the QEMU bundle
+        id: qemu-cache
+        uses: actions/cache@v6
+        with:
+          path: qemu/out
+          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'pixi.lock') }}
+      - name: Build the QEMU bundle
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        run: pixi run -e qemu-build qemu-build
+      - name: Build the kernel
+        run: pixi run -e kernel-build kernel-build "${{ matrix.arch }}" "guest/out/${{ matrix.arch }}"
+      - name: Boot test
+        run: |
+          image=$(sed -n 's/^image=//p' "guest/out/${{ matrix.arch }}/BUNDLE.txt")
+          bash guest/kernel/boot-test.sh "${{ matrix.arch }}" qemu/out "guest/out/${{ matrix.arch }}/$image" 600
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oci-hermit-kernel-${{ matrix.arch }}
+          path: guest/out/${{ matrix.arch }}
+          retention-days: 14

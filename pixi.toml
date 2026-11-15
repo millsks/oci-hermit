@@ -79,6 +79,31 @@ patchelf = "*"
 [feature.qemu-build.tasks]
 qemu-build = "bash qemu/build.sh qemu/out"
 
+# Build dependencies for the guest kernel (guest/kernel/build.sh). Kernels build natively on Linux only.
+[feature.kernel-build]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.kernel-build.dependencies]
+# gcc and binutils under target-prefixed names; build.sh passes the prefix as CROSS_COMPILE.
+c-compiler = "*"
+make = "*"
+flex = "*"
+bison = "*"
+bc = "*"
+perl = "*"
+gawk = "*"
+# libelf, for objtool on x86-64.
+elfutils = "*"
+pkg-config = "*"
+# Kernel image compression (zstd) and the built-in initramfs (gzip); xz unpacks the tarball.
+zstd = "*"
+gzip = "*"
+xz = "*"
+
+[feature.kernel-build.tasks]
+# Arguments pass through: `pixi run -e kernel-build kernel-build [arch] [out-dir]`.
+kernel-build = "bash guest/kernel/build.sh"
+
 [feature.dev.tasks]
 ci = { depends-on = ["pre-commit-run", "build", "check", "lint", "cov"] }
 
@@ -87,3 +112,4 @@ default = ["lint", "cov", "dev"]
 lint = { features = ["lint"], no-default-feature = true }
 msrv = { features = ["msrv"], no-default-feature = true }
 qemu-build = { features = ["qemu-build"], no-default-feature = true }
+kernel-build = { features = ["kernel-build"], no-default-feature = true }
