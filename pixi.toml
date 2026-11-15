@@ -49,6 +49,27 @@ cargo-llvm-cov = "*"
 [feature.cov.tasks]
 cov = "cargo llvm-cov --workspace --all-targets --fail-under-lines 90"
 
+# Build dependencies for the bundled QEMU (qemu/build.sh). Windows builds in MSYS2 instead: conda-forge has no
+# libslirp for win-64, and QEMU does not build with MSVC.
+[feature.qemu-build]
+platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
+
+[feature.qemu-build.dependencies]
+c-compiler = "*"
+glib = ">=2.66"
+libslirp = ">=4.7"
+meson = ">=1.5"
+ninja = "*"
+pkg-config = "*"
+python = "3.14.*"
+make = "*"
+
+[feature.qemu-build.target.linux.dependencies]
+patchelf = "*"
+
+[feature.qemu-build.tasks]
+qemu-build = "bash qemu/build.sh qemu/out"
+
 [feature.dev.tasks]
 ci = { depends-on = ["pre-commit-run", "build", "check", "lint", "cov"] }
 
@@ -56,3 +77,4 @@ ci = { depends-on = ["pre-commit-run", "build", "check", "lint", "cov"] }
 default = ["lint", "cov", "dev"]
 lint = { features = ["lint"], no-default-feature = true }
 msrv = { features = ["msrv"], no-default-feature = true }
+qemu-build = { features = ["qemu-build"], no-default-feature = true }
