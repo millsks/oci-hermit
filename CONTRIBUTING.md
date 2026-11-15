@@ -4,13 +4,16 @@ Thanks for helping build oci-hermit. The project is early, so the [roadmap](ROAD
 
 ## Development setup
 
+Run `pixi run bootstrap` once per clone to install the pre-commit and commit-msg hooks.
+
 The development environment is managed with [pixi](https://pixi.sh), which provides the Rust toolchain from conda-forge.
 
 ```bash
 pixi run build      # cargo build --workspace
 pixi run test       # cargo test --workspace
 pixi run fmt        # format
-pixi run check      # format check, clippy and tests, as CI runs them
+pixi run lint       # clippy -D warnings
+pixi run ci         # the full gate: pre-commit, build, check, clippy, coverage >= 90%
 ```
 
 Plain `cargo` works too if you already have a recent stable Rust.

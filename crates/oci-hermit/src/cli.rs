@@ -230,17 +230,34 @@ mod tests {
     }
 
     #[test]
+    fn every_command_reports_its_own_name() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["pull", "alpine"], "pull"),
+            (&["load", "-i", "app.tar"], "load"),
+            (&["images"], "images"),
+            (&["rmi", "alpine"], "rmi"),
+            (&["inspect", "web"], "inspect"),
+            (&["run", "alpine"], "run"),
+            (&["exec", "web", "sh"], "exec"),
+            (&["logs", "-f", "web"], "logs"),
+            (&["ps", "-a"], "ps"),
+            (&["stop", "web"], "stop"),
+            (&["rm", "web"], "rm"),
+            (&["cp", "web:/a", "."], "cp"),
+            (&["pod", "ps"], "pod"),
+            (&["compose", "up", "-d"], "compose"),
+            (&["machine", "info"], "machine"),
+            (&["version"], "version"),
+        ];
+        for (args, name) in cases {
+            let cli = Cli::try_parse_from(std::iter::once("oci-hermit").chain(args.iter().copied())).unwrap();
+            assert_eq!(cli.command.name(), *name, "for {args:?}");
+        }
+    }
+
+    #[test]
     fn pod_create_parses() {
-        let cli = Cli::try_parse_from([
-            "oci-hermit",
-            "pod",
-            "create",
-            "--name",
-            "shop",
-            "-p",
-            "8080:3000",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["oci-hermit", "pod", "create", "--name", "shop", "-p", "8080:3000"]).unwrap();
         assert_eq!(cli.command.name(), "pod");
     }
 }
