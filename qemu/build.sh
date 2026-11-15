@@ -52,11 +52,12 @@ stamp="$build/.oci-hermit-stamp"
 
 # Everything off except what a sealed, headless, software-emulated sandbox needs: TCG (built in), user-mode
 # networking (slirp), and the device tree the aarch64 `virt` machine boots with (libfdt from the build
-# environment: the release tarball does not include the dtc subproject). No hypervisor accelerators, display,
+# environment: the release tarball does not include the dtc subproject). bindir and datadir are explicit
+# because QEMU's Windows defaults put the executables at the top of the prefix. No hypervisor accelerators, display,
 # audio, USB, tools, docs or guest agent. --disable-download keeps meson from fetching anything at build time.
-configure_flags="--prefix=/ --target-list=x86_64-softmmu,aarch64-softmmu --without-default-features \
---enable-slirp --enable-fdt=system --disable-download --disable-docs --disable-tools --disable-guest-agent \
---disable-werror"
+configure_flags="--prefix=/ --bindir=bin --datadir=share --target-list=x86_64-softmmu,aarch64-softmmu \
+--without-default-features --enable-slirp --enable-fdt=system --disable-download --disable-docs --disable-tools \
+--disable-guest-agent --disable-werror"
 
 # A build directory configured with exactly these sources and flags is reused, so iterating on bundling does not
 # recompile QEMU. Anything else starts from a clean tree.
@@ -83,6 +84,8 @@ make -j"$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4)"
 rm -rf "$out"
 mkdir -p "$out"
 make install DESTDIR="$out" > /dev/null
+echo "installed:"
+find "$out" -maxdepth 2 | sed "s|^$out|  .|"
 
 # Keep only the firmware oci-hermit boots: qboot for x86 microvm. aarch64 `virt` boots the kernel directly.
 firmware="$out/share/qemu"
