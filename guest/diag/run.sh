@@ -40,4 +40,4 @@ wait "$pid" 2> /dev/null || true
 
 trap_line=$(grep -m1 -oE 'trap [a-z ]+ ip:[0-9a-f]+' "$log" || true)
 echo "RESULT $name cpu=$cpu: $result ${trap_line:+($trap_line)}${samples:+ samples:$samples}"
-grep -E 'hermit-agent|traps:|Kernel panic|Run /init' "$log" | head -8 | sed 's/^/  /' || true
+grep -E 'hermit-agent|traps:|Kernel panic|Run /init|exitcode' "$log" | head -8 | sed 's/^/  /' || true
