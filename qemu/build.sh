@@ -108,12 +108,18 @@ echo "installed:"
 find "$out" -maxdepth 2 | sed "s|^$out|  .|"
 
 # Keep only the firmware oci-hermit boots: qboot for x86 microvm. aarch64 `virt` boots the kernel directly.
-firmware="$out/share/qemu"
+# Linux and macOS install firmware to share/qemu/, Windows to share/ itself; either way it ends up in share/qemu/.
 keep="bios-microvm.bin"
-if [ -d "$firmware" ]; then
-  find "$firmware" -mindepth 1 -maxdepth 1 ! -name "$keep" -exec rm -rf {} +
+found=$(find "$out/share" -name "$keep" | head -n 1)
+if [ -z "$found" ]; then
+  echo "make install produced no $keep under $out/share" >&2
+  exit 1
 fi
-rm -rf "$out/include" "$out/libexec" "$out/var" "$out/share/applications" "$out/share/icons" "$out/share/man"
+mv "$found" "$work/$keep"
+rm -rf "$out/share"
+mkdir -p "$out/share/qemu"
+mv "$work/$keep" "$out/share/qemu/$keep"
+rm -rf "$out/include" "$out/libexec" "$out/var"
 # Nothing QEMU installs under lib/ is needed at run time; bundle_libs fills it with what is.
 rm -rf "$out/lib"
 
