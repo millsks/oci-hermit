@@ -140,7 +140,7 @@ mod tests {
     fn machine_info_reports_both_emulators() {
         let _guard = qemu::testing::exec_lock();
         let dir = qemu::testing::scratch("main-ok");
-        qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-1)", "tcg");
+        qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
         let env = Env {
             qemu_dir: Some(dir.clone().into()),
             exe: PathBuf::from("/nowhere/bin/oci-hermit"),
@@ -148,8 +148,8 @@ mod tests {
         let (code, out, err) = run_with(&env, &["machine", "info"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert!(out.contains(&format!("qemu bundle: {}", dir.display())));
-        assert!(out.contains("x86_64:  QEMU 11.1.3 (oci-hermit-qemu-1), accel tcg"));
-        assert!(out.contains("aarch64: QEMU 11.1.3 (oci-hermit-qemu-1), accel tcg"));
+        assert!(out.contains("x86_64:  QEMU 11.1.3 (oci-hermit-qemu-2), accel tcg"));
+        assert!(out.contains("aarch64: QEMU 11.1.3 (oci-hermit-qemu-2), accel tcg"));
     }
 
     #[cfg(unix)]
