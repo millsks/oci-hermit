@@ -102,7 +102,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 - 9P file server: serves bind-mounted folders and enforces the mount policy.
 - Port publisher: listens on 127.0.0.1 and relays connections into the guest.
 
-**Emulator (bundled QEMU, TCG mode).** A helper process launched by the host tool.
+**Emulator (bundled QEMU, TCG mode).** A helper process launched by the host tool. oci-hermit builds it itself, TCG-only, and refuses any other QEMU ([qemu/README.md](../qemu/README.md)).
 
 - `microvm` machine type, virtio devices only: block disks, one network card, serial channels, console.
 - Multi-threaded TCG so a sandbox can have several vCPUs.
@@ -251,7 +251,7 @@ No existing tool combines rootless, no-hypervisor, cross-platform and a Docker-s
 
 **Open questions**
 
-- [ ] Does conda-forge already build QEMU for Windows and macOS, or does the package need its own build?
+- [x] conda-forge has no system-emulation QEMU for macOS or Windows, so oci-hermit builds its own minimal one ([qemu/README.md](../qemu/README.md)).
 - [ ] Keep libslirp long-term, or move to the NIC-less relay design?
 - [x] Project name: oci-hermit (free on conda-forge, crates.io, PyPI, npm and GitHub as of 2026-11-15).
 - [ ] Signature verification: cosign, notation, or both?

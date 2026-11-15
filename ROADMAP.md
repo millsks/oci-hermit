@@ -78,6 +78,7 @@ The design behind all of this is in [docs/design.md](docs/design.md).
 - Code signing for Windows and macOS releases
 - Release pipeline with cross-builds and guest artifacts
 - conda-forge recipe, including how QEMU is provided
+- Optional single-file download with the QEMU bundle embedded
 - Image signature verification (cosign and/or notation)
 - User documentation
 - Optional `ohm` short alias

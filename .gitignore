@@ -31,3 +31,7 @@ triage-*.md
 *.swp
 .DS_Store
 Thumbs.db
+
+# Bundled QEMU builds (qemu/build.sh)
+/qemu/out/
+/qemu/work/
