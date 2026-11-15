@@ -1,2 +1,6 @@
 [files]
 extend-exclude = ["Cargo.lock", "pixi.lock"]
+
+[default.extend-identifiers]
+# PnP, as in the kernel log line "pnp: PnP ACPI: disabled"
+PnP = "PnP"
