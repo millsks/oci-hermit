@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(value_after(&args, "-machine"), "microvm");
         assert_eq!(value_after(&args, "-cpu"), X86_64_CPU);
         assert_eq!(value_after(&args, "-append"), "console=ttyS0 panic=-1");
-        assert_eq!(value_after(&args, "-L"), Path::new("/b/share/qemu").to_str().unwrap());
+        assert_eq!(Path::new(value_after(&args, "-L")), qemu::firmware_dir(Path::new("/b")));
         let (binary, args) = args_of(GuestArch::Aarch64, "/r/c");
         assert!(binary.ends_with(GuestArch::Aarch64.binary_name()));
         assert_eq!(value_after(&args, "-machine"), "virt");
