@@ -11,6 +11,7 @@ with:
 
 - targets `x86_64-softmmu` and `aarch64-softmmu` only
 - `--without-default-features`: no KVM, HVF, WHPX or Xen, no display, audio, USB, tools, docs or guest agent
+- no debug info, which with GCC (Linux, MinGW) tripled the bundle's size
 - user-mode networking (libslirp) and libfdt from the build environment, with `--disable-download` so nothing is
   fetched at build time
 - the version marker `--with-pkgversion=oci-hermit-qemu-<revision>`

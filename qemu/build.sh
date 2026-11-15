@@ -55,9 +55,10 @@ stamp="$build/.oci-hermit-stamp"
 # environment: the release tarball does not include the dtc subproject). bindir and datadir are explicit
 # because QEMU's Windows defaults put the executables at the top of the prefix. No hypervisor accelerators, display,
 # audio, USB, tools, docs or guest agent. --disable-download keeps meson from fetching anything at build time.
+# --disable-debug-info: with GCC (Linux, MinGW) the DWARF tripled the bundle's size.
 configure_flags="--prefix=/ --bindir=bin --datadir=share --target-list=x86_64-softmmu,aarch64-softmmu \
 --without-default-features --enable-slirp --enable-fdt=system --disable-download --disable-docs --disable-tools \
---disable-guest-agent --disable-werror"
+--disable-guest-agent --disable-debug-info --disable-werror"
 
 # A build directory configured with exactly these sources and flags is reused, so iterating on bundling does not
 # recompile QEMU. Anything else starts from a clean tree.
