@@ -9,6 +9,7 @@
 
 # Guest build artifacts
 /guest/out/
+/guest/work/
 *.erofs
 *.qcow2
 vmlinux*

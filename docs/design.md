@@ -108,7 +108,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 - Multi-threaded TCG so a sandbox can have several vCPUs.
 - Emulates x86-64 or arm64 guests on any host, so `--platform` works everywhere.
 
-**Guest kernel.** A minimal Linux kernel built by the project: virtio, overlayfs, EROFS, 9P, namespaces and cgroups. Nothing else.
+**Guest kernel.** A minimal Linux kernel built by the project: virtio, overlayfs, EROFS, 9P, namespaces and cgroups. Nothing else. It is the newest LTS release, configured from `tinyconfig` plus committed fragments; see [guest/README.md](../guest/README.md).
 
 **Guest agent (Rust, static, PID 1).**
 

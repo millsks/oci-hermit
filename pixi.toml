@@ -79,6 +79,31 @@ patchelf = "*"
 [feature.qemu-build.tasks]
 qemu-build = "bash qemu/build.sh qemu/out"
 
+# Build dependencies for the guest kernel (guest/kernel/build.sh). Kernels build natively on Linux only.
+[feature.kernel-build]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.kernel-build.dependencies]
+# gcc and binutils under target-prefixed names; build.sh passes the prefix as CROSS_COMPILE.
+c-compiler = "*"
+make = "*"
+flex = "*"
+bison = "*"
+bc = "*"
+perl = "*"
+gawk = "*"
+# libelf, for objtool on x86-64.
+elfutils = "*"
+pkg-config = "*"
+# Kernel image compression (zstd) and the built-in initramfs (gzip); xz unpacks the tarball.
+zstd = "*"
+gzip = "*"
+xz = "*"
+
+[feature.kernel-build.tasks]
+# Arguments pass through: `pixi run -e kernel-build kernel-build [arch] [out-dir]`.
+kernel-build = "bash guest/kernel/build.sh"
+
 # The static guest agent (`pixi run -e agent agent-build`), built natively on each Linux architecture. conda-forge
 # ships no musl Rust std, so it is a static glibc binary: crt-static, linked by the environment's `cc` (conda-forge
 # gcc) against conda-forge's 2.39 sysroot. Non-PIE (relocation-model=static): a static-pie build segfaults at startup.
@@ -107,4 +132,5 @@ default = ["lint", "cov", "dev"]
 lint = { features = ["lint"], no-default-feature = true }
 msrv = { features = ["msrv"], no-default-feature = true }
 qemu-build = { features = ["qemu-build"], no-default-feature = true }
+kernel-build = { features = ["kernel-build"], no-default-feature = true }
 agent = ["agent"]
