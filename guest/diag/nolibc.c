@@ -25,7 +25,7 @@ static long syscall5(long number, long a, long b, long c, long d, long e) {
 static const char message[] = "hermit-agent: ready (control protocol 0.1) probe=nolibc\n";
 static const char direct[] = "hermit-agent: ready (control protocol 0.1) probe=nolibc-direct-ttyS0\n";
 
-void _start(void) {
+__attribute__((force_align_arg_pointer)) void _start(void) {
     long len = sizeof message - 1;
     long wrote = syscall5(1, 1, (long)message, len, 0, 0); /* write(1, ...) */
 #ifdef EXIT_AFTER_WRITE
