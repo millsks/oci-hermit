@@ -54,12 +54,15 @@ jobs:
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: pixi run -e qemu-build qemu-build
       - name: Build the kernel
+        id: kernel
         run: pixi run -e kernel-build kernel-build "${{ matrix.arch }}" "guest/out/${{ matrix.arch }}"
       - name: Boot test
         run: |
           image=$(sed -n 's/^image=//p' "guest/out/${{ matrix.arch }}/BUNDLE.txt")
-          bash guest/kernel/boot-test.sh "${{ matrix.arch }}" qemu/out "guest/out/${{ matrix.arch }}/$image" 600
-      - uses: actions/upload-artifact@v7
+          bash guest/kernel/boot-test.sh "${{ matrix.arch }}" qemu/out "guest/out/${{ matrix.arch }}/$image" 180
+      # Also when the boot test fails, so the kernel can be booted and debugged elsewhere.
+      - if: ${{ !cancelled() && steps.kernel.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
         with:
           name: oci-hermit-kernel-${{ matrix.arch }}
           path: guest/out/${{ matrix.arch }}

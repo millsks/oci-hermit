@@ -12,7 +12,7 @@ The configuration is `make tinyconfig` with two fragments merged over it by `scr
 
 | Fragment | What it adds |
 | --- | --- |
-| `kernel/config/common.config` | printk and earlycon; virtio-mmio with virtio-blk, virtio-net, virtio-console and virtio-rng; 9P with `NET_9P_FD` (bind mounts over virtio-serial); overlayfs, EROFS, tmpfs, devtmpfs (automounted), proc, sysfs, devpts; IPv4, loopback and unix sockets; mount, PID, net, IPC, UTS and user namespaces; cgroup v2 with the memory, cpu and pids controllers, and cgroup BPF for crun's device rules; seccomp; ELF and `#!` binaries; initramfs (gzip, zstd) |
+| `kernel/config/common.config` | printk and earlycon; virtio-mmio with virtio-blk, virtio-net, virtio-console and virtio-rng; 9P with `NET_9P_FD` (bind mounts over virtio-serial); overlayfs, EROFS, tmpfs, devtmpfs (automounted), proc, sysfs, devpts; IPv4 and IPv6 (so `[::]` and `::1` work), loopback and unix sockets; mount, PID, net, IPC, UTS and user namespaces; cgroup v2 with the memory, cpu and pids controllers, and cgroup BPF for crun's device rules; seccomp; ELF and `#!` binaries; initramfs (gzip, zstd) |
 | `kernel/config/x86_64.config` | 64-bit, 8250 serial console, CMOS RTC and ACPI, for QEMU's `microvm` machine |
 | `kernel/config/aarch64.config` | PL011 serial console and PL031 RTC, for QEMU's `virt` machine |
 

@@ -24,7 +24,8 @@ case "$arch" in
     ;;
   *) echo "unsupported architecture: $arch (x86_64 or aarch64)" >&2; exit 1 ;;
 esac
-cmd+=(-accel tcg -m 256 -nographic -no-reboot -kernel "$kernel" -append "$console panic=-1")
+# -nodefaults: no default NIC (whose option ROM the bundle does not ship) or other devices; just the serial console.
+cmd+=(-accel tcg -m 256 -nodefaults -nographic -serial stdio -no-reboot -kernel "$kernel" -append "$console panic=-1")
 
 reached='Kernel panic - not syncing: (No working init found|VFS: Unable to mount root fs)'
 log=$(mktemp)
