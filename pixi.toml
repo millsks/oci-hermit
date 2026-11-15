@@ -63,6 +63,8 @@ ninja = "*"
 pkg-config = "*"
 python = "3.14.*"
 make = "*"
+# QEMU requires zlib; without it in the environment meson falls back to the host's /usr/include.
+zlib = "*"
 
 [feature.qemu-build.target.linux.dependencies]
 patchelf = "*"

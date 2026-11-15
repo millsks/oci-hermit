@@ -55,7 +55,9 @@ fresh=1
 [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$QEMU_VERSION $PKGVERSION" ] && fresh=0
 if [ "$fresh" = 1 ]; then
   rm -rf "$src" "$build"
-  tar -xJf "$tarball" -C "$work"
+  # roms/ (firmware sources) and tests/lcitool/ (upstream CI) are never built here, and their symlinks cannot be
+  # created on Windows without developer mode.
+  tar -xJf "$tarball" -C "$work" --exclude="qemu-${QEMU_VERSION}/roms" --exclude="qemu-${QEMU_VERSION}/tests/lcitool"
   mkdir -p "$build"
 fi
 cd "$build"
