@@ -327,7 +327,7 @@ jobs:
             docker pull --platform "$platform" "$image" && break
             sleep $((attempt * 5))
           done
-          docker save -o "$RUNNER_TEMP/debian-docker.tar" "$image"
+          docker save --platform "$platform" -o "$RUNNER_TEMP/debian-docker.tar" "$image"
           loaded=$(target/release/oci-hermit load -i "$RUNNER_TEMP/debian-docker.tar")
           echo "$loaded"
           grep -q "^Loaded image: $image ($platform)$" <<< "$loaded"
