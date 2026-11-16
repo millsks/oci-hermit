@@ -129,7 +129,7 @@ pub mod b64 {
     /// The bytes `text` encodes, or `None` if it is not valid padded base64.
     pub fn decode(text: &str) -> Option<Vec<u8>> {
         let text = text.as_bytes();
-        if text.len() % 4 != 0 {
+        if !text.len().is_multiple_of(4) {
             return None;
         }
         let value = |c: u8| ALPHABET.iter().position(|&a| a == c).map(|v| v as u32);

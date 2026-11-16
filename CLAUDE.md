@@ -14,7 +14,9 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/qemu.rs` | finds and verifies the bundled QEMU (`$OCI_HERMIT_QEMU_DIR`, then install layouts) |
 | `crates/oci-hermit/src/guest.rs` | finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`) |
 | `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
-| `crates/oci-hermit/src/image.rs` | reads an OCI image layout (directory or `.tar`): manifest for the guest arch, config, layers |
+| `crates/oci-hermit/src/image.rs` | reads an OCI image layout (directory or `.tar`): manifest for the guest arch, config, layers; checks every blob against its sha256 digest |
+| `crates/oci-hermit/src/store.rs` | the image store: one OCI layout in the user's data folder (`$OCI_HERMIT_DATA_DIR`), images named by full reference and platform |
+| `crates/oci-hermit/src/registry.rs` | `pull` over oci-client (reqwest, rustls with ring): Podman/Docker auth files and credential helpers, `$OCI_HERMIT_INSECURE_REGISTRIES` for plain HTTP |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
@@ -69,7 +71,10 @@ Everything runs through pixi.
   is not a message, time out instead of blocking.
 - `run` is the M1 spike: the image's files go into the initramfs under `/rootfs` (so the guest needs about twice
   the image's size in RAM) and the agent chroots there with the command. EROFS layer disks (#16, #17) and crun (#21)
-  replace both. Blob digests are not verified yet (#14).
+  replace both.
+- Every blob is verified against its digest when pulled, stored and read (#14); a mismatch is an error, never a
+  warning. reqwest is built without a crypto provider and `registry::pull` installs ring: aws-lc-rs needs CMake and
+  NASM on some hosts. Pulls happen in the host tool only.
 - The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
   children inherit that mask, so anything it spawns must reset the signal mask before exec.
 - Commands run as the image's `User` (#66). Around `posix_spawn` the agent switches its real and effective IDs to the

@@ -19,7 +19,13 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Pull an image from a registry
-    Pull { image: String },
+    Pull {
+        /// Image platform, e.g. linux/amd64 or linux/arm64 (default: the host's)
+        #[arg(long)]
+        platform: Option<String>,
+        /// Image reference, e.g. debian:bookworm-slim or ghcr.io/org/app:1.2
+        image: String,
+    },
     /// Load an image from a docker-archive or OCI layout tarball
     Load {
         /// Path to the tarball or OCI layout directory
@@ -138,7 +144,7 @@ pub struct RunArgs {
     /// Run as this user instead of the image's: name|uid[:group|gid]
     #[arg(short, long)]
     pub user: Option<String>,
-    /// Image to run
+    /// Image to run: a reference (pulled if it is not in the store yet), or an OCI layout directory or .tar
     pub image: String,
     /// Command and arguments (defaults to the image's entrypoint)
     #[arg(trailing_var_arg = true)]

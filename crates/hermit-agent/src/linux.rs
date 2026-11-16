@@ -123,10 +123,11 @@ fn resolve(argv0: &str, env: &[String]) -> io::Result<PathBuf> {
         .unwrap_or(DEFAULT_PATH);
     for dir in path.split(':') {
         let candidate = Path::new(if dir.is_empty() { "." } else { dir }).join(argv0);
-        if let Ok(meta) = std::fs::metadata(&candidate) {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                return Ok(candidate);
-            }
+        if let Ok(meta) = std::fs::metadata(&candidate)
+            && meta.is_file()
+            && meta.permissions().mode() & 0o111 != 0
+        {
+            return Ok(candidate);
         }
     }
     Err(io::Error::new(
@@ -296,16 +297,14 @@ impl System for Linux {
                 let outputs: Vec<bool> = fds[first_output..].iter().map(ready).collect();
                 (ready(&fds[0]), has_control && ready(&fds[1]), outputs)
             };
-            if signal_ready {
-                if let Some(info) = signals.read_signal()? {
-                    let signal = match NixSignal::try_from(info.ssi_signo as i32) {
-                        Ok(NixSignal::SIGTERM) => Some(Signal::Term),
-                        Ok(NixSignal::SIGINT) => Some(Signal::Int),
-                        Ok(NixSignal::SIGCHLD) => Some(Signal::Child),
-                        _ => None,
-                    };
-                    self.pending.extend(signal.map(Event::Signal));
-                }
+            if signal_ready && let Some(info) = signals.read_signal()? {
+                let signal = match NixSignal::try_from(info.ssi_signo as i32) {
+                    Ok(NixSignal::SIGTERM) => Some(Signal::Term),
+                    Ok(NixSignal::SIGINT) => Some(Signal::Int),
+                    Ok(NixSignal::SIGCHLD) => Some(Signal::Child),
+                    _ => None,
+                };
+                self.pending.extend(signal.map(Event::Signal));
             }
             if control_ready {
                 self.read_control();

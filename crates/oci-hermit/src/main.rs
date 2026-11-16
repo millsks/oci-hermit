@@ -8,7 +8,9 @@ mod guest;
 mod image;
 mod initramfs;
 mod qemu;
+mod registry;
 mod rootfs;
+mod store;
 mod supervisor;
 mod users;
 
@@ -39,6 +41,10 @@ struct Env {
     run_base: PathBuf,
     /// Whether `run` reports its phase timings (`OCI_HERMIT_TIMINGS`).
     timings: bool,
+    /// Where the image store lives; `None` when there is no home or data folder to put it in.
+    data_dir: Option<PathBuf>,
+    /// Auth files and plain-HTTP registries for pulls.
+    registry: registry::Settings,
 }
 
 /// How long each phase of `run` took, in order.
@@ -88,6 +94,8 @@ fn main() -> ExitCode {
         exe: std::env::current_exe().unwrap_or_default(),
         run_base: std::env::temp_dir().join("oci-hermit"),
         timings: std::env::var_os(TIMINGS_ENV).is_some_and(|v| !v.is_empty() && v != "0"),
+        data_dir: store::data_dir(std::env::var_os(store::DIR_ENV), |name| std::env::var_os(name)),
+        registry: registry::Settings::from_env(|name| std::env::var_os(name)),
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
 }
@@ -107,6 +115,13 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
         cli::Command::Machine(cli::MachineCommand::Info) => machine_info(env, out, err),
         cli::Command::Machine(cli::MachineCommand::Boot(args)) => machine_boot(args, env, out, err),
         cli::Command::Run(args) => run_container(args, env, out, err),
+        cli::Command::Pull { platform, image } => match pull_image(image, platform.as_deref(), env, out) {
+            Ok(()) => 0,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         other => {
             let _ = writeln!(
                 err,
@@ -215,6 +230,65 @@ fn boot(
     Ok(())
 }
 
+/// The guest architecture for `--platform`, or the host's.
+fn guest_arch(platform: Option<&str>) -> Result<qemu::GuestArch, String> {
+    match platform {
+        Some(platform) => platform_arch(platform).ok_or_else(|| format!("unsupported --platform {platform}")),
+        None => qemu::GuestArch::host().ok_or_else(|| "cannot tell the host architecture; pass --platform".into()),
+    }
+}
+
+fn open_store(env: &Env) -> Result<store::Store, String> {
+    let dir = env.data_dir.as_ref().ok_or_else(|| {
+        format!(
+            "cannot tell where to keep images: no home folder; set {}",
+            store::DIR_ENV
+        )
+    })?;
+    store::Store::open(dir).map_err(|e| format!("the image store in {}: {e}", dir.display()))
+}
+
+/// `pull`: fetch an image for one platform into the store, verifying every digest.
+fn pull_image(
+    image: &str,
+    platform: Option<&str>,
+    env: &Env,
+    out: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let arch = guest_arch(platform)?;
+    let reference = registry::normalize(image)?;
+    let store = open_store(env)?;
+    let pulled = registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, out)?;
+    let _ = writeln!(
+        out,
+        "Status: pulled {} for linux/{}",
+        pulled.name,
+        image::oci_arch(arch)
+    );
+    Ok(())
+}
+
+/// The image `run` names: a local layout or archive, else a reference in the store, pulled first if missing.
+fn open_image(
+    name: &str,
+    arch: qemu::GuestArch,
+    env: &Env,
+    err: &mut impl Write,
+) -> Result<image::Image, Box<dyn std::error::Error>> {
+    let path = PathBuf::from(name);
+    if path.exists() {
+        return Ok(image::Image::open(&path, arch)?);
+    }
+    let reference = registry::normalize(name)?;
+    let store = open_store(env)?;
+    let full = reference.whole();
+    if !store.has(&full, "linux", image::oci_arch(arch)) {
+        let _ = writeln!(err, "Unable to find image '{name}' locally");
+        registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, err)?;
+    }
+    Ok(image::Image::open_named(store.path(), Some(&full), arch)?)
+}
+
 /// `--memory` as MiB: a number with an optional `k`, `m` or `g` suffix (bytes when there is none, as Docker).
 fn parse_memory(text: &str) -> Option<u32> {
     let text = text.trim().to_ascii_lowercase();
@@ -296,23 +370,11 @@ fn run_in_sandbox(
     if let Some(refusal) = not_supported_yet(args) {
         return Err(refusal.into());
     }
-    let arch = match &args.platform {
-        Some(platform) => platform_arch(platform).ok_or_else(|| format!("unsupported --platform {platform}"))?,
-        None => qemu::GuestArch::host().ok_or("cannot tell the host architecture; pass --platform")?,
-    };
-    let image_path = PathBuf::from(&args.image);
-    if !image_path.exists() {
-        return Err(format!(
-            "{} is not a local image; pass an OCI image layout directory or a .tar of one (pulling from \
-             registries comes with #14)",
-            args.image
-        )
-        .into());
-    }
+    let arch = guest_arch(args.platform.as_deref())?;
     let bundle = qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe))?;
     qemu::verify(&bundle, arch)?;
     let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
-    let image = image::Image::open(&image_path, arch)?;
+    let image = open_image(&args.image, arch, env, err)?;
     let rootfs = image.rootfs()?;
     let user_spec = args.user.as_deref().or(image.config.user.as_deref()).unwrap_or("");
     let identity = users::resolve(user_spec, &rootfs)?;
@@ -442,6 +504,8 @@ mod tests {
             exe: dir.join("bin").join("oci-hermit"),
             run_base: dir.join("run"),
             timings: false,
+            data_dir: Some(dir.join("data")),
+            registry: registry::Settings::default(),
         }
     }
 
@@ -454,6 +518,8 @@ mod tests {
             exe: PathBuf::from("/nowhere/bin/oci-hermit"),
             run_base: bundle.join("run"),
             timings: false,
+            data_dir: Some(bundle.join("data")),
+            registry: registry::Settings::default(),
         }
     }
 
@@ -646,8 +712,7 @@ mod tests {
         let env = no_qemu("main-run-none");
         let (code, _, err) = run_with(&env, &["run", "debian:bookworm-slim"]);
         assert_eq!(code, 125);
-        assert!(err.contains("not a local image"), "{err}");
-        assert!(err.contains("#14"));
+        assert!(err.contains("no bundled QEMU found"), "{err}");
         let (code, _, err) = run_with(&env, &["run", "--platform", "linux/s390x", "."]);
         assert_eq!(code, 125);
         assert!(err.contains("unsupported --platform linux/s390x"));
@@ -771,6 +836,71 @@ mod tests {
         // Root needs nothing new from the agent.
         let (code, err, _) = run_as("main-user-old-root", "", "1,1", &[]);
         assert_eq!(code, 3, "{err}");
+    }
+
+    #[test]
+    fn pull_stores_an_image_that_run_then_uses() {
+        let address = registry::testing::registry("main-pull-registry", None, false, 0);
+        let reference = format!("{address}/test/app:1");
+        let env = Env {
+            registry: registry::Settings {
+                insecure: vec![address.clone()],
+                ..registry::Settings::default()
+            },
+            ..no_qemu("main-pull-env")
+        };
+        let (code, out, err) = run_with(&env, &["pull", "--platform", "linux/arm64", &reference]);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.ends_with(&format!("Status: pulled {reference} for linux/arm64\n")),
+            "{out}"
+        );
+
+        let (code, _, err) = run_with(&env, &["pull", "--platform", "linux/s390x", &reference]);
+        assert_eq!(code, 1);
+        assert_eq!(err, "oci-hermit: unsupported --platform linux/s390x\n");
+        let (code, _, err) = run_with(&env, &["pull", "Not A Reference"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("is not an image reference"), "{err}");
+        let nowhere = Env {
+            data_dir: None,
+            ..no_qemu("main-pull-nowhere")
+        };
+        let (code, _, err) = run_with(&nowhere, &["pull", &reference]);
+        assert_eq!(code, 1);
+        assert!(err.contains("cannot tell where to keep images"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_pulls_a_missing_image_then_runs_it() {
+        let address = registry::testing::registry("main-run-pull-registry", None, false, 0);
+        let reference = format!("{address}/test/app:1");
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-run-pull");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-run-pull-guest");
+        let env = Env {
+            registry: registry::Settings {
+                insecure: vec![address.clone()],
+                ..registry::Settings::default()
+            },
+            ..with_bundle(&bundle, Some(&guest))
+        };
+        let (code, out, err) = run_with(&env, &["run", "--platform", "linux/amd64", &reference]);
+        assert_eq!(code, 3, "{err}");
+        assert_eq!(out, "hi\n");
+        assert!(
+            err.starts_with(&format!("Unable to find image '{reference}' locally\n")),
+            "{err}"
+        );
+        let seen = std::fs::read_to_string(bundle.join("run.seen")).unwrap();
+        assert!(seen.contains("from-the-registry"), "{seen}");
+
+        // The second run finds it in the store.
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", &reference]);
+        assert_eq!(code, 3);
+        assert_eq!(err, "oops\n");
     }
 
     #[test]

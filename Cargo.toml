@@ -7,7 +7,7 @@ version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/millsks/oci-hermit"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -19,6 +19,13 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 tar = { version = "0.4.46", default-features = false }
 # The host terminal in raw mode for `run -t`, on Linux, macOS and Windows.
 crossterm = { version = "0.29", default-features = false, features = ["windows"] }
+# Pulling from registries (#14): the OCI distribution protocol over reqwest, run on a one-thread tokio runtime. TLS is
+# rustls with the ring provider, which builds without CMake or NASM on every host; sha256 verifies every manifest and
+# blob against its digest.
+oci-client = { version = "0.18", default-features = false, features = ["rustls-tls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+sha2 = "0.11"
 # Windows only: QEMU runs in a Job Object that kills it when oci-hermit exits (QEMU has no exit-with-parent there).
 win32job = "2.1"
 # Guest agent only (Linux): safe wrappers for mount, sync, reboot, signal masks and waitpid.
