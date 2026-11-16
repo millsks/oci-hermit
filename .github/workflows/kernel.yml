@@ -98,7 +98,7 @@ jobs:
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
           command -v skopeo > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           skopeo --override-os linux --override-arch "$platform" \
-            copy docker://quay.io/lib/debian:bookworm-slim oci-archive:debian.tar
+            copy docker://public.ecr.aws/docker/library/debian:bookworm-slim oci-archive:debian.tar
           pixi run cargo build -q -p oci-hermit
           hermit=target/debug/oci-hermit
 

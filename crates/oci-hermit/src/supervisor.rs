@@ -241,7 +241,17 @@ impl Sandbox {
             .as_mut()
             .ok_or_else(|| SupervisorError::Io("the control channel is closed".into()))?;
         if let Err(e) = pipe.write_all(line.as_bytes()).and_then(|()| pipe.flush()) {
-            return Err(self.exit_status()?.unwrap_or(SupervisorError::Io(e.to_string())));
+            // A broken pipe usually means QEMU is exiting; give it a moment so its exit is what gets reported.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some(exited) = self.exit_status()? {
+                    return Err(exited);
+                }
+                if Instant::now() >= deadline {
+                    return Err(SupervisorError::Io(e.to_string()));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
         Ok(())
     }
