@@ -225,7 +225,7 @@ Software emulation is slower than native, but the target workloads are light bec
 
 | Activity | Expectation |
 | --- | --- |
-| Sandbox start | About 1 to 1.5 seconds on a recent laptop; see [Measured start times](#measured-start-times) |
+| Sandbox start | About 1 to 1.5 seconds on a recent laptop, 2 to 6 on CI runners; see [Measured start times](#measured-start-times) |
 | Interactive shell | Responsive |
 | Web frontend and backend under test traffic | Acceptable for smoke tests |
 | CPU-heavy work (compiles, large data loads) | Several times to more than 10x slower than native; out of scope |
@@ -235,7 +235,7 @@ Levers if needed: layer caching, a pre-booted kernel snapshot, and more vCPUs th
 ### Measured start times
 
 Time from `oci-hermit run` to a shell in the Debian 12 slim image, then back out: `oci-hermit run debian.tar bash -ic
-exit`, release build, one vCPU, median of the runs. Set `OCI_HERMIT_TIMINGS=1` to have `run` print the same breakdown
+exit`, release build, one vCPU; each row is the run with the median total out of three. Set `OCI_HERMIT_TIMINGS=1` to have `run` print the same breakdown
 on stderr:
 
 - **Prepare:** read the image, apply its layers and write the initramfs.
@@ -245,10 +245,25 @@ on stderr:
 
 | Host | Guest | Prepare | Boot | Command | Stop | Total |
 | --- | --- | --- | --- | --- | --- | --- |
-| Apple M4 Mac, macOS 26.2 | aarch64 | 0.30s | 0.58s | 0.05s | 0.02s | 0.96s |
-| Apple M4 Mac, macOS 26.2 | x86_64 | 0.28s | 1.09s | 0.05s | 0.03s | 1.45s |
+| Apple M4 Mac, macOS 26.2 | aarch64 | 0.31s | 0.58s | 0.05s | 0.02s | 0.96s |
+| Apple M4 Mac, macOS 26.2 | x86_64 | 0.29s | 1.09s | 0.05s | 0.03s | 1.45s |
+| GitHub `ubuntu-24.04-arm` (Linux arm64) | aarch64 | 0.37s | 1.40s | 0.09s | 0.02s | 1.88s |
+| GitHub `ubuntu-24.04-arm` (Linux arm64) | x86_64 | 0.34s | 3.75s | 0.11s | 0.02s | 4.22s |
+| GitHub `ubuntu-latest` (Ubuntu 26.04, x64) | aarch64 | 0.49s | 1.46s | 0.11s | 0.02s | 2.08s |
+| GitHub `ubuntu-latest` (Ubuntu 26.04, x64) | x86_64 | 0.41s | 2.41s | 0.13s | 0.02s | 2.98s |
+| GitHub `windows-latest` (Windows Server 2025, x64) | aarch64 | 0.70s | 1.43s | 0.11s | 0.02s | 2.26s |
+| GitHub `windows-latest` (Windows Server 2025, x64) | x86_64 | 0.52s | 2.80s | 0.16s | 0.04s | 3.54s |
+| GitHub `macos-latest` (macOS 26, Apple silicon) | aarch64 | 0.49s | 2.35s | 0.12s | 0.09s | 3.04s |
+| GitHub `macos-latest` (macOS 26, Apple silicon) | x86_64 | 0.50s | 2.93s | 0.14s | 0.03s | 3.61s |
+| GitHub `macos-15-intel` (macOS 15, Intel) | aarch64 | 0.96s | 4.91s | 0.24s | 0.06s | 6.17s |
+| GitHub `macos-15-intel` (macOS 15, Intel) | x86_64 | 0.61s | 3.32s | 0.19s | 0.04s | 4.17s |
 
-Boot dominates. On the M4 an x86_64 guest takes about twice as long to boot as an aarch64 one. The M1 `run` copies the whole image into the initramfs, so prepare grows with the image's size; the
+The CI rows come from the `hosts` job in `kernel.yml`, which records the same three runs in every job summary.
+Hosted runners are small shared VMs (3 or 4 vCPUs), so they are slower and noisier than a laptop; the Intel macOS
+runner varied most, from 5.3s to 7.4s for the aarch64 guest.
+
+Boot dominates everywhere, and a sandbox is ready in 1 to 6 seconds. An x86_64 guest boots more slowly than an
+aarch64 one on every host except the Intel Mac, where the order flips. The M1 `run` copies the whole image into the initramfs, so prepare grows with the image's size; the
 EROFS layer disks (#16, #17) remove that copy.
 
 ## Prior art
