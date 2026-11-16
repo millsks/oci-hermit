@@ -392,7 +392,15 @@ impl System for Linux {
     }
 
     fn drain_output(&mut self) -> Vec<(Stream, Vec<u8>)> {
+        // Output already read but still queued behind the SIGCHLD comes first, so nothing follows `Exited`.
         let mut drained = Vec::new();
+        self.pending.retain(|event| match event {
+            Event::Output(stream, bytes) => {
+                drained.push((*stream, bytes.clone()));
+                false
+            }
+            _ => true,
+        });
         if let Some(mut run) = self.run.take() {
             for (stream, file) in &mut run.outputs {
                 let mut buf = [0u8; 4096];
@@ -601,6 +609,23 @@ mod tests {
         assert_eq!(sys.write_stdin(b"x").unwrap_err().kind(), ErrorKind::NotConnected);
         sys.close_stdin();
         assert!(sys.drain_output().is_empty());
+    }
+
+    #[test]
+    fn queued_output_is_drained_before_the_exit_is_reported() {
+        let mut sys = Linux::new();
+        sys.pending.push_back(Event::Signal(Signal::Child));
+        sys.pending
+            .push_back(Event::Output(Stream::Stdout, b"last words".to_vec()));
+        sys.run = Some(Running {
+            tty: false,
+            stdin: None,
+            outputs: Vec::new(),
+            _terminal: None,
+        });
+        assert_eq!(sys.drain_output(), [(Stream::Stdout, b"last words".to_vec())]);
+        assert!(matches!(sys.pending.as_slices().0, [Event::Signal(Signal::Child)]));
+        assert!(sys.run.is_none());
     }
 
     #[test]

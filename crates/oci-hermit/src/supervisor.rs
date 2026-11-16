@@ -95,9 +95,14 @@ fn option_value(path: &Path) -> Result<String, SupervisorError> {
 }
 
 /// The kernel command line: the machine's serial console, and on a panic, exit at once (QEMU runs `-no-reboot`).
+///
+/// An x86_64 guest is also told its TSC frequency. The bundled QEMU's TSC counts nanoseconds of virtual time on
+/// every host (`qemu/patches/0002-…`), so it runs at exactly 1 GHz. Calibrating it against the PIT instead is slow
+/// under emulation and fails on loaded hosts, and microvm has no HPET or ACPI PM timer to fall back on, so the guest
+/// hung without a clock (#61).
 pub fn kernel_cmdline(arch: GuestArch) -> &'static str {
     match arch {
-        GuestArch::X86_64 => "console=ttyS0 panic=-1",
+        GuestArch::X86_64 => "console=ttyS0 panic=-1 tsc_early_khz=1000000",
         GuestArch::Aarch64 => "console=ttyAMA0 panic=-1",
     }
 }
@@ -575,7 +580,10 @@ mod tests {
         assert!(binary.ends_with(GuestArch::X86_64.binary_name()));
         assert_eq!(value_after(&args, "-machine"), "microvm");
         assert_eq!(value_after(&args, "-cpu"), X86_64_CPU);
-        assert_eq!(value_after(&args, "-append"), "console=ttyS0 panic=-1");
+        assert_eq!(
+            value_after(&args, "-append"),
+            "console=ttyS0 panic=-1 tsc_early_khz=1000000"
+        );
         assert_eq!(Path::new(value_after(&args, "-L")), qemu::firmware_dir(Path::new("/b")));
         let (binary, args) = args_of(GuestArch::Aarch64, "/r/c");
         assert!(binary.ends_with(GuestArch::Aarch64.binary_name()));
