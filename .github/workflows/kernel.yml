@@ -57,7 +57,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: qemu/out
-          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'pixi.lock') }}
+          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'qemu/patches/**', 'pixi.lock') }}
       - name: Build the QEMU bundle
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: pixi run -e qemu-build qemu-build
@@ -172,7 +172,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: qemu/out
-          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'pixi.lock') }}
+          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'qemu/patches/**', 'pixi.lock') }}
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
           environments: ${{ runner.os == 'Windows' && 'default' || 'default qemu-build' }}
@@ -188,6 +188,7 @@ jobs:
           install: >-
             make
             diffutils
+            patch
             tar
             xz
             mingw-w64-ucrt-x86_64-gcc

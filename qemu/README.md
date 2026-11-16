@@ -20,6 +20,16 @@ The host tool refuses any QEMU whose `--version` does not report exactly `11.1.3
 that has no TCG accelerator (`crates/oci-hermit/src/qemu.rs`). Changing the configuration means bumping
 `BUNDLE_REVISION` in `build.sh` and `BUNDLE_MARKER` in `qemu.rs` together.
 
+## Patches
+
+`build.sh` applies `qemu/patches/*.patch` to the release sources, in order, before configuring. They are QEMU
+changes and carry QEMU's license, GPL-2.0-or-later. A change to a patch changes the build stamp and the CI cache
+keys, so the bundle is rebuilt.
+
+| Patch | Why |
+|---|---|
+| `0001-chardev-win-stdio-hold-input-until-the-frontend-can-take-it.patch` | On Windows, `-chardev stdio` dropped input bytes the frontend could not take yet, so the host's first control message was lost before the guest opened the port. The patch holds the byte until the frontend accepts it, as the POSIX chardevs do, and stops dropping `\r` from piped (binary) input. Worth offering upstream. |
+
 ## Where each platform's build comes from
 
 | Platform | Built on | Build dependencies from |

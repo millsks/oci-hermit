@@ -1,0 +1,123 @@
+From: oci-hermit <noreply@github.com>
+Subject: [PATCH] chardev/win-stdio: hold input until the frontend can take it
+
+The Windows stdio chardev reads a pipe one byte at a time on a thread and
+hands each byte to the main loop. When the frontend could not take it yet
+(qemu_chr_be_can_write() == 0, e.g. a virtio-serial port the guest has not
+opened), the byte was dropped; the fd-based chardevs on POSIX wait instead.
+oci-hermit's control channel is a virtserialport on -chardev stdio, so the
+host's first message was lost and the sandbox never answered on Windows.
+
+Keep the byte pending until the frontend accepts input: chr_accept_input,
+and a 10 ms retry timer for frontends that do not call it when they become
+ready (virtio-console does not when the guest opens the port). Also stop
+dropping '\r' from piped input: that rule is meant for terminals, and a pipe
+carries binary data (console input still goes through ReadConsoleInput).
+
+SPDX-License-Identifier: GPL-2.0-or-later
+---
+--- a/chardev/char-win-stdio.c
++++ b/chardev/char-win-stdio.c
+@@ -26,6 +26,7 @@
+ #include "qapi/error.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/module.h"
++#include "qemu/timer.h"
+ #include "chardev/char-win.h"
+ #include "chardev/char-win-stdio.h"
+ #include "qom/object.h"
+@@ -38,6 +39,10 @@
+     HANDLE  hInputDoneEvent;
+     HANDLE  hInputThread;
+     uint8_t win_stdio_buf;
++    /* win_stdio_buf holds a byte the frontend could not take yet */
++    bool    win_stdio_pending;
++    /* retries a pending byte: not every frontend calls accept_input */
++    QEMUTimer *win_stdio_retry;
+ };
+ typedef struct WinStdioChardev WinStdioChardev;
+ 
+@@ -97,11 +102,6 @@
+             continue;
+         }
+ 
+-        /* Some terminal emulator returns \r\n for Enter, just pass \n */
+-        if (stdio->win_stdio_buf == '\r') {
+-            continue;
+-        }
+-
+         /* Signal the main thread and wait until the byte was eaten */
+         if (!SetEvent(stdio->hInputReadyEvent)) {
+             break;
+@@ -116,16 +116,39 @@
+     return 0;
+ }
+ 
++static void win_stdio_accept_input(Chardev *chr)
++{
++    WinStdioChardev *stdio = WIN_STDIO_CHARDEV(chr);
++
++    if (!stdio->win_stdio_pending) {
++        return;
++    }
++    if (!qemu_chr_be_can_write(chr)) {
++        timer_mod(stdio->win_stdio_retry,
++                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 10);
++        return;
++    }
++    stdio->win_stdio_pending = false;
++    qemu_chr_be_write(chr, &stdio->win_stdio_buf, 1);
++    SetEvent(stdio->hInputDoneEvent);
++}
++
++static void win_stdio_retry(void *opaque)
++{
++    win_stdio_accept_input(CHARDEV(opaque));
++}
++
+ static void win_stdio_thread_wait_func(void *opaque)
+ {
+     Chardev *chr = CHARDEV(opaque);
+     WinStdioChardev *stdio = WIN_STDIO_CHARDEV(opaque);
+ 
+-    if (qemu_chr_be_can_write(chr)) {
+-        qemu_chr_be_write(chr, &stdio->win_stdio_buf, 1);
+-    }
+-
+-    SetEvent(stdio->hInputDoneEvent);
++    /*
++     * Hold the byte until the frontend can take it, as the fd-based
++     * chardevs do, instead of dropping it.
++     */
++    stdio->win_stdio_pending = true;
++    win_stdio_accept_input(chr);
+ }
+ 
+ static void win_stdio_chr_set_echo(Chardev *chr, bool echo)
+@@ -170,6 +193,8 @@
+     } else {
+         DWORD   dwId;
+ 
++        stdio->win_stdio_retry = timer_new_ms(QEMU_CLOCK_REALTIME,
++                                              win_stdio_retry, chr);
+         stdio->hInputReadyEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+         stdio->hInputDoneEvent  = CreateEvent(NULL, FALSE, FALSE, NULL);
+         if (stdio->hInputReadyEvent == INVALID_HANDLE_VALUE
+@@ -236,6 +261,9 @@
+     if (stdio->hInputThread != INVALID_HANDLE_VALUE) {
+         TerminateThread(stdio->hInputThread, 0);
+     }
++    if (stdio->win_stdio_retry) {
++        timer_free(stdio->win_stdio_retry);
++    }
+ }
+ 
+ static int win_stdio_chr_write(Chardev *chr, const uint8_t *buf, int len)
+@@ -264,6 +292,7 @@
+     cc->chr_open = win_stdio_chr_open;
+     cc->chr_write = win_stdio_chr_write;
+     cc->chr_set_echo = win_stdio_chr_set_echo;
++    cc->chr_accept_input = win_stdio_accept_input;
+ }
+ 
+ static const TypeInfo char_win_stdio_type_info = {

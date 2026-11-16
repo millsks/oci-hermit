@@ -7,6 +7,8 @@
 #   <out>/share/qemu/     the firmware microvm boots with
 #   <out>/BUNDLE.txt      what was built and from what
 #
+# The patches in qemu/patches/ (GPL-2.0-or-later, like QEMU) are applied to the release sources first.
+#
 # Usage: qemu/build.sh <out-dir> [work-dir]
 #
 # Linux and macOS take their build dependencies from `pixi run -e qemu-build`; Windows builds in an MSYS2 UCRT64
@@ -16,7 +18,7 @@ set -euo pipefail
 QEMU_VERSION=11.1.3
 QEMU_SHA256=5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
 # Bump when the configuration or bundling changes without a new QEMU release. The host tool checks this marker.
-BUNDLE_REVISION=2
+BUNDLE_REVISION=3
 PKGVERSION="oci-hermit-qemu-${BUNDLE_REVISION}"
 
 out=${1:?usage: qemu/build.sh <out-dir> [work-dir]}
@@ -62,7 +64,12 @@ configure_flags="--prefix=/ --bindir=bin --datadir=share --target-list=x86_64-so
 
 # A build directory configured with exactly these sources and flags is reused, so iterating on bundling does not
 # recompile QEMU. Anything else starts from a clean tree.
-want="$QEMU_VERSION $PKGVERSION $configure_flags"
+patches_dir="$(cd "$(dirname "$0")" && pwd)/patches"
+patches=""
+for patch in "$patches_dir"/*.patch; do
+  [ -f "$patch" ] && patches="$patches $(basename "$patch"):$(sha256 "$patch")"
+done
+want="$QEMU_VERSION $PKGVERSION $configure_flags$patches"
 fresh=1
 [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ] && fresh=0
 if [ "$fresh" = 1 ]; then
@@ -72,6 +79,9 @@ if [ "$fresh" = 1 ]; then
   # includes it.
   tar -xJf "$tarball" -C "$work" \
     --exclude="qemu-${QEMU_VERSION}/roms" --exclude="qemu-${QEMU_VERSION}/tests/lcitool/libvirt-ci"
+  for patch in "$patches_dir"/*.patch; do
+    [ -f "$patch" ] && patch -d "$src" -p1 --forward < "$patch"
+  done
   mkdir -p "$build"
   cd "$build"
   # shellcheck disable=SC2086 # the flags are meant to split into words

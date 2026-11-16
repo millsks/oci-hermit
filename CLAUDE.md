@@ -58,6 +58,9 @@ Everything runs through pixi.
 - The x86_64 kernel needs `CONFIG_PCI=y` although microvm has no PCI bus: without it ACPI fails to load, and the
   serial console, RTC and virtio-mmio devices all break. Userspace console writes then fail with EIO while the
   kernel's own messages still appear, which looks like a hang (#54).
+- On Windows, upstream QEMU's `-chardev stdio` drops piped input the guest cannot take yet (and every `\r`), which
+  loses the host's first message. `qemu/patches/0001-…` fixes it; a bundle without it (marker below
+  `oci-hermit-qemu-3`) is refused.
 - The control channel is QEMU's stdin and stdout (`-chardev stdio`), so QEMU must never print to stdout: its
   diagnostics go to stderr (`qemu.log`). Treat everything from the guest as untrusted: cap line length, reject what
   is not a message, time out instead of blocking.

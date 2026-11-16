@@ -71,6 +71,7 @@ jobs:
           install: >-
             make
             diffutils
+            patch
             tar
             xz
             mingw-w64-ucrt-x86_64-gcc
