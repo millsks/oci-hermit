@@ -5,8 +5,10 @@
 
 mod cli;
 mod guest;
+mod image;
 mod initramfs;
 mod qemu;
+mod rootfs;
 mod supervisor;
 
 use clap::Parser;
@@ -58,6 +60,7 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
         }
         cli::Command::Machine(cli::MachineCommand::Info) => machine_info(env, out, err),
         cli::Command::Machine(cli::MachineCommand::Boot(args)) => machine_boot(args, env, out, err),
+        cli::Command::Run(args) => run_container(args, env, out, err),
         other => {
             let _ = writeln!(
                 err,
@@ -166,6 +169,169 @@ fn boot(
     Ok(())
 }
 
+/// `--memory` as MiB: a number with an optional `k`, `m` or `g` suffix (bytes when there is none, as Docker).
+fn parse_memory(text: &str) -> Option<u32> {
+    let text = text.trim().to_ascii_lowercase();
+    let (digits, scale) = match text.strip_suffix(['b']).unwrap_or(&text) {
+        t if t.ends_with('g') => (&t[..t.len() - 1], 1024 * 1024 * 1024),
+        t if t.ends_with('m') => (&t[..t.len() - 1], 1024 * 1024),
+        t if t.ends_with('k') => (&t[..t.len() - 1], 1024),
+        t => (t, 1),
+    };
+    let bytes = digits.parse::<u64>().ok()?.checked_mul(scale)?;
+    u32::try_from(bytes / (1024 * 1024)).ok().filter(|&mib| mib >= 64)
+}
+
+/// Memory for a sandbox holding `rootfs_bytes` of image files: the initramfs keeps a compressed-free copy of them
+/// and the guest unpacks another, so twice that, plus room for the kernel, the agent and the command.
+fn memory_for(rootfs_bytes: u64) -> u32 {
+    let mib = rootfs_bytes.div_ceil(1024 * 1024);
+    u32::try_from(256 + 2 * mib).unwrap_or(u32::MAX).max(512)
+}
+
+/// The guest architecture `--platform` names, e.g. `linux/arm64`.
+fn platform_arch(platform: &str) -> Option<qemu::GuestArch> {
+    let arch = platform.strip_prefix("linux/").unwrap_or(platform);
+    match arch.split('/').next()? {
+        "amd64" | "x86_64" => Some(qemu::GuestArch::X86_64),
+        "arm64" | "aarch64" => Some(qemu::GuestArch::Aarch64),
+        _ => None,
+    }
+}
+
+/// The host terminal in raw mode for as long as this lives.
+struct RawTerminal;
+
+impl RawTerminal {
+    fn enable() -> Option<RawTerminal> {
+        crossterm::terminal::enable_raw_mode().ok().map(|()| RawTerminal)
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// `run`: run a command from a local image in a fresh sandbox, and exit with its exit code.
+fn run_container(args: &cli::RunArgs, env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
+    match run_in_sandbox(args, env, out, err) {
+        Ok(code) => u8::try_from(code.rem_euclid(256)).unwrap_or(1),
+        Err(e) => {
+            let _ = writeln!(err, "oci-hermit: {e}");
+            125
+        }
+    }
+}
+
+fn run_in_sandbox(
+    args: &cli::RunArgs,
+    env: &Env,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let arch = match &args.platform {
+        Some(platform) => platform_arch(platform).ok_or_else(|| format!("unsupported --platform {platform}"))?,
+        None => qemu::GuestArch::host().ok_or("cannot tell the host architecture; pass --platform")?,
+    };
+    let image_path = PathBuf::from(&args.image);
+    if !image_path.exists() {
+        return Err(format!(
+            "{} is not a local image; pass an OCI image layout directory or a .tar of one (pulling from \
+             registries comes with #14)",
+            args.image
+        )
+        .into());
+    }
+    let bundle = qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe))?;
+    qemu::verify(&bundle, arch)?;
+    let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
+    let image = image::Image::open(&image_path, arch)?;
+    let rootfs = image.rootfs()?;
+    let argv = image.config.argv(&args.command);
+    if argv.is_empty() {
+        return Err("the image has no entrypoint or command, and none was given".into());
+    }
+    let memory = match &args.memory {
+        Some(text) => {
+            parse_memory(text).ok_or_else(|| format!("--memory {text}: use e.g. 512m or 2g, at least 64m"))?
+        }
+        None => memory_for(rootfs.content_bytes()),
+    };
+    let dir = supervisor::run_dir(&env.run_base)?;
+    let initrd = dir.join("initrd.cpio");
+    std::fs::write(
+        &initrd,
+        initramfs::build_with_rootfs(&std::fs::read(&guest.agent)?, &rootfs),
+    )?;
+    let console = dir.join("console.log");
+    let qemu_log = dir.join("qemu.log");
+    let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
+        bundle: &bundle,
+        kernel: &guest.kernel,
+        initrd: &initrd,
+        console_log: &console,
+        spec: supervisor::MachineSpec {
+            arch,
+            memory_mib: memory,
+            cpus: args.cpus.unwrap_or(1),
+        },
+    })?;
+    let see_logs =
+        |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
+    let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
+    sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
+
+    let mut command_env = image.config.env.clone().unwrap_or_default();
+    if args.tty && !command_env.iter().any(|e| e.starts_with("TERM=")) {
+        command_env.push(format!(
+            "TERM={}",
+            std::env::var("TERM").unwrap_or_else(|_| "xterm".into())
+        ));
+    }
+    let command = supervisor::Command {
+        argv,
+        env: command_env,
+        cwd: image.config.working_dir(),
+        tty: args.tty,
+        size: args
+            .tty
+            .then(crossterm::terminal::size)
+            .and_then(Result::ok)
+            .map(|(cols, rows)| (rows, cols)),
+    };
+    let stdin = args.interactive.then(|| {
+        let (chunks, input) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stdin, &mut buf) {
+                    Ok(0) | Err(_) => {
+                        let _ = chunks.send(None);
+                        return;
+                    }
+                    Ok(n) => {
+                        if chunks.send(Some(buf[..n].to_vec())).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        input
+    });
+    let raw = (args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()))
+        .then(RawTerminal::enable)
+        .flatten();
+    let code = sandbox.run(&command, stdin.as_ref(), out, err, Duration::from_secs(60));
+    drop(raw);
+    let code = code.map_err(see_logs)?;
+    sandbox.shutdown(Duration::from_secs(30)).map_err(see_logs)?;
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,16 +370,16 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.0"));
+        assert!(out.contains("control protocol 1.1"));
         assert!(err.is_empty());
     }
 
     #[test]
     fn stub_commands_exit_not_implemented() {
-        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["run", "-it", "alpine", "sh"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["ps", "-a"]);
         assert_eq!(code, NOT_IMPLEMENTED);
         assert!(out.is_empty());
-        assert!(err.contains("`run` is not implemented yet"));
+        assert!(err.contains("`ps` is not implemented yet"));
         assert!(err.contains(ROADMAP));
     }
 
@@ -277,7 +443,10 @@ mod tests {
             assert_eq!((code, err.as_str()), (0, ""), "{arch}: {out}");
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
-            assert!(out.contains("(control protocol 1.0)"));
+            assert!(
+                out.contains("(control protocol 1.0)"),
+                "the fake agent speaks 1.0: {out}"
+            );
             assert!(out.contains("guest powered off; sandbox stopped"));
         }
         // Each boot got its own directory with the initramfs it built from the agent.
@@ -327,5 +496,86 @@ mod tests {
         let (code, _, err) = run_with(&no_qemu("main-none-4"), &["machine", "boot", "--arch", "x86_64"]);
         assert_eq!(code, 1);
         assert!(err.contains("no bundled QEMU found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_relays_output_and_exits_with_the_commands_code() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-run");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
+        let guest = fake_guest("main-run-guest");
+        let config = r#"{"architecture":"ARCH","config":{"Cmd":["bash"],"Env":["PATH=/bin"],"WorkingDir":"/srv"}}"#;
+        let layout = image::testing::layout(
+            &qemu::testing::scratch("main-run-image"),
+            &[("amd64", image::testing::layer())],
+            config,
+        );
+        let env = with_bundle(&bundle, Some(&guest));
+        let image = layout.to_str().unwrap();
+        let (code, out, err) = run_with(
+            &env,
+            &["run", "--platform", "linux/amd64", image, "sh", "-c", "echo hi"],
+        );
+        assert_eq!(code, 3, "{err}");
+        assert_eq!(out, "hi\n");
+        assert_eq!(err, "oops\n");
+        let seen: hermit_proto::HostMessage =
+            hermit_proto::decode(&std::fs::read_to_string(bundle.join("run.seen")).unwrap()).unwrap();
+        assert_eq!(
+            seen,
+            hermit_proto::HostMessage::Run {
+                argv: vec!["sh".into(), "-c".into(), "echo hi".into()],
+                env: vec!["PATH=/bin".into()],
+                cwd: "/srv".into(),
+                tty: false,
+                rows: None,
+                cols: None,
+            }
+        );
+        // The initramfs holds the agent and the image's files under rootfs/.
+        let run = std::fs::read_dir(bundle.join("run"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let names: Vec<_> = initramfs::testing::parse(&std::fs::read(run.join("initrd.cpio")).unwrap())
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"init".to_string()));
+        assert!(names.contains(&"rootfs/bin/sh".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn run_explains_what_it_cannot_do_yet() {
+        let env = no_qemu("main-run-none");
+        let (code, _, err) = run_with(&env, &["run", "debian:bookworm-slim"]);
+        assert_eq!(code, 125);
+        assert!(err.contains("not a local image"), "{err}");
+        assert!(err.contains("#14"));
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/s390x", "."]);
+        assert_eq!(code, 125);
+        assert!(err.contains("unsupported --platform linux/s390x"));
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/arm64", "."]);
+        assert_eq!(code, 125);
+        assert!(err.contains("no bundled QEMU found"));
+    }
+
+    #[test]
+    fn memory_and_platform_parse_like_docker() {
+        assert_eq!(parse_memory("512m"), Some(512));
+        assert_eq!(parse_memory("2g"), Some(2048));
+        assert_eq!(parse_memory("2GB"), Some(2048));
+        assert_eq!(parse_memory("1048576k"), Some(1024));
+        assert_eq!(parse_memory("536870912"), Some(512));
+        assert_eq!(parse_memory("32m"), None, "too small to boot");
+        assert_eq!(parse_memory("lots"), None);
+        assert_eq!(memory_for(0), 512);
+        assert_eq!(memory_for(300 * 1024 * 1024), 856);
+        assert_eq!(platform_arch("linux/arm64/v8"), Some(qemu::GuestArch::Aarch64));
+        assert_eq!(platform_arch("amd64"), Some(qemu::GuestArch::X86_64));
+        assert_eq!(platform_arch("linux/riscv64"), None);
     }
 }

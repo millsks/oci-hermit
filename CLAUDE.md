@@ -14,6 +14,8 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/qemu.rs` | finds and verifies the bundled QEMU (`$OCI_HERMIT_QEMU_DIR`, then install layouts) |
 | `crates/oci-hermit/src/guest.rs` | finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`) |
 | `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
+| `crates/oci-hermit/src/image.rs` | reads an OCI image layout (directory or `.tar`): manifest for the guest arch, config, layers |
+| `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
 | `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
 | `crates/hermit-proto` | control protocol shared by host and agent: newline-delimited JSON (max 64 KiB a line) over the virtio-serial port `org.oci-hermit.control`, which QEMU wires to its stdin/stdout; the `Framer` both sides use |
@@ -59,5 +61,8 @@ Everything runs through pixi.
 - The control channel is QEMU's stdin and stdout (`-chardev stdio`), so QEMU must never print to stdout: its
   diagnostics go to stderr (`qemu.log`). Treat everything from the guest as untrusted: cap line length, reject what
   is not a message, time out instead of blocking.
+- `run` is the M1 spike: the image's files go into the initramfs under `/rootfs` (so the guest needs about twice
+  the image's size in RAM) and the agent chroots there with the command. EROFS layer disks (#16, #17) and crun (#21)
+  replace both. Blob digests are not verified yet (#14).
 - The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
   children inherit that mask, so anything it spawns must reset the signal mask before exec.

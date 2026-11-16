@@ -88,6 +88,41 @@ jobs:
           cp "guest/out/$arch/$image" "guest/out/sandbox/$arch/kernel"
           cp "target/$arch-unknown-linux-gnu/release/hermit-agent" "guest/out/sandbox/$arch/hermit-agent"
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
+      - name: Run commands from a Debian image
+        env:
+          OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}/qemu/out
+          OCI_HERMIT_GUEST_DIR: ${{ github.workspace }}/guest/out/sandbox
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
+          command -v skopeo > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          skopeo --override-os linux --override-arch "$platform" \
+            copy docker://quay.io/lib/debian:bookworm-slim oci-archive:debian.tar
+          pixi run cargo build -q -p oci-hermit
+          hermit=target/debug/oci-hermit
+
+          # Output and the exit code come back.
+          set +e
+          # shellcheck disable=SC2016 # the single-quoted $(...) runs in the guest's shell
+          out=$("$hermit" run debian.tar sh -c 'echo "hello from debian $(cat /etc/debian_version)"; exit 7')
+          code=$?
+          set -e
+          echo "$out"
+          [ "$code" = 7 ] || { echo "::error::exit code $code, expected 7"; exit 1; }
+          grep -q '^hello from debian 12' <<< "$out"
+
+          # Piped stdin reaches the command.
+          [ "$(echo piped | "$hermit" run -i debian.tar cat)" = piped ]
+
+          # With -t the command gets a terminal; script(1) gives oci-hermit one to put in raw mode.
+          set +e
+          script -qec "$hermit run -it debian.tar sh -c 'tty; exit 3'" /dev/null > tty.out
+          code=$?
+          set -e
+          cat tty.out
+          [ "$code" = 3 ] || { echo "::error::exit code $code with -t, expected 3"; exit 1; }
+          grep -q '/dev/pts/' tty.out
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true

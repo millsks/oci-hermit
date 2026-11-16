@@ -4,3 +4,7 @@ extend-exclude = ["Cargo.lock", "pixi.lock"]
 [default.extend-identifiers]
 # PnP, as in the kernel log line "pnp: PnP ACPI: disabled"
 PnP = "PnP"
+
+[default.extend-words]
+# RFC 4648 base64 test vectors in hermit-proto: "f", "fo", "foo", ...
+fo = "fo"

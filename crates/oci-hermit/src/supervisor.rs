@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -154,6 +154,17 @@ pub fn run_dir(base: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// A command to run in the guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Command {
+    pub argv: Vec<String>,
+    pub env: Vec<String>,
+    pub cwd: String,
+    pub tty: bool,
+    /// The host terminal's `(rows, cols)`, for a command with a terminal.
+    pub size: Option<(u16, u16)>,
+}
+
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
 type Incoming = Option<Frame>;
 
@@ -194,7 +205,7 @@ impl Sandbox {
     /// `qemu_log`.
     pub fn spawn(binary: &Path, args: &[OsString], qemu_log: &Path) -> io::Result<Sandbox> {
         let log = File::create(qemu_log)?;
-        let mut child = Command::new(binary)
+        let mut child = std::process::Command::new(binary)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -309,7 +320,99 @@ impl Sandbox {
                 ),
             }),
             GuestMessage::Error { message } => Err(SupervisorError::Refused { message }),
-            GuestMessage::ShuttingDown => Err(SupervisorError::Protocol("shutting down instead of ready".into())),
+            other => Err(SupervisorError::Protocol(format!("{other:?} instead of ready"))),
+        }
+    }
+
+    /// Run one command in the guest and relay it: output to `stdout` and `stderr`, input from `stdin` (chunks,
+    /// then `None` at end of file). Returns the command's exit code. There is no overall timeout: an interactive
+    /// shell may sit idle. A QEMU that exits ends the session with an error.
+    pub fn run(
+        &mut self,
+        command: &Command,
+        stdin: Option<&Receiver<Option<Vec<u8>>>>,
+        stdout: &mut impl Write,
+        stderr: &mut impl Write,
+        start_timeout: Duration,
+    ) -> Result<i32, SupervisorError> {
+        self.send(&HostMessage::Run {
+            argv: command.argv.clone(),
+            env: command.env.clone(),
+            cwd: command.cwd.clone(),
+            tty: command.tty,
+            rows: command.size.map(|s| s.0),
+            cols: command.size.map(|s| s.1),
+        })?;
+        let deadline = Instant::now() + start_timeout;
+        match self.receive(deadline, start_timeout)? {
+            GuestMessage::Started { .. } => {}
+            GuestMessage::Error { message } => return Err(SupervisorError::Refused { message }),
+            other => return Err(SupervisorError::Protocol(format!("{other:?} instead of started"))),
+        }
+        if stdin.is_none() {
+            self.send(&HostMessage::StdinClosed)?;
+        }
+        let mut stdin_open = stdin.is_some();
+        loop {
+            if let (true, Some(input)) = (stdin_open, stdin) {
+                while let Ok(chunk) = input.try_recv() {
+                    match chunk {
+                        Some(bytes) => {
+                            for piece in bytes.chunks(hermit_proto::CHUNK) {
+                                self.send(&HostMessage::Stdin {
+                                    data: hermit_proto::b64::encode(piece),
+                                })?;
+                            }
+                        }
+                        None => {
+                            self.send(&HostMessage::StdinClosed)?;
+                            stdin_open = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            let message = match self.from_agent.recv_timeout(Duration::from_millis(20)) {
+                Ok(Some(Frame::Line(line))) => hermit_proto::decode::<GuestMessage>(&line)
+                    .map_err(|e| SupervisorError::Protocol(format!("not a control message ({e})")))?,
+                Ok(Some(Frame::TooLong)) => {
+                    return Err(SupervisorError::Protocol(format!(
+                        "a line longer than {} bytes",
+                        hermit_proto::MAX_LINE
+                    )));
+                }
+                Ok(Some(Frame::NotUtf8)) => return Err(SupervisorError::Protocol("a line that is not UTF-8".into())),
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                    let now = Instant::now();
+                    return Err(self
+                        .receive(now, Duration::ZERO)
+                        .err()
+                        .unwrap_or(SupervisorError::Exited {
+                            status: "the control channel closed".into(),
+                        }));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(exited) = self.exit_status()? {
+                        return Err(exited);
+                    }
+                    continue;
+                }
+            };
+            match message {
+                GuestMessage::Output { stream, data } => {
+                    let bytes = hermit_proto::b64::decode(&data)
+                        .ok_or_else(|| SupervisorError::Protocol("output that is not base64".into()))?;
+                    let sink: &mut dyn Write = match stream {
+                        hermit_proto::Stream::Stdout => stdout,
+                        hermit_proto::Stream::Stderr => stderr,
+                    };
+                    sink.write_all(&bytes)?;
+                    sink.flush()?;
+                }
+                GuestMessage::Exited { code } => return Ok(code),
+                GuestMessage::Error { message } => return Err(SupervisorError::Refused { message }),
+                other => return Err(SupervisorError::Protocol(format!("{other:?} during a run"))),
+            }
         }
     }
 
@@ -552,7 +655,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn closing_the_job_kills_the_process() {
-        let mut child = Command::new("ping")
+        let mut child = std::process::Command::new("ping")
             .args(["-n", "60", "127.0.0.1"])
             .stdout(Stdio::null())
             .spawn()

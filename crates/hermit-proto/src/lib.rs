@@ -7,18 +7,26 @@
 //! A session starts with the host's [`HostMessage::Hello`]; the agent answers [`GuestMessage::Ready`] when the
 //! major versions match and [`GuestMessage::Error`] when they do not. Anything that is not a known message gets an
 //! [`GuestMessage::Error`] and the session goes on: neither side trusts the other to send only valid lines.
+//!
+//! Since 1.1 the host can [`HostMessage::Run`] one command: the agent answers [`GuestMessage::Started`], streams
+//! its output as [`GuestMessage::Output`], takes its input as [`HostMessage::Stdin`], and reports
+//! [`GuestMessage::Exited`]. Bytes travel base64-encoded ([`b64`]), at most [`CHUNK`] raw bytes a message.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 0);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 1);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
 
 /// The longest line either side accepts, newline included. Longer lines are dropped whole.
 pub const MAX_LINE: usize = 64 * 1024;
+
+/// The most raw bytes one `Stdin` or `Output` message carries; base64 makes that about 22 KB, well under
+/// [`MAX_LINE`].
+pub const CHUNK: usize = 16 * 1024;
 
 /// What the agent prints on the guest console once the guest is set up. The console is for people; the host waits
 /// for [`GuestMessage::Ready`] on the control channel instead.
@@ -32,6 +40,26 @@ pub enum HostMessage {
     Hello { version: (u16, u16) },
     /// Sync filesystems and power the guest off.
     Shutdown,
+    /// Start a command in the image's root filesystem (1.1). One command per session.
+    Run {
+        /// The command and its arguments; the first is looked up in `PATH` from `env` when it has no `/`.
+        argv: Vec<String>,
+        /// `NAME=value` pairs.
+        env: Vec<String>,
+        /// Working directory inside the image.
+        cwd: String,
+        /// Give the command a terminal (`-t`); otherwise its stdin, stdout and stderr are pipes.
+        tty: bool,
+        /// The terminal's size, when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+    },
+    /// Bytes for the command's stdin, base64-encoded (1.1).
+    Stdin { data: String },
+    /// The host's stdin reached end of file (1.1).
+    StdinClosed,
 }
 
 /// Messages sent from the guest agent to the host tool.
@@ -44,6 +72,71 @@ pub enum GuestMessage {
     ShuttingDown,
     /// A message was refused or failed.
     Error { message: String },
+    /// The command from `Run` started (1.1).
+    Started { pid: i32 },
+    /// Output from the command, base64-encoded (1.1). With a terminal everything is `stdout`.
+    Output { stream: Stream, data: String },
+    /// The command ended (1.1): its exit status, or 128 plus the signal that killed it.
+    Exited { code: i32 },
+}
+
+/// Which output stream an [`GuestMessage::Output`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Standard base64 (RFC 4648, with padding), for the bytes in `Stdin` and `Output`.
+pub mod b64 {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// The bytes `text` encodes, or `None` if it is not valid padded base64.
+    pub fn decode(text: &str) -> Option<Vec<u8>> {
+        let text = text.as_bytes();
+        if text.len() % 4 != 0 {
+            return None;
+        }
+        let value = |c: u8| ALPHABET.iter().position(|&a| a == c).map(|v| v as u32);
+        let mut out = Vec::with_capacity(text.len() / 4 * 3);
+        for (index, quad) in text.chunks(4).enumerate() {
+            let last = index == text.len() / 4 - 1;
+            let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
+            if pad > 2 || (pad > 0 && !last) {
+                return None;
+            }
+            let mut n = 0u32;
+            for (i, &c) in quad[..4 - pad].iter().enumerate() {
+                n |= value(c)? << (18 - 6 * i);
+            }
+            // The bits under the padding must be zero, so every value has exactly one encoding.
+            if n & ((1u32 << (8 * pad)) - 1) != 0 {
+                return None;
+            }
+            let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+            out.extend_from_slice(&bytes[..3 - pad]);
+        }
+        Some(out)
+    }
 }
 
 /// Whether a peer speaking `version` can talk to this side.
@@ -177,6 +270,49 @@ mod tests {
     }
 
     #[test]
+    fn base64_matches_rfc_4648() {
+        let cases: [(&[u8], &str); 7] = [
+            (b"", ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ];
+        for (raw, text) in cases {
+            assert_eq!(b64::encode(raw), text);
+            assert_eq!(b64::decode(text).unwrap(), raw);
+        }
+        let all: Vec<u8> = (0..=255).collect();
+        assert_eq!(b64::decode(&b64::encode(&all)).unwrap(), all);
+        for bad in ["Zg=", "Z===", "Zg==Zg==", "Z!==", "Zm9v\n", "Zh==", "Zm9=", "Zm+="] {
+            assert_eq!(b64::decode(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn run_messages_round_trip() {
+        let run = HostMessage::Run {
+            argv: vec!["sh".into(), "-c".into(), "exit 7".into()],
+            env: vec!["PATH=/bin".into()],
+            cwd: "/".into(),
+            tty: true,
+            rows: Some(24),
+            cols: None,
+        };
+        assert_eq!(decode::<HostMessage>(&encode(&run).unwrap()).unwrap(), run);
+        let output = GuestMessage::Output {
+            stream: Stream::Stderr,
+            data: b64::encode(&[0u8; CHUNK]),
+        };
+        let line = encode(&output).unwrap();
+        assert!(line.len() < MAX_LINE, "a full chunk fits in one line");
+        assert!(line.contains(r#""stream":"stderr""#));
+        assert_eq!(decode::<GuestMessage>(&line).unwrap(), output);
+    }
+
+    #[test]
     fn only_the_major_version_must_match() {
         assert!(compatible(PROTOCOL_VERSION));
         assert!(compatible((PROTOCOL_VERSION.0, PROTOCOL_VERSION.1 + 7)));
@@ -238,6 +374,11 @@ mod tests {
             .unwrap(),
             encode(&HostMessage::Shutdown).unwrap(),
             encode(&GuestMessage::Error { message: "x".into() }).unwrap(),
+            encode(&HostMessage::Stdin {
+                data: b64::encode(b"ls -l\r"),
+            })
+            .unwrap(),
+            encode(&GuestMessage::Exited { code: 7 }).unwrap(),
         ];
         let mut out = Vec::new();
         for _ in 0..rng.below(8) {
@@ -282,6 +423,9 @@ mod tests {
                     assert!(!line.contains('\n'));
                     let _ = decode::<HostMessage>(&line);
                     let _ = decode::<GuestMessage>(&line);
+                    if let Some(bytes) = b64::decode(&line) {
+                        assert_eq!(b64::encode(&bytes), line, "decode accepts only canonical base64");
+                    }
                 }
             }
         }
