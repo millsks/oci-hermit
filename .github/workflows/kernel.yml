@@ -507,6 +507,48 @@ jobs:
             "> oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'", $out, '(exit code 7)', '```'
           )
           $summary -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+      # A ready-to-run folder for this host (docs/getting-started.md): oci-hermit, its QEMU bundle and both guests, laid
+      # out so that it needs no settings. Packaged once per host, from the x86_64 job, until releases exist (#39).
+      - if: matrix.arch == 'x86_64'
+        name: Fetch the aarch64 guest for the package
+        uses: actions/download-artifact@v8
+        with:
+          name: sandbox-aarch64
+          path: ${{ runner.temp }}/aarch64-guest
+      - if: matrix.arch == 'x86_64'
+        id: package
+        name: Package oci-hermit for this host
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp=$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || echo "$RUNNER_TEMP")
+          exe=oci-hermit$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          dir="$temp/package/oci-hermit"
+          mkdir -p "$dir/guest"
+          cp "target/release/$exe" "$dir/"
+          cp -R qemu/out "$dir/qemu"
+          cp -R guest/out/sandbox/x86_64 "$dir/guest/"
+          cp -R "$temp/aarch64-guest/guest/out/sandbox/aarch64" "$dir/guest/"
+
+          # The folder alone is enough: no OCI_HERMIT_* settings.
+          unset OCI_HERMIT_QEMU_DIR OCI_HERMIT_GUEST_DIR
+          "$dir/$exe" machine info
+          for arch in x86_64 aarch64; do "$dir/$exe" machine boot --arch "$arch" --timeout 600; done
+
+          # Artifacts are zipped, which loses the executable bit, so Linux and macOS get a tarball inside the zip.
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "path=$RUNNER_TEMP\\package" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "$temp/oci-hermit-${{ matrix.host }}.tar.gz" -C "$temp/package" oci-hermit
+            echo "path=$temp/oci-hermit-${{ matrix.host }}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+      - if: matrix.arch == 'x86_64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: oci-hermit-${{ matrix.host }}
+          path: ${{ steps.package.outputs.path }}
+          retention-days: 14
+          if-no-files-found: error
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         shell: bash

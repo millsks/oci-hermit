@@ -24,6 +24,7 @@ no admin, no hypervisor and no WSL.
 | `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
 | `crates/hermit-proto` | control protocol shared by host and agent: newline-delimited JSON (max 64 KiB a line) over the virtio-serial port `org.oci-hermit.control`, which QEMU wires to its stdin/stdout; the `Framer` both sides use |
 | `docs/design.md` | architecture, networking, mounts, security model |
+| `docs/getting-started.md` | per-host setup; CI's hosts job (x86_64 leg) uploads the ready-to-run `oci-hermit-<host>` folder it describes |
 
 ## Commands
 

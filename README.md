@@ -39,9 +39,15 @@ Differences from Docker are deliberate: `-p` always binds to `127.0.0.1`, `-v` i
 
 Each sandbox is one emulator process launched as you. The host tool pulls and unpacks images without privileges, hands the layers to a minimal Linux guest as read-only disks, and a small guest agent starts the containers with crun. Every path into the guest passes through the host tool; there is no path out. Details in [docs/design.md](docs/design.md).
 
+## Getting started
+
+[Getting started](docs/getting-started.md) has the commands for Windows, macOS and Linux: download the ready-to-run
+folder that CI builds for each host, check it, and run a Linux image. No admin rights needed.
+
 ## Installation
 
-Not released yet. The plan is to publish on conda-forge, so it installs with:
+Not released yet; until then, use the CI builds in [Getting started](docs/getting-started.md). The plan is to publish
+on conda-forge, so it installs with:
 
 ```bash
 pixi global install oci-hermit
