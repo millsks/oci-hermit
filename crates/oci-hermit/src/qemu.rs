@@ -237,8 +237,9 @@ pub(crate) mod testing {
     }
 
     /// Shell scripts standing in for both emulators. They answer `--version` and `-accel help`; launched as a
-    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello; for a `Run`, `Started`, `hi` on stdout,
-    /// `oops` on stderr and exit code 3 (the `Run` line is saved to `<bundle>/run.seen`); then `ShuttingDown` and exit.
+    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, with protocol 1.2 unless
+    /// `<bundle>/agent.version` says otherwise (as `1,1`); for a `Run`, `Started`, `hi` on stdout, `oops` on stderr and
+    /// exit code 3 (the `Run` line is saved to `<bundle>/run.seen`); then `ShuttingDown` and exit.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -247,7 +248,8 @@ pub(crate) mod testing {
              case \"$1\" in\n\
              --version) echo '{version_line}' ;;\n\
              -accel) printf 'Accelerators supported in QEMU binary:\\n{accels}\\n' ;;\n\
-             *) read hello; echo '{{\"type\":\"ready\",\"version\":[1,0]}}'; read next; \
+             *) read hello; v=$(cat \"$(dirname \"$0\")/../agent.version\" 2>/dev/null || echo 1,2); \
+             echo \"{{\\\"type\\\":\\\"ready\\\",\\\"version\\\":[$v]}}\"; read next; \
              case \"$next\" in *'\"run\"'*) echo \"$next\" > \"$(dirname \"$0\")/../run.seen\"; \
              echo '{{\"type\":\"started\",\"pid\":7}}'; \
              echo '{{\"type\":\"output\",\"stream\":\"stdout\",\"data\":\"aGkK\"}}'; \

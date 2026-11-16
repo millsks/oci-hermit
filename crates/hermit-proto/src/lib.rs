@@ -11,12 +11,15 @@
 //! Since 1.1 the host can [`HostMessage::Run`] one command: the agent answers [`GuestMessage::Started`], streams
 //! its output as [`GuestMessage::Output`], takes its input as [`HostMessage::Stdin`], and reports
 //! [`GuestMessage::Exited`]. Bytes travel base64-encoded ([`b64`]), at most [`CHUNK`] raw bytes a message.
+//!
+//! Since 1.2 `Run` can name the [`User`] to run the command as. An older agent would ignore that field and run the
+//! command as root, so the host sends it only to an agent that speaks 1.2 or later.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 1);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 2);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
@@ -55,11 +58,24 @@ pub enum HostMessage {
         rows: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cols: Option<u16>,
+        /// Who to run the command as (1.2); root when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<User>,
     },
     /// Bytes for the command's stdin, base64-encoded (1.1).
     Stdin { data: String },
     /// The host's stdin reached end of file (1.1).
     StdinClosed,
+}
+
+/// The identity a command runs as, already resolved against the image's `/etc/passwd` and `/etc/group`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct User {
+    pub uid: u32,
+    pub gid: u32,
+    /// Supplementary group IDs.
+    #[serde(default)]
+    pub groups: Vec<u32>,
 }
 
 /// Messages sent from the guest agent to the host tool.
@@ -300,8 +316,19 @@ mod tests {
             tty: true,
             rows: Some(24),
             cols: None,
+            user: Some(User {
+                uid: 1000,
+                gid: 1000,
+                groups: vec![27],
+            }),
         };
         assert_eq!(decode::<HostMessage>(&encode(&run).unwrap()).unwrap(), run);
+        // A 1.1 host sends no user, and that still decodes.
+        let old = r#"{"type":"run","argv":["id"],"env":[],"cwd":"/","tty":false}"#;
+        assert!(matches!(
+            decode::<HostMessage>(old).unwrap(),
+            HostMessage::Run { user: None, .. }
+        ));
         let output = GuestMessage::Output {
             stream: Stream::Stderr,
             data: b64::encode(&[0u8; CHUNK]),

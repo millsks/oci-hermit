@@ -16,6 +16,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
 | `crates/oci-hermit/src/image.rs` | reads an OCI image layout (directory or `.tar`): manifest for the guest arch, config, layers |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
+| `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
 | `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
 | `crates/hermit-proto` | control protocol shared by host and agent: newline-delimited JSON (max 64 KiB a line) over the virtio-serial port `org.oci-hermit.control`, which QEMU wires to its stdin/stdout; the `Framer` both sides use |
@@ -71,3 +72,7 @@ Everything runs through pixi.
   replace both. Blob digests are not verified yet (#14).
 - The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
   children inherit that mask, so anything it spawns must reset the signal mask before exec.
+- Commands run as the image's `User` (#66). Around `posix_spawn` the agent switches its real and effective IDs to the
+  user and keeps root as its saved IDs, so the command's exec drops root for good; then it takes root back. Never drop
+  the saved root ID: PID 1 needs root to power off. The host sends a user only to an agent speaking protocol 1.2 or
+  later, since an older one would ignore it and run the command as root.

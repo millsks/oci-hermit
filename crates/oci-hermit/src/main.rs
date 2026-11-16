@@ -10,6 +10,7 @@ mod initramfs;
 mod qemu;
 mod rootfs;
 mod supervisor;
+mod users;
 
 use clap::Parser;
 use std::ffi::OsString;
@@ -313,6 +314,8 @@ fn run_in_sandbox(
     let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
     let image = image::Image::open(&image_path, arch)?;
     let rootfs = image.rootfs()?;
+    let user_spec = args.user.as_deref().or(image.config.user.as_deref()).unwrap_or("");
+    let identity = users::resolve(user_spec, &rootfs)?;
     let argv = image.config.argv(&args.command);
     if argv.is_empty() {
         return Err("the image has no entrypoint or command, and none was given".into());
@@ -346,10 +349,21 @@ fn run_in_sandbox(
         |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
     timings.mark("prepare");
     let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
-    sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
+    let (_, version) = sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
     timings.mark("boot");
+    // An agent older than 1.2 ignores the user and would run the command as root.
+    if !identity.is_root() && version < (1, 2) {
+        return Err(format!(
+            "the guest agent speaks control protocol {}.{} and cannot run a command as a user; it needs 1.2 or later",
+            version.0, version.1
+        )
+        .into());
+    }
 
     let mut command_env = image.config.env.clone().unwrap_or_default();
+    if !command_env.iter().any(|e| e.starts_with("HOME=")) {
+        command_env.push(format!("HOME={}", identity.home));
+    }
     if args.tty && !command_env.iter().any(|e| e.starts_with("TERM=")) {
         command_env.push(format!(
             "TERM={}",
@@ -366,6 +380,11 @@ fn run_in_sandbox(
             .then(crossterm::terminal::size)
             .and_then(Result::ok)
             .map(|(cols, rows)| (rows, cols)),
+        user: (!identity.is_root()).then(|| hermit_proto::User {
+            uid: identity.uid,
+            gid: identity.gid,
+            groups: identity.groups.clone(),
+        }),
     };
     let stdin = args.interactive.then(|| {
         let (chunks, input) = std::sync::mpsc::channel();
@@ -443,7 +462,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.1"));
+        assert!(out.contains("control protocol 1.2"));
         assert!(err.is_empty());
     }
 
@@ -517,7 +536,7 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.0)"),
+                out.contains("(control protocol 1.2)"),
                 "the fake agent speaks 1.0: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
@@ -599,11 +618,12 @@ mod tests {
             seen,
             hermit_proto::HostMessage::Run {
                 argv: vec!["sh".into(), "-c".into(), "echo hi".into()],
-                env: vec!["PATH=/bin".into()],
+                env: vec!["PATH=/bin".into(), "HOME=/".into()],
                 cwd: "/srv".into(),
                 tty: false,
                 rows: None,
                 cols: None,
+                user: None,
             }
         );
         // The initramfs holds the agent and the image's files under rootfs/.
@@ -662,6 +682,95 @@ mod tests {
         let (code, _, err) = run_with(&env, &["run", "--rm", "--platform", "linux/arm64", "."]);
         assert_eq!(code, 125);
         assert!(err.contains("no bundled QEMU found"), "{err}");
+    }
+
+    /// Runs `args` against an image whose config sets `User` to `image_user`, with a fake agent speaking `agent`;
+    /// returns the exit code, stderr and the `Run` message the agent saw, if any.
+    #[cfg(unix)]
+    fn run_as(
+        name: &str,
+        image_user: &str,
+        agent: &str,
+        args: &[&str],
+    ) -> (u8, String, Option<hermit_proto::HostMessage>) {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch(name);
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        std::fs::write(bundle.join("agent.version"), agent).unwrap();
+        let guest = fake_guest(&format!("{name}-guest"));
+        let layer = rootfs::testing::Layer::new()
+            .dir("etc")
+            .file(
+                "etc/passwd",
+                b"root:x:0:0:root:/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n",
+            )
+            .file("etc/group", b"root:x:0:\napp:x:1000:\nvideo:x:44:app\n")
+            .bytes();
+        let config = format!(r#"{{"architecture":"ARCH","config":{{"Cmd":["id"],"User":"{image_user}"}}}}"#);
+        let layout = image::testing::layout(
+            &qemu::testing::scratch(&format!("{name}-image")),
+            &[("amd64", layer)],
+            &config,
+        );
+        let argv: Vec<&str> = ["run", "--platform", "linux/amd64"]
+            .into_iter()
+            .chain(args.iter().copied())
+            .chain([layout.to_str().unwrap()])
+            .collect();
+        let (code, _, err) = run_with(&with_bundle(&bundle, Some(&guest)), &argv);
+        let seen = std::fs::read_to_string(bundle.join("run.seen"))
+            .ok()
+            .map(|line| hermit_proto::decode(&line).unwrap());
+        (code, err, seen)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_runs_as_the_images_user_or_the_one_given() {
+        let user = |seen: Option<hermit_proto::HostMessage>| match seen {
+            Some(hermit_proto::HostMessage::Run { user, env, .. }) => (user, env),
+            other => panic!("{other:?}"),
+        };
+        let (code, err, seen) = run_as("main-user-image", "app", "1,2", &[]);
+        assert_eq!(code, 3, "{err}");
+        let (who, env) = user(seen);
+        assert_eq!(
+            who,
+            Some(hermit_proto::User {
+                uid: 1000,
+                gid: 1000,
+                groups: vec![44]
+            })
+        );
+        assert_eq!(env, ["HOME=/home/app"]);
+
+        // -u wins over the image; root is sent as no user at all.
+        let (code, err, seen) = run_as("main-user-flag", "app", "1,2", &["-u", "root"]);
+        assert_eq!(code, 3, "{err}");
+        assert_eq!(user(seen), (None, vec!["HOME=/root".to_string()]));
+        let (_, _, seen) = run_as("main-user-numeric", "", "1,2", &["--user", "4242:44"]);
+        assert_eq!(user(seen).0.map(|u| (u.uid, u.gid)), Some((4242, 44)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_refuses_users_it_cannot_honour() {
+        // A name the image does not have fails before anything boots.
+        let (code, err, seen) = run_as("main-user-ghost", "ghost", "1,2", &[]);
+        assert_eq!(code, 125);
+        assert_eq!(err, "oci-hermit: user \"ghost\" is not in the image's /etc/passwd\n");
+        assert!(seen.is_none());
+        // An agent that predates users would run the command as root, so it is never asked to.
+        let (code, err, seen) = run_as("main-user-old-agent", "app", "1,1", &[]);
+        assert_eq!(code, 125);
+        assert!(
+            err.contains("speaks control protocol 1.1 and cannot run a command as a user"),
+            "{err}"
+        );
+        assert!(seen.is_none());
+        // Root needs nothing new from the agent.
+        let (code, err, _) = run_as("main-user-old-root", "", "1,1", &[]);
+        assert_eq!(code, 3, "{err}");
     }
 
     #[test]

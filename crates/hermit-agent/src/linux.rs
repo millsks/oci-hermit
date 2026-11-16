@@ -23,12 +23,37 @@ use nix::sys::signal::{SigSet, Signal as NixSignal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{Pid, chdir, chroot, pipe2, setsid, tcsetpgrp, ttyname};
+use nix::unistd::{
+    Gid, Pid, Uid, chdir, chroot, fchown, pipe2, setgroups, setresgid, setresuid, setsid, tcsetpgrp, ttyname,
+};
 
 use crate::init::{self, Event, Mount, Reaped, RunSpec, Signal, System};
 
 /// Where `oci-hermit run` puts the image's root filesystem in the initramfs.
 const ROOTFS: &str = "/rootfs";
+
+/// Spawn the command as `user`. The agent takes the user's real and effective IDs and keeps root as its saved IDs, so
+/// the command's exec drops root for good while the agent takes root back afterwards: PID 1 still has to power off.
+fn spawn_as(user: Option<&hermit_proto::User>, spawn: impl FnOnce() -> nix::Result<Pid>) -> io::Result<Pid> {
+    let Some(user) = user else {
+        return spawn().map_err(context("starting the command"));
+    };
+    let groups: Vec<Gid> = user.groups.iter().copied().map(Gid::from_raw).collect();
+    let (uid, gid, root) = (Uid::from_raw(user.uid), Gid::from_raw(user.gid), Uid::from_raw(0));
+    let spawned = setgroups(&groups)
+        .map_err(context("setting the command's groups"))
+        .and_then(|()| setresgid(gid, gid, Gid::from_raw(0)).map_err(context("switching to the command's group")))
+        .and_then(|()| setresuid(uid, uid, root).map_err(context("switching to the command's user")))
+        .and_then(|()| spawn().map_err(context("starting the command")));
+    // The user ID first: changing groups needs root.
+    let restored = setresuid(root, root, root)
+        .and_then(|()| setresgid(Gid::from_raw(0), Gid::from_raw(0), Gid::from_raw(0)))
+        .and_then(|()| setgroups(&[]))
+        .map_err(context("taking root back"));
+    let pid = spawned?;
+    restored?;
+    Ok(pid)
+}
 
 /// `PATH` when the image's environment has none, as Docker uses.
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -338,11 +363,15 @@ impl System for Linux {
             let terminal = open(&name, OFlag::O_RDWR | OFlag::O_CLOEXEC, Mode::empty())
                 .map_err(context("opening the terminal"))?;
             drop(pty.slave);
+            if let Some(user) = &spec.user {
+                fchown(&terminal, Some(Uid::from_raw(user.uid)), None).map_err(context("handing over the terminal"))?;
+            }
             for fd in 0..3 {
                 actions.add_dup2(terminal.as_raw_fd(), fd)?;
             }
-            let pid =
-                posix_spawn(path.as_path(), &actions, &attr, &argv, &envp).map_err(context("starting the command"))?;
+            let pid = spawn_as(spec.user.as_ref(), || {
+                posix_spawn(path.as_path(), &actions, &attr, &argv, &envp)
+            })?;
             let _ = tcsetpgrp(&terminal, pid);
             let master = File::from(pty.master);
             self.run = Some(Running {
@@ -359,8 +388,9 @@ impl System for Linux {
             actions.add_dup2(stdin_r.as_raw_fd(), 0)?;
             actions.add_dup2(stdout_w.as_raw_fd(), 1)?;
             actions.add_dup2(stderr_w.as_raw_fd(), 2)?;
-            let pid =
-                posix_spawn(path.as_path(), &actions, &attr, &argv, &envp).map_err(context("starting the command"))?;
+            let pid = spawn_as(spec.user.as_ref(), || {
+                posix_spawn(path.as_path(), &actions, &attr, &argv, &envp)
+            })?;
             self.run = Some(Running {
                 tty: false,
                 stdin: Some(File::from(stdin_w)),
@@ -604,6 +634,7 @@ mod tests {
             cwd: "/".into(),
             tty: false,
             size: None,
+            user: None,
         };
         assert_eq!(sys.start(&spec).unwrap_err().kind(), ErrorKind::AlreadyExists);
         assert_eq!(sys.write_stdin(b"x").unwrap_err().kind(), ErrorKind::NotConnected);

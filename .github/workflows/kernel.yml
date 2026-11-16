@@ -260,6 +260,13 @@ jobs:
           [ "$code" = 3 ] || { echo "::error::exit code $code with -t, expected 3"; exit 1; }
           grep -q '/dev/pts/' <<< "$tty"
 
+          # -u runs the command as another user from the image's /etc/passwd, with that user's HOME.
+          # shellcheck disable=SC2016 # expands in the guest's shell
+          who=$("$hermit" run -u nobody --platform "$platform" debian.tar sh -c 'id; echo "HOME=$HOME"')
+          echo "$who"
+          expected=$'uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)\nHOME=/nonexistent'
+          [ "$who" = "$expected" ] || { echo "::error::-u nobody ran as '$who'"; exit 1; }
+
           {
             echo "## ${{ matrix.host }} host, ${{ matrix.arch }} guest"
             echo
@@ -274,6 +281,8 @@ jobs:
             echo "$ oci-hermit run -t --platform $platform debian.tar sh -c 'tty; exit 3'"
             echo "$tty"
             echo "(exit code 3)"
+            echo "$ oci-hermit run -u nobody --platform $platform debian.tar sh -c 'id; echo \"HOME=\$HOME\"'"
+            echo "$who"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Measure the time to a shell
