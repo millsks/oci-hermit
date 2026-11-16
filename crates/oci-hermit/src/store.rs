@@ -67,6 +67,13 @@ impl Store {
         self.blob_path(digest).is_file()
     }
 
+    /// The stored blob with `digest`, checked against it.
+    pub fn blob(&self, digest: &str) -> Result<Vec<u8>, ImageError> {
+        let bytes = std::fs::read(self.blob_path(digest))?;
+        image::verify(digest, &bytes)?;
+        Ok(bytes)
+    }
+
     /// Adds a blob, refusing it unless it hashes to `digest`.
     pub fn put_blob(&self, digest: &str, bytes: &[u8]) -> Result<(), ImageError> {
         image::verify(digest, bytes)?;

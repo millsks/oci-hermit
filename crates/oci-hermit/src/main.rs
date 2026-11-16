@@ -278,29 +278,78 @@ fn pull_image(
     Ok(())
 }
 
-/// The image `run` names: a local layout or archive, else a reference in the store, pulled first if missing.
+/// The image `run` names, for `requested` or, without `--platform`, for the host's architecture or else the other
+/// one (as Docker runs an image built for another platform under emulation): a local layout or archive, else a name
+/// or ID in the store, else pulled. Returns the image and the guest architecture it needs.
 fn open_image(
     name: &str,
-    arch: qemu::GuestArch,
+    requested: Option<qemu::GuestArch>,
     env: &Env,
     err: &mut impl Write,
-) -> Result<image::Image, Box<dyn std::error::Error>> {
+) -> Result<(image::Image, qemu::GuestArch), Box<dyn std::error::Error>> {
+    let choices = match requested {
+        Some(arch) => vec![arch],
+        None => {
+            let host = qemu::GuestArch::host().ok_or("cannot tell the host architecture; pass --platform")?;
+            vec![host, other_arch(host)]
+        }
+    };
+    let fall_back = |arch: qemu::GuestArch, err: &mut dyn Write| {
+        if arch != choices[0] {
+            let _ = writeln!(
+                err,
+                "WARNING: the image has no linux/{} variant; running its linux/{} variant (choose with --platform)",
+                image::oci_arch(choices[0]),
+                image::oci_arch(arch)
+            );
+        }
+    };
     let path = PathBuf::from(name);
     if path.exists() {
-        return Ok(image::Image::open(&path, arch)?);
+        for (i, &arch) in choices.iter().enumerate() {
+            match image::Image::open(&path, arch) {
+                Ok(image) => {
+                    fall_back(arch, err);
+                    return Ok((image, arch));
+                }
+                Err(image::ImageError::NoPlatform { .. }) if i + 1 < choices.len() => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
     let store = open_store(env)?;
-    // An image ID (or any name exactly as stored), as `load` reports for images without a name.
-    if store.has(name, "linux", image::oci_arch(arch)) {
-        return Ok(image::Image::open_named(store.path(), Some(name), arch)?);
+    // The name exactly as stored (an image ID from `load`, say), then as Docker spells it out.
+    let reference = registry::normalize(name);
+    let mut names = vec![name.to_string()];
+    names.extend(reference.as_ref().ok().map(oci_client::Reference::whole));
+    for &arch in &choices {
+        for stored in &names {
+            if store.has(stored, "linux", image::oci_arch(arch)) {
+                fall_back(arch, err);
+                return Ok((image::Image::open_named(store.path(), Some(stored), arch)?, arch));
+            }
+        }
     }
-    let reference = registry::normalize(name)?;
-    let full = reference.whole();
-    if !store.has(&full, "linux", image::oci_arch(arch)) {
-        let _ = writeln!(err, "Unable to find image '{name}' locally");
-        registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, err)?;
+    let reference = reference?;
+    let _ = writeln!(err, "Unable to find image '{name}' locally");
+    for (i, &arch) in choices.iter().enumerate() {
+        match registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, err) {
+            Ok(pulled) => {
+                fall_back(arch, err);
+                return Ok((image::Image::open_named(store.path(), Some(&pulled.name), arch)?, arch));
+            }
+            Err(registry::PullError::NoPlatform(_)) if i + 1 < choices.len() => {}
+            Err(e) => return Err(e.into()),
+        }
     }
-    Ok(image::Image::open_named(store.path(), Some(&full), arch)?)
+    unreachable!("the last choice returns")
+}
+
+fn other_arch(arch: qemu::GuestArch) -> qemu::GuestArch {
+    match arch {
+        qemu::GuestArch::X86_64 => qemu::GuestArch::Aarch64,
+        qemu::GuestArch::Aarch64 => qemu::GuestArch::X86_64,
+    }
 }
 
 /// `--memory` as MiB: a number with an optional `k`, `m` or `g` suffix (bytes when there is none, as Docker).
@@ -384,11 +433,15 @@ fn run_in_sandbox(
     if let Some(refusal) = not_supported_yet(args) {
         return Err(refusal.into());
     }
-    let arch = guest_arch(args.platform.as_deref())?;
+    let requested = match args.platform.as_deref() {
+        Some(platform) => Some(guest_arch(Some(platform))?),
+        None => None,
+    };
+    // The bundle first: without it nothing runs, so there is no point pulling an image.
     let bundle = qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe))?;
+    let (image, arch) = open_image(&args.image, requested, env, err)?;
     qemu::verify(&bundle, arch)?;
     let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
-    let image = open_image(&args.image, arch, env, err)?;
     let rootfs = image.rootfs()?;
     let user_spec = args.user.as_deref().or(image.config.user.as_deref()).unwrap_or("");
     let identity = users::resolve(user_spec, &rootfs)?;
@@ -950,6 +1003,62 @@ mod tests {
         let (code, _, err) = run_with(&env, &["load", "-i", "/nonexistent/image.tar"]);
         assert_eq!(code, 1);
         assert!(err.starts_with("oci-hermit: "), "{err}");
+    }
+
+    /// The architecture this host would not pick by itself.
+    fn foreign() -> (qemu::GuestArch, &'static str) {
+        let arch = other_arch(qemu::GuestArch::host().unwrap());
+        (arch, image::oci_arch(arch))
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_falls_back_to_the_only_architecture_an_image_has() {
+        let (_, foreign) = foreign();
+        let native = image::oci_arch(qemu::GuestArch::host().unwrap());
+        let warning = format!(
+            "WARNING: the image has no linux/{native} variant; running its linux/{foreign} variant (choose with --platform)\n"
+        );
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-fallback");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-fallback-guest");
+        let address = registry::testing::registry_of("main-fallback-registry", None, false, 0, &[foreign], true);
+        let env = Env {
+            registry: registry::Settings {
+                insecure: vec![address.clone()],
+                ..registry::Settings::default()
+            },
+            ..with_bundle(&bundle, Some(&guest))
+        };
+
+        // A local layout.
+        let layout = image::testing::layout(
+            &qemu::testing::scratch("main-fallback-layout"),
+            &[(foreign, image::testing::layer())],
+            r#"{"architecture":"ARCH","config":{"Cmd":["sh"]}}"#,
+        );
+        let (code, _, err) = run_with(&env, &["run", layout.to_str().unwrap()]);
+        assert_eq!(code, 3, "{err}");
+        assert!(err.starts_with(&warning), "{err}");
+        assert!(bundle.join("run.seen").exists());
+
+        // Pulled: the host's platform is not there, the other one is.
+        let reference = format!("{address}/test/app:1");
+        let (code, _, err) = run_with(&env, &["run", &reference]);
+        assert_eq!(code, 3, "{err}");
+        assert!(
+            err.starts_with(&format!("Unable to find image '{reference}' locally\n")),
+            "{err}"
+        );
+        assert!(err.contains(&warning), "{err}");
+        // Stored now, so no pull; asking for the host's platform outright is still an error.
+        let (code, _, err) = run_with(&env, &["run", &reference]);
+        assert_eq!(code, 3, "{err}");
+        assert_eq!(err, format!("{warning}oops\n"));
+        let (code, _, err) = run_with(&env, &["run", "--platform", &format!("linux/{native}"), &reference]);
+        assert_eq!(code, 125);
+        assert!(err.contains(&format!("has no linux/{native} variant")), "{err}");
     }
 
     #[test]
