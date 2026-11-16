@@ -135,6 +135,9 @@ pub struct RunArgs {
     /// Memory for the sandbox, e.g. 1g or 512m
     #[arg(short, long)]
     pub memory: Option<String>,
+    /// Run as this user instead of the image's: name|uid[:group|gid]
+    #[arg(short, long)]
+    pub user: Option<String>,
     /// Image to run
     pub image: String,
     /// Command and arguments (defaults to the image's entrypoint)

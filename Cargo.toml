@@ -30,6 +30,7 @@ nix = { version = "0.32.0", default-features = false, features = [
   "reboot",
   "signal",
   "term",
+  "user",
 ] }
 
 [workspace.lints.rust]

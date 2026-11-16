@@ -47,6 +47,8 @@ pub struct RunSpec {
     pub cwd: String,
     pub tty: bool,
     pub size: Option<(u16, u16)>,
+    /// Who the command runs as; root when `None`.
+    pub user: Option<hermit_proto::User>,
 }
 
 /// One early mount.
@@ -330,6 +332,7 @@ fn answer(
             tty,
             rows,
             cols,
+            user,
         } => {
             if *ran {
                 error("a command already ran in this sandbox")
@@ -342,12 +345,14 @@ fn answer(
                     cwd,
                     tty,
                     size: rows.zip(cols),
+                    user,
                 };
                 match sys.start(&spec) {
                     Ok(pid) => {
                         *ran = true;
                         *running = Some(pid);
-                        log(out, format_args!("started {:?} as pid {pid}", spec.argv));
+                        let uid = spec.user.as_ref().map_or(0, |u| u.uid);
+                        log(out, format_args!("started {:?} as pid {pid}, uid {uid}", spec.argv));
                         GuestMessage::Started { pid }
                     }
                     Err(e) => {
@@ -541,7 +546,7 @@ mod tests {
         assert_eq!(mounts.len(), EARLY_MOUNTS.len());
         assert_eq!(sys.calls[0], "block");
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.1)"));
+        assert!(log.contains("ready (control protocol 1.2)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -564,7 +569,12 @@ mod tests {
                 version: PROTOCOL_VERSION
             }]
         );
-        assert!(log.contains("host connected (control protocol 1.4)"));
+        let newer = format!(
+            "host connected (control protocol {}.{})",
+            PROTOCOL_VERSION.0,
+            PROTOCOL_VERSION.1 + 3
+        );
+        assert!(log.contains(&newer), "{log}");
     }
 
     #[test]
@@ -637,7 +647,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.1)"));
+        assert!(log.contains("ready (control protocol 1.2)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -666,6 +676,7 @@ mod tests {
             tty,
             rows: Some(40),
             cols: Some(120),
+            user: None,
         })
     }
 
@@ -675,6 +686,36 @@ mod tests {
             code,
             status: format!("exited with status {code}"),
         }])
+    }
+
+    #[test]
+    fn runs_the_command_as_the_user_the_host_names() {
+        let user = hermit_proto::User {
+            uid: 1000,
+            gid: 1000,
+            groups: vec![44],
+        };
+        let mut sys = Fake {
+            events: VecDeque::from([
+                line(&HostMessage::Run {
+                    argv: vec!["id".into()],
+                    env: Vec::new(),
+                    cwd: "/".into(),
+                    tty: false,
+                    rows: None,
+                    cols: None,
+                    user: Some(user.clone()),
+                }),
+                Ok(Event::Signal(Signal::Child)),
+                line(&HostMessage::Shutdown),
+            ]),
+            reaps: VecDeque::from([exits(0)]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(sys.started.len(), 1);
+        assert_eq!(sys.started[0].user, Some(user));
+        assert!(log.contains("as pid 42, uid 1000"), "{log}");
     }
 
     #[test]
@@ -699,6 +740,7 @@ mod tests {
                 cwd: "/".into(),
                 tty: true,
                 size: Some((40, 120)),
+                user: None,
             }]
         );
         assert_eq!(

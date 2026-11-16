@@ -168,6 +168,8 @@ pub struct Command {
     pub tty: bool,
     /// The host terminal's `(rows, cols)`, for a command with a terminal.
     pub size: Option<(u16, u16)>,
+    /// Who to run the command as; root when `None`.
+    pub user: Option<hermit_proto::User>,
 }
 
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
@@ -357,6 +359,7 @@ impl Sandbox {
             tty: command.tty,
             rows: command.size.map(|s| s.0),
             cols: command.size.map(|s| s.1),
+            user: command.user.clone(),
         })?;
         let deadline = Instant::now() + start_timeout;
         match self.receive(deadline, start_timeout)? {

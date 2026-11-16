@@ -113,7 +113,7 @@ impl Rootfs {
             .sum()
     }
 
-    #[cfg(test)]
+    /// The entry at `path` (relative, no leading slash), without following symbolic links.
     pub fn get(&self, path: &str) -> Option<&Node> {
         self.nodes.get(path)
     }
