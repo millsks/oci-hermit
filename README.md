@@ -5,7 +5,7 @@
 > A hermit for your containers: it lives alone, takes visitors only at the door you choose, and never goes out.
 
 > [!WARNING]
-> oci-hermit is an early spike. `oci-hermit run` runs a command from a local OCI image on Linux, macOS and Windows; most of the commands below are still to come. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
+> oci-hermit is an early spike. `oci-hermit pull` fetches an image from a registry, verifying every digest, and `oci-hermit run` runs a command from it (or from a local OCI layout) on Linux, macOS and Windows; most of the other commands below are still to come. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
 
 ## Why
 

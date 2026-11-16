@@ -149,7 +149,7 @@ pub fn resolve(spec: &str, rootfs: &Rootfs) -> Result<Identity, String> {
         _ => {
             if let Some(e) = entry {
                 for g in all_groups.iter().filter(|g| g.members.contains(&e.name)) {
-                    if g.gid != identity.gid && !identity.groups.contains(&g.gid) {
+                    if !identity.groups.contains(&g.gid) {
                         identity.groups.push(g.gid);
                     }
                 }
@@ -174,8 +174,8 @@ nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
 nohome:x:1001:1001:::/bin/sh
 ";
     const GROUP: &str = "\
-root:x:0:
-wheel:x:10:app,daemon
+root:x:0:root
+wheel:x:10:app,daemon,root
 app:x:1000:
 video:x:44:app
 nogroup:x:65534:
@@ -201,7 +201,8 @@ nogroup:x:65534:
 
     #[test]
     fn resolves_names_and_numbers_like_docker() {
-        assert_eq!(ids("").unwrap(), (0, 0, vec![], "/root".into()));
+        // As runc does, a group listing the user counts even when it is the primary group.
+        assert_eq!(ids("").unwrap(), (0, 0, vec![0, 10], "/root".into()));
         assert_eq!(ids("app").unwrap(), (1000, 1000, vec![10, 44], "/home/app".into()));
         assert_eq!(ids("1000").unwrap(), (1000, 1000, vec![10, 44], "/home/app".into()));
         assert_eq!(ids("app:video").unwrap(), (1000, 44, vec![], "/home/app".into()));

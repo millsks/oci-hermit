@@ -2,8 +2,10 @@
 //! `pixi oci pull` write).
 //!
 //! The manifest for the guest's architecture is picked from `index.json` (following nested indexes), and its
-//! config and layers are read from `blobs/`. Layers may be plain or gzip tarballs. Blob digests are not verified
-//! yet; that comes with the image store (#14).
+//! config and layers are read from `blobs/`. Layers may be plain or gzip tarballs. Every blob is checked against
+//! its sha256 digest as it is read, so a corrupt or altered image is an error, never a sandbox. A layout can hold
+//! several images, told apart by their `org.opencontainers.image.ref.name` annotation; the image store (`store`) is
+//! one such layout.
 
 use crate::qemu::GuestArch;
 use crate::rootfs::{LayerError, Rootfs};
@@ -16,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 const INDEX: &str = "application/vnd.oci.image.index.v1+json";
 const DOCKER_LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
+/// The annotation that names an image in a layout's `index.json`.
+pub const REF_NAME: &str = "org.opencontainers.image.ref.name";
 
 /// Why an image could not be read.
 #[derive(Debug)]
@@ -31,6 +35,10 @@ pub enum ImageError {
     /// A layer's media type cannot be read yet.
     Unsupported(String),
     Layer(LayerError),
+    /// A blob's contents do not hash to its digest.
+    Mismatch(String),
+    /// The layout holds no image with this name.
+    NotFound(String),
 }
 
 impl fmt::Display for ImageError {
@@ -50,6 +58,11 @@ impl fmt::Display for ImageError {
             ),
             ImageError::Unsupported(what) => write!(f, "{what} is not supported yet"),
             ImageError::Layer(e) => write!(f, "{e}"),
+            ImageError::Mismatch(digest) => write!(
+                f,
+                "blob {digest} does not match its digest: the image is corrupt or has been altered"
+            ),
+            ImageError::NotFound(name) => write!(f, "no image named {name}"),
         }
     }
 }
@@ -83,6 +96,29 @@ struct Descriptor {
     digest: String,
     #[serde(default)]
     platform: Option<Platform>,
+    #[serde(default)]
+    annotations: HashMap<String, String>,
+}
+
+/// `sha256:<hex>` of `bytes`.
+pub fn digest_of(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(bytes);
+    let mut digest = String::from("sha256:");
+    for byte in hash.iter() {
+        digest.push_str(&format!("{byte:02x}"));
+    }
+    digest
+}
+
+/// Checks that `bytes` hash to `digest`, which must be a well-formed sha256 digest.
+pub fn verify(digest: &str, bytes: &[u8]) -> Result<(), ImageError> {
+    blob_path(digest)?;
+    if digest_of(bytes).eq_ignore_ascii_case(digest) {
+        Ok(())
+    } else {
+        Err(ImageError::Mismatch(digest.to_string()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +200,13 @@ impl Source {
                 .ok_or_else(|| ImageError::Invalid(format!("{path} is missing"))),
         }
     }
+
+    /// The blob with `digest`, checked against it.
+    fn read_blob(&self, digest: &str) -> Result<Vec<u8>, ImageError> {
+        let bytes = self.read(&blob_path(digest)?)?;
+        verify(digest, &bytes)?;
+        Ok(bytes)
+    }
 }
 
 fn blob_path(digest: &str) -> Result<String, ImageError> {
@@ -190,6 +233,11 @@ pub struct Image {
 impl Image {
     /// Open the image at `path` (a layout directory or a `.tar` of one) for `arch`.
     pub fn open(path: &Path, arch: GuestArch) -> Result<Image, ImageError> {
+        Image::open_named(path, None, arch)
+    }
+
+    /// Open the image named `name` in the layout at `path`, or its only image when `name` is `None`, for `arch`.
+    pub fn open_named(path: &Path, name: Option<&str>, arch: GuestArch) -> Result<Image, ImageError> {
         let source = if path.is_dir() {
             Source::Dir(path.to_path_buf())
         } else {
@@ -213,8 +261,17 @@ impl Image {
         if !String::from_utf8_lossy(&layout).contains("imageLayoutVersion") {
             return Err(ImageError::Invalid("oci-layout has no imageLayoutVersion".into()));
         }
-        let manifest = Image::manifest_for(&source, &source.read("index.json")?, arch, 0)?;
-        let config_file: ConfigFile = json("image config", &source.read(&blob_path(&manifest.config.digest)?)?)?;
+        let mut index: Index = json("index", &source.read("index.json")?)?;
+        if let Some(name) = name {
+            index
+                .manifests
+                .retain(|d| d.annotations.get(REF_NAME).is_some_and(|n| n == name));
+            if index.manifests.is_empty() {
+                return Err(ImageError::NotFound(name.to_string()));
+            }
+        }
+        let manifest = Image::manifest_for(&source, index, arch, 0)?;
+        let config_file: ConfigFile = json("image config", &source.read_blob(&manifest.config.digest)?)?;
         if !config_file.architecture.is_empty() && config_file.architecture != oci_arch(arch) {
             return Err(ImageError::NoPlatform {
                 arch,
@@ -229,11 +286,10 @@ impl Image {
     }
 
     /// The manifest in `index` for `arch`, following nested indexes.
-    fn manifest_for(source: &Source, index: &[u8], arch: GuestArch, depth: usize) -> Result<Manifest, ImageError> {
+    fn manifest_for(source: &Source, index: Index, arch: GuestArch, depth: usize) -> Result<Manifest, ImageError> {
         if depth > 4 {
             return Err(ImageError::Invalid("indexes nested too deep".into()));
         }
-        let index: Index = json("index", index)?;
         let wanted = oci_arch(arch);
         let found: Vec<String> = index
             .manifests
@@ -254,9 +310,9 @@ impl Image {
                 _ => None,
             })
             .ok_or(ImageError::NoPlatform { arch, found })?;
-        let bytes = source.read(&blob_path(&pick.digest)?)?;
+        let bytes = source.read_blob(&pick.digest)?;
         if pick.media_type == INDEX || pick.media_type == DOCKER_LIST {
-            return Image::manifest_for(source, &bytes, arch, depth + 1);
+            return Image::manifest_for(source, json("index", &bytes)?, arch, depth + 1);
         }
         json("manifest", &bytes)
     }
@@ -265,7 +321,7 @@ impl Image {
     pub fn rootfs(&self) -> Result<Rootfs, ImageError> {
         let mut rootfs = Rootfs::new();
         for layer in &self.layers {
-            let blob = self.source.read(&blob_path(&layer.digest)?)?;
+            let blob = self.source.read_blob(&layer.digest)?;
             let media = layer.media_type.as_str();
             if media.ends_with("+zstd") || media.ends_with(".zstd") {
                 return Err(ImageError::Unsupported(format!("a zstd layer ({media})")));
@@ -286,9 +342,11 @@ pub(crate) mod testing {
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
-    /// A hex "digest" for test blobs: not a real sha256, which the reader does not check yet.
-    fn digest(n: u8) -> String {
-        format!("sha256:{}", format!("{n:02x}").repeat(32))
+    /// Writes `bytes` as a blob of the layout in `dir` and returns its digest.
+    pub(crate) fn blob(dir: &Path, bytes: &[u8]) -> String {
+        let digest = super::digest_of(bytes);
+        std::fs::write(dir.join("blobs/sha256").join(&digest[7..]), bytes).unwrap();
+        digest
     }
 
     /// An image layout directory with one manifest per `(arch, layer)` and the given config.
@@ -297,24 +355,10 @@ pub(crate) mod testing {
         std::fs::create_dir_all(&blobs).unwrap();
         std::fs::write(dir.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
         let mut manifests = Vec::new();
-        for (i, (arch, layer)) in images.iter().enumerate() {
-            let n = u8::try_from(i * 3).unwrap();
-            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-            gz.write_all(layer).unwrap();
-            let gz = gz.finish().unwrap();
-            let config = config.replace("ARCH", arch);
-            for (k, bytes) in [(n, config.into_bytes()), (n + 1, gz)] {
-                std::fs::write(blobs.join(&digest(k)[7..]), bytes).unwrap();
-            }
-            let manifest = format!(
-                r#"{{"schemaVersion":2,"config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{}"}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{}"}}]}}"#,
-                digest(n),
-                digest(n + 1)
-            );
-            std::fs::write(blobs.join(&digest(n + 2)[7..]), manifest).unwrap();
+        for (arch, layer) in images {
+            let (manifest, _) = manifest(dir, arch, layer, config);
             manifests.push(format!(
-                r#"{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{}","platform":{{"os":"linux","architecture":"{arch}"}}}}"#,
-                digest(n + 2)
+                r#"{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{manifest}","platform":{{"os":"linux","architecture":"{arch}"}}}}"#
             ));
         }
         std::fs::write(
@@ -323,6 +367,24 @@ pub(crate) mod testing {
         )
         .unwrap();
         dir.to_path_buf()
+    }
+
+    /// Writes a config, a gzip layer and a manifest for `arch` into the layout in `dir`; returns the manifest's
+    /// digest and bytes.
+    pub(crate) fn manifest(dir: &Path, arch: &str, layer: &[u8], config: &str) -> (String, Vec<u8>) {
+        std::fs::create_dir_all(dir.join("blobs/sha256")).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(layer).unwrap();
+        let gz = gz.finish().unwrap();
+        let config = config.replace("ARCH", arch);
+        let (config_digest, layer_digest) = (blob(dir, config.as_bytes()), blob(dir, &gz));
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},"layers":[{{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"{layer_digest}","size":{}}}]}}"#,
+            config.len(),
+            gz.len()
+        )
+        .into_bytes();
+        (blob(dir, &manifest), manifest)
     }
 
     /// The same layout, packed into a tar archive next to it.
@@ -384,6 +446,64 @@ mod tests {
         assert!(Image::open(&dir.join("absent.tar"), GuestArch::X86_64).is_err());
         assert!(matches!(blob_path("md5:00"), Err(ImageError::Unsupported(_))));
         assert!(matches!(blob_path("sha256:../../etc"), Err(ImageError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_blob_that_does_not_match_its_digest_is_refused() {
+        let dir = layout(&scratch("img-tampered"), &[("amd64", layer())], CONFIG);
+        let index = std::fs::read_to_string(dir.join("index.json")).unwrap();
+        let manifest = index.split("sha256:").nth(1).unwrap()[..64].to_string();
+        let manifest: String = std::fs::read_to_string(dir.join("blobs/sha256").join(&manifest)).unwrap();
+        let layer = manifest.rsplit("sha256:").next().unwrap()[..64].to_string();
+        let path = dir.join("blobs/sha256").join(&layer);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let image = Image::open(&dir, GuestArch::X86_64).unwrap();
+        let err = image.rootfs().err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            format!("blob sha256:{layer} does not match its digest: the image is corrupt or has been altered")
+        );
+        assert!(verify("sha256:00", b"").is_err());
+        assert_eq!(
+            digest_of(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn a_layout_can_hold_images_by_name() {
+        let dir = scratch("img-named");
+        std::fs::create_dir_all(dir.join("blobs/sha256")).unwrap();
+        std::fs::write(dir.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
+        let mut entries = Vec::new();
+        for (name, cmd) in [("example.com/a:1", "first"), ("example.com/b:1", "second")] {
+            let config = format!(r#"{{"architecture":"ARCH","config":{{"Cmd":["{cmd}"]}}}}"#);
+            let (digest, _) = super::testing::manifest(&dir, "amd64", &layer(), &config);
+            entries.push(format!(
+                r#"{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{digest}","platform":{{"os":"linux","architecture":"amd64"}},"annotations":{{"{REF_NAME}":"{name}"}}}}"#
+            ));
+        }
+        std::fs::write(
+            dir.join("index.json"),
+            format!(r#"{{"manifests":[{}]}}"#, entries.join(",")),
+        )
+        .unwrap();
+        let open = |name| Image::open_named(&dir, Some(name), GuestArch::X86_64);
+        assert_eq!(
+            open("example.com/b:1").unwrap().config.cmd,
+            Some(vec!["second".to_string()])
+        );
+        assert_eq!(
+            open("example.com/a:1").unwrap().config.cmd,
+            Some(vec!["first".to_string()])
+        );
+        assert_eq!(
+            open("example.com/c:1").err().unwrap().to_string(),
+            "no image named example.com/c:1"
+        );
     }
 
     #[test]

@@ -462,11 +462,11 @@ impl Sandbox {
     /// Kill QEMU and wait for it to exit. Stopping a sandbox that already stopped does nothing.
     pub fn stop(&mut self) -> io::Result<()> {
         self.to_agent = None;
-        if let Some(mut child) = self.child.take() {
-            if child.try_wait()?.is_none() {
-                child.kill()?;
-                child.wait()?;
-            }
+        if let Some(mut child) = self.child.take()
+            && child.try_wait()?.is_none()
+        {
+            child.kill()?;
+            child.wait()?;
         }
         Ok(())
     }

@@ -19,6 +19,10 @@ tar.workspace = true
 crossterm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+oci-client.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+sha2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 win32job.workspace = true
