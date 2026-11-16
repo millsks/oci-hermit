@@ -126,6 +126,12 @@ fn load_layout(source: &Source, store: &Store, tags: &HashMap<String, Vec<String
             return Err(ImageError::Invalid("too many manifests".into()));
         }
         let digest = text(&descriptor, "digest");
+        // `docker save` with containerd keeps the whole index but only the pulled platform's blobs; BuildKit adds
+        // attestations as `unknown/unknown` manifests. Both are skipped, as `docker load` does.
+        let present = |d: &str| image::blob_path(d).is_ok_and(|path| source.has(&path));
+        if !present(digest) || descriptor["platform"]["os"] == "unknown" {
+            continue;
+        }
         let bytes = source.read_blob(digest)?;
         let manifest = parse("manifest", &bytes)?;
         let media_type = match text(&descriptor, "mediaType") {
@@ -152,6 +158,9 @@ fn load_layout(source: &Source, store: &Store, tags: &HashMap<String, Vec<String
                 .flatten()
                 .map(|l| text(l, "digest")),
         );
+        if !blobs.iter().all(|d| present(d)) {
+            continue;
+        }
         copy_blobs(source, store, &blobs)?;
         store.put_blob(digest, &bytes)?;
         let (os, arch) = match &descriptor["platform"] {
@@ -352,6 +361,38 @@ mod tests {
     }
 
     #[test]
+    fn skips_platforms_whose_blobs_the_archive_left_out() {
+        // What `docker save` writes with the containerd image store: an index of every platform, blobs for one.
+        let dir = scratch("load-partial");
+        let (amd64, _) = manifest(&dir, "amd64", &layer(), CONFIG);
+        let missing = format!("sha256:{}", "ab".repeat(32));
+        let index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"{OCI_INDEX}","manifests":[
+                {{"mediaType":"{OCI_MANIFEST}","digest":"{amd64}","platform":{{"os":"linux","architecture":"amd64"}}}},
+                {{"mediaType":"{OCI_MANIFEST}","digest":"{missing}","platform":{{"os":"linux","architecture":"arm64"}}}},
+                {{"mediaType":"{OCI_MANIFEST}","digest":"{amd64}","platform":{{"os":"unknown","architecture":"unknown"}}}}]}}"#
+        );
+        let index_digest = crate::image::testing::blob(&dir, index.as_bytes());
+        std::fs::write(dir.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
+        std::fs::write(
+            dir.join("index.json"),
+            format!(
+                r#"{{"manifests":[{{"mediaType":"{OCI_INDEX}","digest":"{index_digest}","annotations":{{"{CONTAINERD_NAME}":"debian:bookworm-slim"}}}}]}}"#
+            ),
+        )
+        .unwrap();
+        let store = Store::open(&scratch("load-partial-store")).unwrap();
+        let loaded = load(&dir, &store, &mut Vec::new()).unwrap();
+        assert_eq!(
+            loaded,
+            [Loaded {
+                name: "docker.io/library/debian:bookworm-slim".into(),
+                platform: "linux/amd64".into()
+            }]
+        );
+    }
+
+    #[test]
     fn converts_the_older_docker_save_format() {
         let config = CONFIG.replace("ARCH", "amd64").into_bytes();
         let plain = Layer::new().dir("bin").file("bin/sh", b"#!elf").bytes();
@@ -394,6 +435,22 @@ mod tests {
         .unwrap();
         let err = load(&climbing, &store, &mut Vec::new()).err().unwrap();
         assert!(err.to_string().contains("points outside the image"), "{err}");
+
+        // An index whose platforms are all missing their blobs loads nothing, which is an error.
+        let partial = layout(&scratch("load-bad-partial"), &[("amd64", layer())], CONFIG);
+        for entry in std::fs::read_dir(partial.join("blobs/sha256")).unwrap() {
+            let path = entry.unwrap().path();
+            if std::fs::read(&path).unwrap().starts_with(&[0x1f, 0x8b]) {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        assert!(
+            load(&partial, &store, &mut Vec::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("no images")
+        );
 
         let none = scratch("load-bad").join("none.tar");
         std::fs::write(&none, tar_of(&[("manifest.json", b"[]".to_vec())])).unwrap();
