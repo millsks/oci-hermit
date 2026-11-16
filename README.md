@@ -5,7 +5,7 @@
 > A hermit for your containers: it lives alone, takes visitors only at the door you choose, and never goes out.
 
 > [!WARNING]
-> oci-hermit is in the design stage. Nothing here runs yet. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
+> oci-hermit is an early spike. `oci-hermit run` runs a command from a local OCI image on Linux, macOS and Windows; most of the commands below are still to come. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
 
 ## Why
 
@@ -17,6 +17,8 @@ Testing a container image usually needs Docker, a Podman machine or WSL. On lock
 - **Familiar commands.** Mirrors the Docker and Podman CLI, with a Compose subset for frontend-plus-backend apps.
 
 It targets smoke-testing prebuilt images: start an image and get a shell, or bring up a web app and hit it from your browser. Images arrive fully built; `npm install`, `pixi install` and the like happen before oci-hermit sees them.
+
+It is a development and testing tool, not a production runtime: it is slower than native and runs on its own guest kernel. [When to use oci-hermit](docs/when-to-use.md) covers what it is good for and where it differs from production.
 
 ## What it will look like
 
