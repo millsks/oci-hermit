@@ -1,12 +1,12 @@
 //! PID 1 duties, independent of the operating system so they can be tested on any host.
 //!
 //! The agent mounts the early filesystems, opens the control channel to the host, logs a ready line, then handles
-//! events until it is asked to stop: it answers the host's control messages (`hermit_proto`), reaps children on
-//! SIGCHLD, and powers off on the host's `Shutdown`, on SIGTERM or on SIGINT. Any fatal setup error is logged and
-//! also ends in a power-off, because PID 1 must never exit or panic. Without a control channel the agent still
-//! runs, and signals still stop it.
+//! events until it is asked to stop: it answers the host's control messages (`hermit_proto`), runs the one command
+//! a `Run` asks for and relays its input and output, reaps children on SIGCHLD, and powers off on the host's
+//! `Shutdown`, on SIGTERM or on SIGINT. Any fatal setup error is logged and also ends in a power-off, because PID 1
+//! must never exit or panic. Without a control channel the agent still runs, and signals still stop it.
 
-use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, PROTOCOL_VERSION};
+use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, PROTOCOL_VERSION, Stream, b64};
 use std::io::{self, ErrorKind, Write};
 
 /// A signal the agent waits for.
@@ -34,7 +34,19 @@ impl Signal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reaped {
     pub pid: i32,
+    /// The exit status, or 128 plus the signal that killed it, as a shell reports it.
+    pub code: i32,
     pub status: String,
+}
+
+/// The command a `Run` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSpec {
+    pub argv: Vec<String>,
+    pub env: Vec<String>,
+    pub cwd: String,
+    pub tty: bool,
+    pub size: Option<(u16, u16)>,
 }
 
 /// One early mount.
@@ -116,6 +128,8 @@ pub enum Event {
     Control(Frame),
     /// The host's end of the control channel went away.
     ControlClosed,
+    /// The running command wrote this.
+    Output(Stream, Vec<u8>),
 }
 
 /// The system calls PID 1 needs.
@@ -132,6 +146,14 @@ pub trait System {
     fn next_event(&mut self) -> io::Result<Event>;
     /// Send one encoded line to the host.
     fn send_control(&mut self, line: &str) -> io::Result<()>;
+    /// Start the command in the image's root filesystem, and return its process ID.
+    fn start(&mut self, spec: &RunSpec) -> io::Result<i32>;
+    /// Pass bytes to the running command's stdin.
+    fn write_stdin(&mut self, data: &[u8]) -> io::Result<()>;
+    /// Close the running command's stdin (a terminal is left open).
+    fn close_stdin(&mut self);
+    /// Whatever output the command left unread, once it has exited.
+    fn drain_output(&mut self) -> Vec<(Stream, Vec<u8>)>;
     /// Reap every child that has exited, without blocking.
     fn reap(&mut self) -> io::Result<Vec<Reaped>>;
     /// Flush filesystem buffers.
@@ -193,19 +215,23 @@ fn setup(sys: &mut impl System, out: &mut impl Write) -> io::Result<()> {
 
 /// Handle events until one asks the agent to stop.
 fn serve(sys: &mut impl System, out: &mut impl Write) {
+    // The process ID of the command a `Run` started, until it is reaped.
+    let mut running: Option<i32> = None;
+    let mut ran = false;
     loop {
         match sys.next_event() {
-            Ok(Event::Signal(Signal::Child)) => reap(sys, out),
+            Ok(Event::Signal(Signal::Child)) => reap(sys, out, &mut running),
             Ok(Event::Signal(sig)) => {
                 log(out, format_args!("received {}, shutting down", sig.name()));
                 return;
             }
             Ok(Event::Control(frame)) => {
-                if answer(sys, out, frame).is_break() {
+                if answer(sys, out, frame, &mut running, &mut ran).is_break() {
                     return;
                 }
             }
             Ok(Event::ControlClosed) => log(out, format_args!("control channel closed by the host")),
+            Ok(Event::Output(stream, bytes)) => send_output(sys, out, stream, &bytes),
             Err(e) => {
                 log(out, format_args!("fatal: waiting for events: {e}"));
                 return;
@@ -214,56 +240,8 @@ fn serve(sys: &mut impl System, out: &mut impl Write) {
     }
 }
 
-/// Answer one control frame. Breaks when the host asked for a shutdown.
-fn answer(sys: &mut impl System, out: &mut impl Write, frame: Frame) -> std::ops::ControlFlow<()> {
-    use std::ops::ControlFlow;
-    let (reply, flow) = match frame {
-        Frame::Line(line) => match hermit_proto::decode::<HostMessage>(&line) {
-            Ok(HostMessage::Hello { version }) if hermit_proto::compatible(version) => {
-                log(
-                    out,
-                    format_args!("host connected (control protocol {}.{})", version.0, version.1),
-                );
-                (
-                    GuestMessage::Ready {
-                        version: PROTOCOL_VERSION,
-                    },
-                    ControlFlow::Continue(()),
-                )
-            }
-            Ok(HostMessage::Hello { version }) => {
-                let message = format!(
-                    "control protocol {}.{} is not supported; this agent speaks {}.{}",
-                    version.0, version.1, PROTOCOL_VERSION.0, PROTOCOL_VERSION.1
-                );
-                log(out, format_args!("refused the host: {message}"));
-                (GuestMessage::Error { message }, ControlFlow::Continue(()))
-            }
-            Ok(HostMessage::Shutdown) => {
-                log(out, format_args!("host requested shutdown"));
-                (GuestMessage::ShuttingDown, ControlFlow::Break(()))
-            }
-            Err(e) => (
-                GuestMessage::Error {
-                    message: format!("not a control message: {e}"),
-                },
-                ControlFlow::Continue(()),
-            ),
-        },
-        Frame::TooLong => (
-            GuestMessage::Error {
-                message: format!("line longer than {} bytes", hermit_proto::MAX_LINE),
-            },
-            ControlFlow::Continue(()),
-        ),
-        Frame::NotUtf8 => (
-            GuestMessage::Error {
-                message: "line is not UTF-8".into(),
-            },
-            ControlFlow::Continue(()),
-        ),
-    };
-    match hermit_proto::encode(&reply) {
+fn send(sys: &mut impl System, out: &mut impl Write, reply: &GuestMessage) {
+    match hermit_proto::encode(reply) {
         Ok(line) => {
             if let Err(e) = sys.send_control(&line) {
                 log(out, format_args!("sending to the host failed: {e}"));
@@ -271,14 +249,145 @@ fn answer(sys: &mut impl System, out: &mut impl Write, frame: Frame) -> std::ops
         }
         Err(e) => log(out, format_args!("encoding a reply failed: {e}")),
     }
-    flow
 }
 
-fn reap(sys: &mut impl System, out: &mut impl Write) {
+fn send_output(sys: &mut impl System, out: &mut impl Write, stream: Stream, bytes: &[u8]) {
+    for chunk in bytes.chunks(hermit_proto::CHUNK) {
+        send(
+            sys,
+            out,
+            &GuestMessage::Output {
+                stream,
+                data: b64::encode(chunk),
+            },
+        );
+    }
+}
+
+fn error(message: impl Into<String>) -> GuestMessage {
+    GuestMessage::Error {
+        message: message.into(),
+    }
+}
+
+/// Answer one control frame. Breaks when the host asked for a shutdown.
+fn answer(
+    sys: &mut impl System,
+    out: &mut impl Write,
+    frame: Frame,
+    running: &mut Option<i32>,
+    ran: &mut bool,
+) -> std::ops::ControlFlow<()> {
+    use std::ops::ControlFlow;
+    let message = match frame {
+        Frame::Line(line) => match hermit_proto::decode::<HostMessage>(&line) {
+            Ok(message) => message,
+            Err(e) => {
+                send(sys, out, &error(format!("not a control message: {e}")));
+                return ControlFlow::Continue(());
+            }
+        },
+        Frame::TooLong => {
+            send(
+                sys,
+                out,
+                &error(format!("line longer than {} bytes", hermit_proto::MAX_LINE)),
+            );
+            return ControlFlow::Continue(());
+        }
+        Frame::NotUtf8 => {
+            send(sys, out, &error("line is not UTF-8"));
+            return ControlFlow::Continue(());
+        }
+    };
+    let reply = match message {
+        HostMessage::Hello { version } if hermit_proto::compatible(version) => {
+            log(
+                out,
+                format_args!("host connected (control protocol {}.{})", version.0, version.1),
+            );
+            GuestMessage::Ready {
+                version: PROTOCOL_VERSION,
+            }
+        }
+        HostMessage::Hello { version } => {
+            let message = format!(
+                "control protocol {}.{} is not supported; this agent speaks {}.{}",
+                version.0, version.1, PROTOCOL_VERSION.0, PROTOCOL_VERSION.1
+            );
+            log(out, format_args!("refused the host: {message}"));
+            error(message)
+        }
+        HostMessage::Shutdown => {
+            log(out, format_args!("host requested shutdown"));
+            send(sys, out, &GuestMessage::ShuttingDown);
+            return ControlFlow::Break(());
+        }
+        HostMessage::Run {
+            argv,
+            env,
+            cwd,
+            tty,
+            rows,
+            cols,
+        } => {
+            if *ran {
+                error("a command already ran in this sandbox")
+            } else if argv.is_empty() {
+                error("no command to run")
+            } else {
+                let spec = RunSpec {
+                    argv,
+                    env,
+                    cwd,
+                    tty,
+                    size: rows.zip(cols),
+                };
+                match sys.start(&spec) {
+                    Ok(pid) => {
+                        *ran = true;
+                        *running = Some(pid);
+                        log(out, format_args!("started {:?} as pid {pid}", spec.argv));
+                        GuestMessage::Started { pid }
+                    }
+                    Err(e) => {
+                        log(out, format_args!("starting {:?} failed: {e}", spec.argv));
+                        error(format!("starting {}: {e}", spec.argv[0]))
+                    }
+                }
+            }
+        }
+        HostMessage::Stdin { data } => match (b64::decode(&data), running.is_some()) {
+            (None, _) => error("stdin data is not base64"),
+            (Some(_), false) => error("no command is running"),
+            (Some(bytes), true) => {
+                if let Err(e) = sys.write_stdin(&bytes) {
+                    log(out, format_args!("writing to the command's stdin failed: {e}"));
+                }
+                return ControlFlow::Continue(());
+            }
+        },
+        HostMessage::StdinClosed => {
+            sys.close_stdin();
+            return ControlFlow::Continue(());
+        }
+    };
+    send(sys, out, &reply);
+    ControlFlow::Continue(())
+}
+
+fn reap(sys: &mut impl System, out: &mut impl Write, running: &mut Option<i32>) {
     match sys.reap() {
         Ok(children) => {
             for c in children {
                 log(out, format_args!("reaped pid {}: {}", c.pid, c.status));
+                if *running == Some(c.pid) {
+                    *running = None;
+                    for (stream, bytes) in sys.drain_output() {
+                        send_output(sys, out, stream, &bytes);
+                    }
+                    send(sys, out, &GuestMessage::Exited { code: c.code });
+                }
             }
         }
         Err(e) => log(out, format_args!("reaping children failed: {e}")),
@@ -310,6 +419,11 @@ mod tests {
         events: VecDeque<io::Result<Event>>,
         reaps: VecDeque<io::Result<Vec<Reaped>>>,
         sent: Vec<String>,
+        start_error: bool,
+        started: Vec<RunSpec>,
+        stdin: Vec<u8>,
+        stdin_closed: bool,
+        leftover: Vec<(Stream, Vec<u8>)>,
     }
 
     impl System for Fake {
@@ -354,6 +468,26 @@ mod tests {
             }
             self.sent.push(line.to_string());
             Ok(())
+        }
+        fn start(&mut self, spec: &RunSpec) -> io::Result<i32> {
+            if self.start_error {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    "executable file not found in $PATH",
+                ));
+            }
+            self.started.push(spec.clone());
+            Ok(42)
+        }
+        fn write_stdin(&mut self, data: &[u8]) -> io::Result<()> {
+            self.stdin.extend_from_slice(data);
+            Ok(())
+        }
+        fn close_stdin(&mut self) {
+            self.stdin_closed = true;
+        }
+        fn drain_output(&mut self) -> Vec<(Stream, Vec<u8>)> {
+            std::mem::take(&mut self.leftover)
         }
         fn reap(&mut self) -> io::Result<Vec<Reaped>> {
             self.calls.push("reap".into());
@@ -407,7 +541,7 @@ mod tests {
         assert_eq!(mounts.len(), EARLY_MOUNTS.len());
         assert_eq!(sys.calls[0], "block");
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.0)"));
+        assert!(log.contains("ready (control protocol 1.1)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -430,7 +564,7 @@ mod tests {
                 version: PROTOCOL_VERSION
             }]
         );
-        assert!(log.contains("host connected (control protocol 1.3)"));
+        assert!(log.contains("host connected (control protocol 1.4)"));
     }
 
     #[test]
@@ -503,7 +637,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.0)"));
+        assert!(log.contains("ready (control protocol 1.1)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -522,6 +656,134 @@ mod tests {
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("sending to the host failed"));
         assert!(log.contains("received SIGTERM"));
+    }
+
+    fn run_line(argv: &[&str], tty: bool) -> io::Result<Event> {
+        line(&HostMessage::Run {
+            argv: argv.iter().map(|a| a.to_string()).collect(),
+            env: vec!["PATH=/bin".into()],
+            cwd: "/".into(),
+            tty,
+            rows: Some(40),
+            cols: Some(120),
+        })
+    }
+
+    fn exits(code: i32) -> io::Result<Vec<Reaped>> {
+        Ok(vec![Reaped {
+            pid: 42,
+            code,
+            status: format!("exited with status {code}"),
+        }])
+    }
+
+    #[test]
+    fn runs_a_command_and_relays_its_output_then_its_exit_code() {
+        let mut sys = Fake {
+            events: VecDeque::from([
+                run_line(&["sh", "-c", "echo hi"], true),
+                Ok(Event::Output(Stream::Stdout, b"hi\r\n".to_vec())),
+                Ok(Event::Signal(Signal::Child)),
+                line(&HostMessage::Shutdown),
+            ]),
+            reaps: VecDeque::from([exits(7)]),
+            leftover: vec![(Stream::Stderr, b"bye".to_vec())],
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(
+            sys.started,
+            [RunSpec {
+                argv: vec!["sh".into(), "-c".into(), "echo hi".into()],
+                env: vec!["PATH=/bin".into()],
+                cwd: "/".into(),
+                tty: true,
+                size: Some((40, 120)),
+            }]
+        );
+        assert_eq!(
+            replies(&sys),
+            [
+                GuestMessage::Started { pid: 42 },
+                GuestMessage::Output {
+                    stream: Stream::Stdout,
+                    data: b64::encode(b"hi\r\n")
+                },
+                GuestMessage::Output {
+                    stream: Stream::Stderr,
+                    data: b64::encode(b"bye")
+                },
+                GuestMessage::Exited { code: 7 },
+                GuestMessage::ShuttingDown,
+            ]
+        );
+        assert!(log.contains("started [\"sh\", \"-c\", \"echo hi\"] as pid 42"));
+    }
+
+    #[test]
+    fn passes_stdin_through_and_closes_it() {
+        let mut sys = with_events(vec![
+            run_line(&["cat"], false),
+            line(&HostMessage::Stdin {
+                data: b64::encode(b"input"),
+            }),
+            line(&HostMessage::StdinClosed),
+        ]);
+        run_fake(&mut sys);
+        assert_eq!(sys.stdin, b"input");
+        assert!(sys.stdin_closed);
+    }
+
+    #[test]
+    fn refuses_a_second_run_an_empty_one_and_one_that_fails_to_start() {
+        let mut sys = with_events(vec![
+            run_line(&[], false),
+            run_line(&["true"], false),
+            run_line(&["true"], false),
+        ]);
+        run_fake(&mut sys);
+        let got = replies(&sys);
+        assert!(matches!(&got[0], GuestMessage::Error { message } if message == "no command to run"));
+        assert_eq!(got[1], GuestMessage::Started { pid: 42 });
+        assert!(matches!(&got[2], GuestMessage::Error { message } if message.contains("already ran")));
+
+        let mut sys = Fake {
+            start_error: true,
+            events: VecDeque::from([run_line(&["nope"], false)]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        let got = replies(&sys);
+        assert!(
+            matches!(&got[0], GuestMessage::Error { message } if message == "starting nope: executable file not found in $PATH"),
+            "{got:?}"
+        );
+        assert!(log.contains("starting [\"nope\"] failed"));
+    }
+
+    #[test]
+    fn rejects_bad_stdin() {
+        let mut sys = with_events(vec![
+            line(&HostMessage::Stdin { data: "!!".into() }),
+            line(&HostMessage::Stdin {
+                data: b64::encode(b"x"),
+            }),
+        ]);
+        run_fake(&mut sys);
+        let got = replies(&sys);
+        assert!(matches!(&got[0], GuestMessage::Error { message } if message == "stdin data is not base64"));
+        assert!(matches!(&got[1], GuestMessage::Error { message } if message == "no command is running"));
+    }
+
+    #[test]
+    fn a_child_that_is_not_the_command_is_just_reaped() {
+        let mut sys = Fake {
+            events: VecDeque::from([Ok(Event::Signal(Signal::Child)), Ok(Event::Signal(Signal::Term))]),
+            reaps: VecDeque::from([exits(1)]),
+            ..Fake::default()
+        };
+        run_fake(&mut sys);
+        assert!(sys.sent.is_empty(), "no Exited for a pid that is not the command");
     }
 
     #[test]
@@ -549,6 +811,7 @@ mod tests {
             reaps: VecDeque::from([
                 Ok(vec![Reaped {
                     pid: 42,
+                    code: 0,
                     status: "exited with status 0".into(),
                 }]),
                 Err(io::Error::from(ErrorKind::Interrupted)),

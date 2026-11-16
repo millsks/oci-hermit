@@ -124,6 +124,8 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 - Handles exec, PTYs, logs, signals and exit codes for the host tool.
 - Runs containers of one pod in a shared network namespace.
 
+**`run` in M1.** Until the image pipeline below exists, `oci-hermit run` reads a local OCI layout (directory or `.tar`), applies its layers in memory, and puts the files in the initramfs under `/rootfs`. The agent mounts `proc`, `sys`, `dev` and `dev/pts` there, chroots in, and starts the command with `posix_spawn`, on a pty for `-t` or on pipes otherwise, then relays it over the control channel and reports its exit code. The VM is the isolation boundary until crun arrives.
+
 **Image pipeline.** pull or load → verify digests → per-layer EROFS image (cached) → attached read-only to the VM → stacked with overlayfs in the guest. The host never mounts anything, so no privileges are needed.
 
 ## Networking
