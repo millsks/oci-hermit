@@ -184,14 +184,46 @@ impl RunConfig {
 }
 
 /// Where the layout's files come from.
-enum Source {
+pub(crate) enum Source {
     Dir(PathBuf),
     /// A tar archive's files, read whole: images for smoke tests are small enough.
     Archive(HashMap<String, Vec<u8>>),
 }
 
 impl Source {
-    fn read(&self, path: &str) -> Result<Vec<u8>, ImageError> {
+    /// The files of a directory, or of a tar archive (read whole).
+    pub(crate) fn open(path: &Path) -> Result<Source, ImageError> {
+        if path.is_dir() {
+            return Ok(Source::Dir(path.to_path_buf()));
+        }
+        let mut files = HashMap::new();
+        let mut archive = tar::Archive::new(File::open(path)?);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if entry.header().entry_type() != tar::EntryType::Regular {
+                continue;
+            }
+            let name = String::from_utf8_lossy(&entry.path_bytes())
+                .trim_start_matches("./")
+                .to_string();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data)?;
+            files.insert(name, data);
+        }
+        Ok(Source::Archive(files))
+    }
+
+    /// Whether the file at `path` exists.
+    pub(crate) fn has(&self, path: &str) -> bool {
+        match self {
+            Source::Dir(dir) => safe(path).is_ok() && dir.join(path).is_file(),
+            Source::Archive(files) => files.contains_key(path),
+        }
+    }
+
+    /// The file at `path`, a relative path that must stay inside the layout.
+    pub(crate) fn read(&self, path: &str) -> Result<Vec<u8>, ImageError> {
+        safe(path)?;
         match self {
             Source::Dir(dir) => std::fs::read(dir.join(path)).map_err(|e| ImageError::Invalid(format!("{path}: {e}"))),
             Source::Archive(files) => files
@@ -202,14 +234,22 @@ impl Source {
     }
 
     /// The blob with `digest`, checked against it.
-    fn read_blob(&self, digest: &str) -> Result<Vec<u8>, ImageError> {
+    pub(crate) fn read_blob(&self, digest: &str) -> Result<Vec<u8>, ImageError> {
         let bytes = self.read(&blob_path(digest)?)?;
         verify(digest, &bytes)?;
         Ok(bytes)
     }
 }
 
-fn blob_path(digest: &str) -> Result<String, ImageError> {
+/// Refuses a path that is absolute or climbs out with `..`: archive manifests name files, and they are not trusted.
+fn safe(path: &str) -> Result<(), ImageError> {
+    if path.starts_with('/') || path.contains('\\') || path.split('/').any(|part| part == "..") {
+        return Err(ImageError::Invalid(format!("{path:?} points outside the image")));
+    }
+    Ok(())
+}
+
+pub(crate) fn blob_path(digest: &str) -> Result<String, ImageError> {
     let hex = digest
         .strip_prefix("sha256:")
         .ok_or_else(|| ImageError::Unsupported(format!("digest {digest:?} (only sha256)")))?;
@@ -238,25 +278,7 @@ impl Image {
 
     /// Open the image named `name` in the layout at `path`, or its only image when `name` is `None`, for `arch`.
     pub fn open_named(path: &Path, name: Option<&str>, arch: GuestArch) -> Result<Image, ImageError> {
-        let source = if path.is_dir() {
-            Source::Dir(path.to_path_buf())
-        } else {
-            let mut files = HashMap::new();
-            let mut archive = tar::Archive::new(File::open(path)?);
-            for entry in archive.entries()? {
-                let mut entry = entry?;
-                if entry.header().entry_type() != tar::EntryType::Regular {
-                    continue;
-                }
-                let name = String::from_utf8_lossy(&entry.path_bytes())
-                    .trim_start_matches("./")
-                    .to_string();
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                files.insert(name, data);
-            }
-            Source::Archive(files)
-        };
+        let source = Source::open(path)?;
         let layout = source.read("oci-layout")?;
         if !String::from_utf8_lossy(&layout).contains("imageLayoutVersion") {
             return Err(ImageError::Invalid("oci-layout has no imageLayoutVersion".into()));
