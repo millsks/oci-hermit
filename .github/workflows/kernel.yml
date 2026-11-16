@@ -212,8 +212,9 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: sandbox-${{ matrix.arch }}
+      # Release, so the timings below match what users get.
       - name: Build oci-hermit
-        run: pixi run cargo build -q -p oci-hermit
+        run: pixi run cargo build -q --release -p oci-hermit
       # Sandboxes keep their logs under the temp directory; they are shown at the end.
       - name: Use the runner's temp directory
         shell: bash
@@ -222,12 +223,12 @@ jobs:
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Boot a sandbox
         shell: bash
-        run: target/debug/oci-hermit machine boot --arch "${{ matrix.arch }}" --timeout 600
+        run: target/release/oci-hermit machine boot --arch "${{ matrix.arch }}" --timeout 600
       - name: Run commands from the Debian image
         shell: bash
         run: |
           set -euo pipefail
-          hermit=target/debug/oci-hermit
+          hermit=target/release/oci-hermit
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
           case "$RUNNER_OS" in
             Windows) host=$(cmd //c ver | tr -d '\r' | grep -v '^$') ;;
@@ -275,6 +276,28 @@ jobs:
             echo "(exit code 3)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Measure the time to a shell
+        shell: bash
+        env:
+          OCI_HERMIT_TIMINGS: "1"
+        run: |
+          set -euo pipefail
+          platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
+          {
+            echo
+            echo "### Time to a shell"
+            echo
+            echo "\`oci-hermit run --platform $platform debian.tar bash -ic exit\`, three runs, seconds:"
+            echo
+            echo "| Run | Prepare | Boot | Command | Stop | Total |"
+            echo "| --- | --- | --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for run in 1 2 3; do
+            line=$(target/release/oci-hermit run --platform "$platform" debian.tar bash -ic exit 2>&1 >/dev/null | tr -d '\r' | grep '^timings:')
+            echo "$line"
+            # "timings: prepare 0.27s, boot 1.10s, ..." -> "| 1 | 0.27 | 1.10 | ..."
+            echo "| $run | $(sed -E -e 's/^timings: //' -e 's/[a-z]+ ([0-9.]+)s/\1/g' -e 's/, / | /g' <<< "$line") |" >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         shell: bash

@@ -225,12 +225,31 @@ Software emulation is slower than native, but the target workloads are light bec
 
 | Activity | Expectation |
 | --- | --- |
-| Sandbox start | Seconds, not sub-second; to be measured in milestone 1 |
+| Sandbox start | About 1 to 1.5 seconds on a recent laptop; see [Measured start times](#measured-start-times) |
 | Interactive shell | Responsive |
 | Web frontend and backend under test traffic | Acceptable for smoke tests |
 | CPU-heavy work (compiles, large data loads) | Several times to more than 10x slower than native; out of scope |
 
 Levers if needed: layer caching, a pre-booted kernel snapshot, and more vCPUs through multi-threaded TCG.
+
+### Measured start times
+
+Time from `oci-hermit run` to a shell in the Debian 12 slim image, then back out: `oci-hermit run debian.tar bash -ic
+exit`, release build, one vCPU, median of the runs. Set `OCI_HERMIT_TIMINGS=1` to have `run` print the same breakdown
+on stderr:
+
+- **Prepare:** read the image, apply its layers and write the initramfs.
+- **Boot:** start QEMU, boot the kernel and wait for the agent to say it is ready.
+- **Command:** start the command and wait for it to exit (here, an interactive `bash` that exits at once).
+- **Stop:** power the guest off.
+
+| Host | Guest | Prepare | Boot | Command | Stop | Total |
+| --- | --- | --- | --- | --- | --- | --- |
+| Apple M4 Mac, macOS 26.2 | aarch64 | 0.30s | 0.58s | 0.05s | 0.02s | 0.96s |
+| Apple M4 Mac, macOS 26.2 | x86_64 | 0.28s | 1.09s | 0.05s | 0.03s | 1.45s |
+
+Boot dominates. On the M4 an x86_64 guest takes about twice as long to boot as an aarch64 one. The M1 `run` copies the whole image into the initramfs, so prepare grows with the image's size; the
+EROFS layer disks (#16, #17) remove that copy.
 
 ## Prior art
 
