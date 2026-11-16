@@ -313,6 +313,40 @@ jobs:
             echo "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # #15: what `docker save` writes, loaded offline and run by name. Only the Ubuntu runners have Docker.
+      - name: Load a docker save archive
+        if: matrix.host == 'linux-64'
+        shell: bash
+        env:
+          OCI_HERMIT_DATA_DIR: ${{ runner.temp }}/hermit-load
+        run: |
+          set -euo pipefail
+          platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
+          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          for attempt in 1 2 3 4; do
+            docker pull --platform "$platform" "$image" && break
+            sleep $((attempt * 5))
+          done
+          docker save -o "$RUNNER_TEMP/debian-docker.tar" "$image"
+          loaded=$(target/release/oci-hermit load -i "$RUNNER_TEMP/debian-docker.tar")
+          echo "$loaded"
+          grep -q "^Loaded image: $image ($platform)$" <<< "$loaded"
+          # shellcheck disable=SC2016 # expands in the guest's shell
+          out=$(target/release/oci-hermit run --platform "$platform" "$image" sh -c '. /etc/os-release; echo "$PRETTY_NAME"')
+          echo "$out"
+          grep -q '^Debian GNU/Linux 12' <<< "$out"
+          {
+            echo
+            echo "### Loaded from docker save"
+            echo
+            echo '```console'
+            echo "$ docker save -o debian-docker.tar $image"
+            echo "$ oci-hermit load -i debian-docker.tar"
+            echo "$loaded"
+            echo "$ oci-hermit run --platform $platform $image sh -c '. /etc/os-release; echo \"\$PRETTY_NAME\"'"
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Measure the time to a shell
         shell: bash
         env:

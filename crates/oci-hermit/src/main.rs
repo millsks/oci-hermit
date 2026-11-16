@@ -7,6 +7,7 @@ mod cli;
 mod guest;
 mod image;
 mod initramfs;
+mod load;
 mod qemu;
 mod registry;
 mod rootfs;
@@ -115,6 +116,15 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
         cli::Command::Machine(cli::MachineCommand::Info) => machine_info(env, out, err),
         cli::Command::Machine(cli::MachineCommand::Boot(args)) => machine_boot(args, env, out, err),
         cli::Command::Run(args) => run_container(args, env, out, err),
+        cli::Command::Load { input } => match open_store(env).map_err(Into::into).and_then(|store| {
+            load::load(std::path::Path::new(input), &store, out).map_err(Box::<dyn std::error::Error>::from)
+        }) {
+            Ok(_) => 0,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         cli::Command::Pull { platform, image } => match pull_image(image, platform.as_deref(), env, out) {
             Ok(()) => 0,
             Err(e) => {
@@ -279,8 +289,12 @@ fn open_image(
     if path.exists() {
         return Ok(image::Image::open(&path, arch)?);
     }
-    let reference = registry::normalize(name)?;
     let store = open_store(env)?;
+    // An image ID (or any name exactly as stored), as `load` reports for images without a name.
+    if store.has(name, "linux", image::oci_arch(arch)) {
+        return Ok(image::Image::open_named(store.path(), Some(name), arch)?);
+    }
+    let reference = registry::normalize(name)?;
     let full = reference.whole();
     if !store.has(&full, "linux", image::oci_arch(arch)) {
         let _ = writeln!(err, "Unable to find image '{name}' locally");
@@ -901,6 +915,41 @@ mod tests {
         let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", &reference]);
         assert_eq!(code, 3);
         assert_eq!(err, "oops\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn load_stores_an_archive_that_run_then_uses_by_name_or_id() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-load");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-load-guest");
+        let env = with_bundle(&bundle, Some(&guest));
+        let config = r#"{"architecture":"ARCH","config":{"Cmd":["from-the-archive"]}}"#;
+        let dir = image::testing::layout(
+            &qemu::testing::scratch("main-load-image"),
+            &[("amd64", image::testing::layer())],
+            config,
+        );
+        let tarball = image::testing::archive(&dir);
+        let (code, out, err) = run_with(&env, &["load", "-i", tarball.to_str().unwrap()]);
+        assert_eq!(code, 0, "{err}");
+        let id = out
+            .strip_prefix("Loaded image ID: ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_else(|| panic!("{out}"))
+            .to_string();
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", &id]);
+        assert_eq!(code, 3, "{err}");
+        assert!(
+            std::fs::read_to_string(bundle.join("run.seen"))
+                .unwrap()
+                .contains("from-the-archive")
+        );
+
+        let (code, _, err) = run_with(&env, &["load", "-i", "/nonexistent/image.tar"]);
+        assert_eq!(code, 1);
+        assert!(err.starts_with("oci-hermit: "), "{err}");
     }
 
     #[test]
