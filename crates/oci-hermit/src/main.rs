@@ -149,16 +149,21 @@ fn boot(
         arch.name(),
         console.display()
     );
-    let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log, &console)?;
-    let ready = sandbox.wait_for_console(hermit_proto::CONSOLE_READY, Duration::from_secs(args.timeout));
-    sandbox.stop()?;
-    match ready {
-        Ok(took) => {
-            let _ = writeln!(out, "agent ready after {:.1}s; sandbox stopped", took.as_secs_f64());
-            Ok(())
-        }
-        Err(e) => Err(format!("{e}; see {} and {}", console.display(), qemu_log.display()).into()),
-    }
+    let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
+    let see_logs =
+        |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
+    let timeout = Duration::from_secs(args.timeout);
+    let (took, version) = sandbox.handshake(timeout).map_err(see_logs)?;
+    let _ = writeln!(
+        out,
+        "agent ready after {:.1}s (control protocol {}.{})",
+        took.as_secs_f64(),
+        version.0,
+        version.1
+    );
+    sandbox.shutdown(timeout).map_err(see_logs)?;
+    let _ = writeln!(out, "guest powered off; sandbox stopped");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -199,7 +204,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 0.1"));
+        assert!(out.contains("control protocol 1.0"));
         assert!(err.is_empty());
     }
 
@@ -272,7 +277,8 @@ mod tests {
             assert_eq!((code, err.as_str()), (0, ""), "{arch}: {out}");
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
-            assert!(out.contains("sandbox stopped"));
+            assert!(out.contains("(control protocol 1.0)"));
+            assert!(out.contains("guest powered off; sandbox stopped"));
         }
         // Each boot got its own directory with the initramfs it built from the agent.
         let runs: Vec<_> = std::fs::read_dir(bundle.join("run")).unwrap().collect();
@@ -303,18 +309,16 @@ mod tests {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-boot-slow");
         qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-2)", "tcg");
-        // Overwrite the emulator with one that never prints the ready line.
+        // Overwrite the emulator with one that exits instead of answering.
         let x86 = bundle.join("bin").join(qemu::GuestArch::X86_64.binary_name());
-        let script = std::fs::read_to_string(&x86)
-            .unwrap()
-            .replace("sleep 30 ;;", "exit 3 ;;");
-        let script = script.replace("echo 'hermit-agent", "echo 'other");
-        std::fs::write(&x86, script).unwrap();
+        let script = std::fs::read_to_string(&x86).unwrap();
+        let start = script.find("*)").unwrap();
+        std::fs::write(&x86, format!("{}*) exit 3 ;;\nesac\n", &script[..start])).unwrap();
         let guest = fake_guest("main-boot-slow-guest");
         let env = with_bundle(&bundle, Some(&guest));
         let (code, _, err) = run_with(&env, &["machine", "boot", "--arch", "x86_64", "--timeout", "10"]);
         assert_eq!(code, 1);
-        assert!(err.contains("QEMU exited before the guest was ready"), "{err}");
+        assert!(err.contains("QEMU exited before the agent answered"), "{err}");
         assert!(err.contains("console.log"));
     }
 

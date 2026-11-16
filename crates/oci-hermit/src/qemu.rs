@@ -237,18 +237,17 @@ pub(crate) mod testing {
     }
 
     /// Shell scripts standing in for both emulators. They answer `--version` and `-accel help`; launched as a
-    /// sandbox, they write the agent's ready line to the console log named by `-chardev` and keep running.
+    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, then `ShuttingDown` and exit.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let ready = hermit_proto::CONSOLE_READY;
         let script = format!(
             "#!/bin/sh\n\
              case \"$1\" in\n\
              --version) echo '{version_line}' ;;\n\
              -accel) printf 'Accelerators supported in QEMU binary:\\n{accels}\\n' ;;\n\
-             *) for a in \"$@\"; do case \"$a\" in file,id=console,path=*) \
-             echo '{ready} 0.1)' >> \"${{a#file,id=console,path=}}\" ;; esac; done; sleep 30 ;;\n\
+             *) read hello; echo '{{\"type\":\"ready\",\"version\":[1,0]}}'; \
+             read bye; echo '{{\"type\":\"shutting_down\"}}'; exit 0 ;;\n\
              esac\n"
         );
         for arch in GuestArch::ALL {

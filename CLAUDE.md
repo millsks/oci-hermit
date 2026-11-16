@@ -16,7 +16,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
 | `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
-| `crates/hermit-proto` | control protocol shared by host and agent (newline-delimited JSON over virtio-serial) |
+| `crates/hermit-proto` | control protocol shared by host and agent: newline-delimited JSON (max 64 KiB a line) over the virtio-serial port `org.oci-hermit.control`, which QEMU wires to its stdin/stdout; the `Framer` both sides use |
 | `docs/design.md` | architecture, networking, mounts, security model |
 
 ## Commands
@@ -56,5 +56,8 @@ Everything runs through pixi.
 - The x86_64 kernel needs `CONFIG_PCI=y` although microvm has no PCI bus: without it ACPI fails to load, and the
   serial console, RTC and virtio-mmio devices all break. Userspace console writes then fail with EIO while the
   kernel's own messages still appear, which looks like a hang (#54).
+- The control channel is QEMU's stdin and stdout (`-chardev stdio`), so QEMU must never print to stdout: its
+  diagnostics go to stderr (`qemu.log`). Treat everything from the guest as untrusted: cap line length, reject what
+  is not a message, time out instead of blocking.
 - The guest agent (PID 1) must never exit or panic; it powers off instead. It blocks SIGTERM, SIGINT and SIGCHLD, and
   children inherit that mask, so anything it spawns must reset the signal mask before exec.

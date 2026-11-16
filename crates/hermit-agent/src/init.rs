@@ -1,10 +1,12 @@
 //! PID 1 duties, independent of the operating system so they can be tested on any host.
 //!
-//! The agent mounts the early filesystems, logs a ready line, then waits for signals: it reaps children on
-//! SIGCHLD and powers off on SIGTERM or SIGINT. Any fatal setup error is logged and also ends in a power-off,
-//! because PID 1 must never exit or panic. Signals are the interim shutdown request until the control
-//! protocol (issue #10) carries one.
+//! The agent mounts the early filesystems, opens the control channel to the host, logs a ready line, then handles
+//! events until it is asked to stop: it answers the host's control messages (`hermit_proto`), reaps children on
+//! SIGCHLD, and powers off on the host's `Shutdown`, on SIGTERM or on SIGINT. Any fatal setup error is logged and
+//! also ends in a power-off, because PID 1 must never exit or panic. Without a control channel the agent still
+//! runs, and signals still stop it.
 
+use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, PROTOCOL_VERSION};
 use std::io::{self, ErrorKind, Write};
 
 /// A signal the agent waits for.
@@ -105,16 +107,31 @@ pub const EARLY_MOUNTS: [Mount; 6] = [
     },
 ];
 
+/// Something that happened while the agent waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A blocked signal arrived.
+    Signal(Signal),
+    /// A frame arrived on the control channel.
+    Control(Frame),
+    /// The host's end of the control channel went away.
+    ControlClosed,
+}
+
 /// The system calls PID 1 needs.
 pub trait System {
     /// Create a directory and its parents.
     fn mkdir_all(&mut self, path: &str) -> io::Result<()>;
     /// Mount a filesystem; an already-mounted target fails with [`ErrorKind::ResourceBusy`].
     fn mount(&mut self, mount: &Mount) -> io::Result<()>;
-    /// Block SIGTERM, SIGINT and SIGCHLD so [`System::wait_signal`] receives them.
+    /// Block SIGTERM, SIGINT and SIGCHLD so [`System::next_event`] receives them.
     fn block_signals(&mut self) -> io::Result<()>;
-    /// Wait for the next blocked signal.
-    fn wait_signal(&mut self) -> io::Result<Signal>;
+    /// Open the virtio-serial port named [`CONTROL_PORT`].
+    fn open_control(&mut self) -> io::Result<()>;
+    /// Wait for the next signal or control frame.
+    fn next_event(&mut self) -> io::Result<Event>;
+    /// Send one encoded line to the host.
+    fn send_control(&mut self, line: &str) -> io::Result<()>;
     /// Reap every child that has exited, without blocking.
     fn reap(&mut self) -> io::Result<Vec<Reaped>>;
     /// Flush filesystem buffers.
@@ -129,19 +146,23 @@ fn log(out: &mut impl Write, msg: std::fmt::Arguments<'_>) {
     let _ = out.flush();
 }
 
-/// Run PID 1: set up, wait for a shutdown signal, then power off.
+/// Run PID 1: set up, handle events until asked to stop, then power off.
 ///
 /// Returns only if powering off failed, with that error.
 pub fn run(sys: &mut impl System, out: &mut impl Write) -> io::Error {
     log(out, format_args!("starting {} as PID 1", env!("CARGO_PKG_VERSION")));
     match setup(sys, out) {
         Ok(()) => {
-            let (major, minor) = hermit_proto::PROTOCOL_VERSION;
-            log(
-                out,
-                format_args!("ready (control protocol {major}.{minor}); SIGTERM or SIGINT powers off"),
-            );
-            wait_for_shutdown(sys, out);
+            match sys.open_control() {
+                Ok(()) => log(out, format_args!("control channel open on {CONTROL_PORT}")),
+                Err(e) => log(
+                    out,
+                    format_args!("no control channel ({e}); SIGTERM or SIGINT powers off"),
+                ),
+            }
+            let (major, minor) = PROTOCOL_VERSION;
+            log(out, format_args!("ready (control protocol {major}.{minor})"));
+            serve(sys, out);
         }
         Err(e) => log(out, format_args!("fatal: {e}")),
     }
@@ -170,20 +191,87 @@ fn setup(sys: &mut impl System, out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-fn wait_for_shutdown(sys: &mut impl System, out: &mut impl Write) {
+/// Handle events until one asks the agent to stop.
+fn serve(sys: &mut impl System, out: &mut impl Write) {
     loop {
-        match sys.wait_signal() {
-            Ok(Signal::Child) => reap(sys, out),
-            Ok(sig) => {
+        match sys.next_event() {
+            Ok(Event::Signal(Signal::Child)) => reap(sys, out),
+            Ok(Event::Signal(sig)) => {
                 log(out, format_args!("received {}, shutting down", sig.name()));
                 return;
             }
+            Ok(Event::Control(frame)) => {
+                if answer(sys, out, frame).is_break() {
+                    return;
+                }
+            }
+            Ok(Event::ControlClosed) => log(out, format_args!("control channel closed by the host")),
             Err(e) => {
-                log(out, format_args!("fatal: waiting for signals: {e}"));
+                log(out, format_args!("fatal: waiting for events: {e}"));
                 return;
             }
         }
     }
+}
+
+/// Answer one control frame. Breaks when the host asked for a shutdown.
+fn answer(sys: &mut impl System, out: &mut impl Write, frame: Frame) -> std::ops::ControlFlow<()> {
+    use std::ops::ControlFlow;
+    let (reply, flow) = match frame {
+        Frame::Line(line) => match hermit_proto::decode::<HostMessage>(&line) {
+            Ok(HostMessage::Hello { version }) if hermit_proto::compatible(version) => {
+                log(
+                    out,
+                    format_args!("host connected (control protocol {}.{})", version.0, version.1),
+                );
+                (
+                    GuestMessage::Ready {
+                        version: PROTOCOL_VERSION,
+                    },
+                    ControlFlow::Continue(()),
+                )
+            }
+            Ok(HostMessage::Hello { version }) => {
+                let message = format!(
+                    "control protocol {}.{} is not supported; this agent speaks {}.{}",
+                    version.0, version.1, PROTOCOL_VERSION.0, PROTOCOL_VERSION.1
+                );
+                log(out, format_args!("refused the host: {message}"));
+                (GuestMessage::Error { message }, ControlFlow::Continue(()))
+            }
+            Ok(HostMessage::Shutdown) => {
+                log(out, format_args!("host requested shutdown"));
+                (GuestMessage::ShuttingDown, ControlFlow::Break(()))
+            }
+            Err(e) => (
+                GuestMessage::Error {
+                    message: format!("not a control message: {e}"),
+                },
+                ControlFlow::Continue(()),
+            ),
+        },
+        Frame::TooLong => (
+            GuestMessage::Error {
+                message: format!("line longer than {} bytes", hermit_proto::MAX_LINE),
+            },
+            ControlFlow::Continue(()),
+        ),
+        Frame::NotUtf8 => (
+            GuestMessage::Error {
+                message: "line is not UTF-8".into(),
+            },
+            ControlFlow::Continue(()),
+        ),
+    };
+    match hermit_proto::encode(&reply) {
+        Ok(line) => {
+            if let Err(e) = sys.send_control(&line) {
+                log(out, format_args!("sending to the host failed: {e}"));
+            }
+        }
+        Err(e) => log(out, format_args!("encoding a reply failed: {e}")),
+    }
+    flow
 }
 
 fn reap(sys: &mut impl System, out: &mut impl Write) {
@@ -217,8 +305,11 @@ mod tests {
         mount_errors: HashMap<&'static str, ErrorKind>,
         mkdir_error: Option<&'static str>,
         block_error: bool,
-        signals: VecDeque<io::Result<Signal>>,
+        no_control: bool,
+        send_error: bool,
+        events: VecDeque<io::Result<Event>>,
         reaps: VecDeque<io::Result<Vec<Reaped>>>,
+        sent: Vec<String>,
     }
 
     impl System for Fake {
@@ -243,9 +334,26 @@ mod tests {
             }
             Ok(())
         }
-        fn wait_signal(&mut self) -> io::Result<Signal> {
+        fn open_control(&mut self) -> io::Result<()> {
+            self.calls.push("open_control".into());
+            if self.no_control {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    "no port named org.oci-hermit.control",
+                ));
+            }
+            Ok(())
+        }
+        fn next_event(&mut self) -> io::Result<Event> {
             self.calls.push("wait".into());
-            self.signals.pop_front().unwrap_or(Ok(Signal::Term))
+            self.events.pop_front().unwrap_or(Ok(Event::Signal(Signal::Term)))
+        }
+        fn send_control(&mut self, line: &str) -> io::Result<()> {
+            if self.send_error {
+                return Err(io::Error::from(ErrorKind::BrokenPipe));
+            }
+            self.sent.push(line.to_string());
+            Ok(())
         }
         fn reap(&mut self) -> io::Result<Vec<Reaped>> {
             self.calls.push("reap".into());
@@ -270,8 +378,24 @@ mod tests {
         calls.ends_with(&["sync".to_string(), "power_off".to_string()])
     }
 
+    fn line(msg: &HostMessage) -> io::Result<Event> {
+        let text = hermit_proto::encode(msg).unwrap();
+        Ok(Event::Control(Frame::Line(text.trim_end().to_string())))
+    }
+
+    fn replies(sys: &Fake) -> Vec<GuestMessage> {
+        sys.sent.iter().map(|l| hermit_proto::decode(l).unwrap()).collect()
+    }
+
+    fn with_events(events: Vec<io::Result<Event>>) -> Fake {
+        Fake {
+            events: VecDeque::from(events),
+            ..Fake::default()
+        }
+    }
+
     #[test]
-    fn mounts_everything_then_powers_off_on_sigterm() {
+    fn mounts_everything_opens_control_then_powers_off_on_sigterm() {
         let mut sys = Fake::default();
         let (err, log) = run_fake(&mut sys);
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
@@ -282,15 +406,122 @@ mod tests {
         let mounts: Vec<_> = sys.calls.iter().filter(|c| c.starts_with("mount ")).collect();
         assert_eq!(mounts.len(), EARLY_MOUNTS.len());
         assert_eq!(sys.calls[0], "block");
-        assert!(log.contains("ready (control protocol 0.1)"));
+        assert!(log.contains("control channel open on org.oci-hermit.control"));
+        assert!(log.contains("ready (control protocol 1.0)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
-            "the host waits for this line: {log}"
+            "people read this line: {log}"
         );
         assert!(log.contains("received SIGTERM, shutting down"));
         assert!(log.lines().all(|l| l.starts_with("hermit-agent: ")));
         assert!(ends_with_power_off(&sys.calls));
         assert!(log.contains("power off failed"));
+    }
+
+    #[test]
+    fn answers_a_compatible_hello_with_ready() {
+        let mut sys = with_events(vec![line(&HostMessage::Hello {
+            version: (PROTOCOL_VERSION.0, PROTOCOL_VERSION.1 + 3),
+        })]);
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(
+            replies(&sys),
+            [GuestMessage::Ready {
+                version: PROTOCOL_VERSION
+            }]
+        );
+        assert!(log.contains("host connected (control protocol 1.3)"));
+    }
+
+    #[test]
+    fn refuses_another_major_version_and_keeps_serving() {
+        let mut sys = with_events(vec![
+            line(&HostMessage::Hello { version: (9, 0) }),
+            line(&HostMessage::Hello {
+                version: PROTOCOL_VERSION,
+            }),
+        ]);
+        let (_, log) = run_fake(&mut sys);
+        let got = replies(&sys);
+        assert!(
+            matches!(&got[0], GuestMessage::Error { message } if message.contains("9.0 is not supported")),
+            "{got:?}"
+        );
+        assert!(matches!(got[1], GuestMessage::Ready { .. }));
+        assert!(log.contains("refused the host"));
+    }
+
+    #[test]
+    fn shuts_down_when_the_host_asks() {
+        let mut sys = with_events(vec![line(&HostMessage::Shutdown), Ok(Event::Signal(Signal::Int))]);
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(replies(&sys), [GuestMessage::ShuttingDown]);
+        assert!(log.contains("host requested shutdown"));
+        assert!(!log.contains("received SIGINT"), "stopped at the shutdown request");
+        assert!(ends_with_power_off(&sys.calls));
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_a_message_and_keeps_serving() {
+        let mut sys = with_events(vec![
+            Ok(Event::Control(Frame::Line(r#"{"type":"launch_missiles"}"#.into()))),
+            Ok(Event::Control(Frame::Line("not json".into()))),
+            Ok(Event::Control(Frame::TooLong)),
+            Ok(Event::Control(Frame::NotUtf8)),
+            line(&HostMessage::Shutdown),
+        ]);
+        run_fake(&mut sys);
+        let got = replies(&sys);
+        assert_eq!(got.len(), 5);
+        let errors: Vec<_> = got[..4]
+            .iter()
+            .map(|m| match m {
+                GuestMessage::Error { message } => message.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(errors[0].starts_with("not a control message"));
+        assert!(errors[1].starts_with("not a control message"));
+        assert_eq!(errors[2], format!("line longer than {} bytes", hermit_proto::MAX_LINE));
+        assert_eq!(errors[3], "line is not UTF-8");
+        assert_eq!(got[4], GuestMessage::ShuttingDown);
+    }
+
+    #[test]
+    fn a_closed_control_channel_is_logged_and_signals_still_work() {
+        let mut sys = with_events(vec![Ok(Event::ControlClosed), Ok(Event::Signal(Signal::Term))]);
+        let (_, log) = run_fake(&mut sys);
+        assert!(log.contains("control channel closed by the host"));
+        assert!(log.contains("received SIGTERM"));
+    }
+
+    #[test]
+    fn runs_without_a_control_channel() {
+        let mut sys = Fake {
+            no_control: true,
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
+        assert!(log.contains("ready (control protocol 1.0)"));
+        assert!(ends_with_power_off(&sys.calls));
+    }
+
+    #[test]
+    fn a_failed_send_is_logged_not_fatal() {
+        let mut sys = Fake {
+            send_error: true,
+            events: VecDeque::from([
+                line(&HostMessage::Hello {
+                    version: PROTOCOL_VERSION,
+                }),
+                Ok(Event::Signal(Signal::Term)),
+            ]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert!(log.contains("sending to the host failed"));
+        assert!(log.contains("received SIGTERM"));
     }
 
     #[test]
@@ -301,10 +532,7 @@ mod tests {
 
     #[test]
     fn sigint_also_powers_off() {
-        let mut sys = Fake {
-            signals: VecDeque::from([Ok(Signal::Int)]),
-            ..Fake::default()
-        };
+        let mut sys = with_events(vec![Ok(Event::Signal(Signal::Int))]);
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("received SIGINT"));
         assert!(ends_with_power_off(&sys.calls));
@@ -313,7 +541,11 @@ mod tests {
     #[test]
     fn reaps_children_on_sigchld_and_keeps_waiting() {
         let mut sys = Fake {
-            signals: VecDeque::from([Ok(Signal::Child), Ok(Signal::Child), Ok(Signal::Term)]),
+            events: VecDeque::from([
+                Ok(Event::Signal(Signal::Child)),
+                Ok(Event::Signal(Signal::Child)),
+                Ok(Event::Signal(Signal::Term)),
+            ]),
             reaps: VecDeque::from([
                 Ok(vec![Reaped {
                     pid: 42,
@@ -352,6 +584,7 @@ mod tests {
         assert!(log.contains("fatal: mounting sysfs on /sys"));
         assert!(!log.contains("ready"));
         assert!(!sys.calls.contains(&"mount /dev".to_string()));
+        assert!(!sys.calls.contains(&"open_control".to_string()));
         assert!(!sys.calls.contains(&"wait".to_string()));
         assert!(ends_with_power_off(&sys.calls));
     }
@@ -380,13 +613,10 @@ mod tests {
     }
 
     #[test]
-    fn signal_wait_failure_powers_off() {
-        let mut sys = Fake {
-            signals: VecDeque::from([Err(io::Error::from(ErrorKind::InvalidInput))]),
-            ..Fake::default()
-        };
+    fn event_wait_failure_powers_off() {
+        let mut sys = with_events(vec![Err(io::Error::from(ErrorKind::InvalidInput))]);
         let (_, log) = run_fake(&mut sys);
-        assert!(log.contains("fatal: waiting for signals"));
+        assert!(log.contains("fatal: waiting for events"));
         assert!(ends_with_power_off(&sys.calls));
     }
 }
