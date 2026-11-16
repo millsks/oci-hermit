@@ -16,12 +16,15 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ROADMAP: &str = "https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md";
 
 /// Exit code for a command that exists but is not implemented yet.
 const NOT_IMPLEMENTED: u8 = 2;
+
+/// Set to anything but `0` or empty to make `run` report how long each phase took on stderr.
+const TIMINGS_ENV: &str = "OCI_HERMIT_TIMINGS";
 
 /// What a command needs from the process it runs in.
 struct Env {
@@ -33,6 +36,47 @@ struct Env {
     exe: PathBuf,
     /// Where each sandbox gets a directory for its initramfs and logs.
     run_base: PathBuf,
+    /// Whether `run` reports its phase timings (`OCI_HERMIT_TIMINGS`).
+    timings: bool,
+}
+
+/// How long each phase of `run` took, in order.
+struct Timings {
+    start: Instant,
+    last: Instant,
+    phases: Vec<(&'static str, Duration)>,
+}
+
+impl Timings {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            start: now,
+            last: now,
+            phases: Vec::new(),
+        }
+    }
+
+    /// Ends the current phase, naming it.
+    fn mark(&mut self, phase: &'static str) {
+        let now = Instant::now();
+        self.phases.push((phase, now - self.last));
+        self.last = now;
+    }
+
+    fn report(&self) -> String {
+        format_timings(&self.phases, self.last - self.start)
+    }
+}
+
+/// One line such as `timings: prepare 0.40s, boot 2.10s, total 2.50s`.
+fn format_timings(phases: &[(&str, Duration)], total: Duration) -> String {
+    let mut line = String::from("timings:");
+    for (phase, took) in phases.iter().chain(std::iter::once(&("total", total))) {
+        line.push_str(&format!(" {phase} {:.2}s,", took.as_secs_f64()));
+    }
+    line.pop();
+    line
 }
 
 fn main() -> ExitCode {
@@ -42,6 +86,7 @@ fn main() -> ExitCode {
         guest_dir: std::env::var_os(guest::DIR_ENV),
         exe: std::env::current_exe().unwrap_or_default(),
         run_base: std::env::temp_dir().join("oci-hermit"),
+        timings: std::env::var_os(TIMINGS_ENV).is_some_and(|v| !v.is_empty() && v != "0"),
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
 }
@@ -231,6 +276,7 @@ fn run_in_sandbox(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Result<i32, Box<dyn std::error::Error>> {
+    let mut timings = Timings::new();
     let arch = match &args.platform {
         Some(platform) => platform_arch(platform).ok_or_else(|| format!("unsupported --platform {platform}"))?,
         None => qemu::GuestArch::host().ok_or("cannot tell the host architecture; pass --platform")?,
@@ -280,8 +326,10 @@ fn run_in_sandbox(
     })?;
     let see_logs =
         |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
+    timings.mark("prepare");
     let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
     sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
+    timings.mark("boot");
 
     let mut command_env = image.config.env.clone().unwrap_or_default();
     if args.tty && !command_env.iter().any(|e| e.starts_with("TERM=")) {
@@ -328,7 +376,12 @@ fn run_in_sandbox(
     let code = sandbox.run(&command, stdin.as_ref(), out, err, Duration::from_secs(60));
     drop(raw);
     let code = code.map_err(see_logs)?;
+    timings.mark("command");
     sandbox.shutdown(Duration::from_secs(30)).map_err(see_logs)?;
+    timings.mark("stop");
+    if env.timings {
+        let _ = writeln!(err, "{}", timings.report());
+    }
     Ok(code)
 }
 
@@ -351,6 +404,7 @@ mod tests {
             guest_dir: Some(dir.clone().into()),
             exe: dir.join("bin").join("oci-hermit"),
             run_base: dir.join("run"),
+            timings: false,
         }
     }
 
@@ -362,6 +416,7 @@ mod tests {
             guest_dir: guest.map(Into::into),
             exe: PathBuf::from("/nowhere/bin/oci-hermit"),
             run_base: bundle.join("run"),
+            timings: false,
         }
     }
 
@@ -561,6 +616,51 @@ mod tests {
         let (code, _, err) = run_with(&env, &["run", "--platform", "linux/arm64", "."]);
         assert_eq!(code, 125);
         assert!(err.contains("no bundled QEMU found"));
+    }
+
+    #[test]
+    fn timings_report_each_phase_and_the_total() {
+        let phases = [
+            ("prepare", Duration::from_millis(400)),
+            ("boot", Duration::from_millis(2105)),
+        ];
+        assert_eq!(
+            format_timings(&phases, Duration::from_millis(2505)),
+            "timings: prepare 0.40s, boot 2.10s, total 2.50s"
+        );
+        let mut timings = Timings::new();
+        timings.mark("prepare");
+        timings.mark("boot");
+        assert!(
+            timings.report().starts_with("timings: prepare "),
+            "{}",
+            timings.report()
+        );
+        assert!(timings.report().contains(", boot "));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_reports_timings_when_asked() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-run-timings");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-run-timings-guest");
+        let layout = image::testing::layout(
+            &qemu::testing::scratch("main-run-timings-image"),
+            &[("amd64", image::testing::layer())],
+            r#"{"architecture":"ARCH","config":{"Cmd":["true"]}}"#,
+        );
+        let env = Env {
+            timings: true,
+            ..with_bundle(&bundle, Some(&guest))
+        };
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", layout.to_str().unwrap()]);
+        assert_eq!(code, 3, "{err}");
+        let line = err.lines().last().unwrap();
+        for phase in ["timings: prepare ", ", boot ", ", command ", ", stop ", ", total "] {
+            assert!(line.contains(phase), "{line}");
+        }
     }
 
     #[test]
