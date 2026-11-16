@@ -396,13 +396,13 @@ mod tests {
     fn machine_info_reports_both_emulators() {
         let _guard = qemu::testing::exec_lock();
         let dir = qemu::testing::scratch("main-ok");
-        qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-3)", "tcg");
+        qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
         let env = with_bundle(&dir, None);
         let (code, out, err) = run_with(&env, &["machine", "info"]);
         assert_eq!((code, err.as_str()), (0, ""));
         assert!(out.contains(&format!("qemu bundle: {}", dir.display())));
-        assert!(out.contains("x86_64:  QEMU 11.1.3 (oci-hermit-qemu-3), accel tcg"));
-        assert!(out.contains("aarch64: QEMU 11.1.3 (oci-hermit-qemu-3), accel tcg"));
+        assert!(out.contains("x86_64:  QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg"));
+        assert!(out.contains("aarch64: QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg"));
     }
 
     #[cfg(unix)]
@@ -435,7 +435,7 @@ mod tests {
     fn machine_boot_waits_for_the_agent_then_stops() {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-boot");
-        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-3)", "tcg");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
         let guest = fake_guest("main-boot-guest");
         let env = with_bundle(&bundle, Some(&guest));
         for arch in ["aarch64", "x86_64"] {
@@ -464,7 +464,7 @@ mod tests {
     fn machine_boot_without_a_guest_names_the_variable() {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-boot-noguest");
-        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-3)", "tcg");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
         let env = with_bundle(&bundle, None);
         let (code, _, err) = run_with(&env, &["machine", "boot", "--arch", "aarch64"]);
         assert_eq!(code, 1);
@@ -477,7 +477,7 @@ mod tests {
     fn machine_boot_reports_a_guest_that_never_gets_ready() {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-boot-slow");
-        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-3)", "tcg");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
         // Overwrite the emulator with one that exits instead of answering.
         let x86 = bundle.join("bin").join(qemu::GuestArch::X86_64.binary_name());
         let script = std::fs::read_to_string(&x86).unwrap();
@@ -503,7 +503,7 @@ mod tests {
     fn run_relays_output_and_exits_with_the_commands_code() {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-run");
-        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-3)", "tcg");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
         let guest = fake_guest("main-run-guest");
         let config = r#"{"architecture":"ARCH","config":{"Cmd":["bash"],"Env":["PATH=/bin"],"WorkingDir":"/srv"}}"#;
         let layout = image::testing::layout(

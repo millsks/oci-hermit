@@ -1,0 +1,41 @@
+From: oci-hermit <noreply@github.com>
+Subject: [PATCH] hw/i386: TSC counts nanoseconds of virtual time
+
+Under TCG the guest TSC followed the host's cycle counter: rdtsc on x86-64
+hosts, nanoseconds on others. The guest kernel then had to calibrate it
+against the PIT, which is slow under emulation and fails on loaded hosts;
+microvm has no HPET or ACPI PM timer to fall back on, so the guest was left
+without a clock and hung at boot.
+
+Make the TSC count nanoseconds of QEMU_CLOCK_VIRTUAL, a 1 GHz TSC on every
+host that stops with the VM, and tell the guest its frequency on the kernel
+command line (tsc_early_khz=1000000), so it never calibrates. oci-hermit
+only runs TCG, so the KVM, HVF and WHPX paths, which do not use this
+function for the guest TSC, are unaffected.
+
+SPDX-License-Identifier: GPL-2.0-or-later
+---
+--- a/hw/i386/x86-cpu.c
++++ b/hw/i386/x86-cpu.c
+@@ -23,6 +23,7 @@
+ #include "qemu/osdep.h"
+ #include "system/whpx.h"
+ #include "system/cpu-timers.h"
++#include "qemu/timer.h"
+ #include "trace.h"
+ 
+ #include "hw/i386/x86.h"
+@@ -34,7 +35,12 @@
+ /* TSC handling */
+ uint64_t cpu_get_tsc(CPUX86State *env)
+ {
+-    return cpus_get_elapsed_ticks();
++    /*
++     * Nanoseconds of virtual time: a 1 GHz TSC on every host, which the
++     * guest is told about (tsc_early_khz=1000000) instead of calibrating it
++     * against the PIT, which is slow and unreliable under TCG.
++     */
++    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+ }
+ 
+ /* IRQ handling */

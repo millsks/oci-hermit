@@ -59,8 +59,10 @@ Everything runs through pixi.
   serial console, RTC and virtio-mmio devices all break. Userspace console writes then fail with EIO while the
   kernel's own messages still appear, which looks like a hang (#54).
 - On Windows, upstream QEMU's `-chardev stdio` drops piped input the guest cannot take yet (and every `\r`), which
-  loses the host's first message. `qemu/patches/0001-…` fixes it; a bundle without it (marker below
-  `oci-hermit-qemu-3`) is refused.
+  loses the host's first message. `qemu/patches/0001-…` fixes it.
+- The x86_64 guest's TSC is 1 GHz on every host (`qemu/patches/0002-…`) and the kernel is told so
+  (`tsc_early_khz=1000000`): PIT calibration under TCG fails on slow hosts, and microvm has no other timer, so the
+  guest hangs without a clock (#61). A bundle without these patches (marker below `oci-hermit-qemu-4`) is refused.
 - The control channel is QEMU's stdin and stdout (`-chardev stdio`), so QEMU must never print to stdout: its
   diagnostics go to stderr (`qemu.log`). Treat everything from the guest as untrusted: cap line length, reject what
   is not a message, time out instead of blocking.

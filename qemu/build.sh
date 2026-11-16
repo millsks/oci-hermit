@@ -18,7 +18,7 @@ set -euo pipefail
 QEMU_VERSION=11.1.3
 QEMU_SHA256=5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
 # Bump when the configuration or bundling changes without a new QEMU release. The host tool checks this marker.
-BUNDLE_REVISION=3
+BUNDLE_REVISION=4
 PKGVERSION="oci-hermit-qemu-${BUNDLE_REVISION}"
 
 out=${1:?usage: qemu/build.sh <out-dir> [work-dir]}

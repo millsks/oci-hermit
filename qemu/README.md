@@ -29,6 +29,7 @@ keys, so the bundle is rebuilt.
 | Patch | Why |
 |---|---|
 | `0001-chardev-win-stdio-hold-input-until-the-frontend-can-take-it.patch` | On Windows, `-chardev stdio` dropped input bytes the frontend could not take yet, so the host's first control message was lost before the guest opened the port. The patch holds the byte until the frontend accepts it, as the POSIX chardevs do, and stops dropping `\r` from piped (binary) input. Worth offering upstream. |
+| `0002-i386-tcg-tsc-counts-nanoseconds-of-virtual-time.patch` | Under TCG the x86 guest's TSC followed the host's cycle counter, so its frequency differed by host and the guest kernel had to calibrate it against the PIT. That is slow under emulation and failed on loaded hosts; microvm has no HPET or ACPI PM timer to fall back on, so the guest hung at boot. The TSC now counts nanoseconds of virtual time, 1 GHz everywhere, and the host tool passes `tsc_early_khz=1000000`. |
 
 ## Where each platform's build comes from
 
