@@ -38,6 +38,53 @@ pub struct Settings {
     pub auth_files: Vec<PathBuf>,
     /// Registries reached over plain HTTP.
     pub insecure: Vec<String>,
+    /// How long to wait before each retry of a request the registry turned away for now (rate limits, 5xx).
+    pub retry_delays: Vec<std::time::Duration>,
+}
+
+/// The waits between retries of a throttled or failing request: 1, 2, 4 and 8 seconds.
+pub fn default_retry_delays() -> Vec<std::time::Duration> {
+    [1, 2, 4, 8].map(std::time::Duration::from_secs).to_vec()
+}
+
+/// Whether a registry error is worth retrying: throttling, a gateway or server hiccup, a dropped connection.
+fn transient(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "rate exceeded",
+        "toomanyrequests",
+        "too many requests",
+        "429",
+        "502",
+        "503",
+        "504",
+        "service unavailable",
+        "connection reset",
+        "timed out",
+    ]
+    .iter()
+    .any(|sign| error.contains(sign))
+}
+
+/// Runs `attempt` until it succeeds, fails for good, or the delays run out.
+async fn with_retries<T, F, Fut>(
+    delays: &[std::time::Duration],
+    mut attempt: F,
+) -> Result<T, oci_client::errors::OciDistributionError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, oci_client::errors::OciDistributionError>>,
+{
+    let mut delays = delays.iter();
+    loop {
+        match attempt().await {
+            Err(e) if transient(&e.to_string()) => match delays.next() {
+                Some(delay) => tokio::time::sleep(*delay).await,
+                None => return Err(e),
+            },
+            done => return done,
+        }
+    }
 }
 
 impl Settings {
@@ -62,7 +109,11 @@ impl Settings {
                     .collect()
             })
             .unwrap_or_default();
-        Settings { auth_files, insecure }
+        Settings {
+            auth_files,
+            insecure,
+            retry_delays: default_retry_delays(),
+        }
     }
 }
 
@@ -248,8 +299,8 @@ pub fn pull(
             .await
             .map_err(registry_error("logging in to pull", reference))?;
         let accepted = [OCI_INDEX, OCI_MANIFEST, DOCKER_LIST, DOCKER_MANIFEST];
-        let (mut bytes, mut digest) = client
-            .pull_manifest_raw(reference, &auth, &accepted)
+        let delays = &settings.retry_delays;
+        let (mut bytes, mut digest) = with_retries(delays, || client.pull_manifest_raw(reference, &auth, &accepted))
             .await
             .map_err(registry_error("pulling the manifest of", reference))?;
         image::verify(&digest, &bytes)?;
@@ -284,10 +335,10 @@ pub fn pull(
                     ))
                 })?;
             let by_digest = reference.clone_with_digest(pick.digest.clone());
-            let (platform_bytes, platform_digest) = client
-                .pull_manifest_raw(&by_digest, &auth, &accepted)
-                .await
-                .map_err(registry_error("pulling the manifest of", reference))?;
+            let (platform_bytes, platform_digest) =
+                with_retries(delays, || client.pull_manifest_raw(&by_digest, &auth, &accepted))
+                    .await
+                    .map_err(registry_error("pulling the manifest of", reference))?;
             image::verify(&pick.digest, &platform_bytes)?;
             if platform_digest != pick.digest {
                 return Err(ImageError::Mismatch(pick.digest.clone()).into());
@@ -305,11 +356,15 @@ pub fn pull(
                 let _ = writeln!(out, "{short}: already present");
                 continue;
             }
-            let mut data = Vec::with_capacity(usize::try_from(blob.size).unwrap_or(0));
-            client
-                .pull_blob(reference, blob.digest.as_str(), &mut data)
-                .await
-                .map_err(registry_error(&format!("pulling blob {} of", blob.digest), reference))?;
+            let data = with_retries(delays, || async {
+                let mut data = Vec::with_capacity(usize::try_from(blob.size).unwrap_or(0));
+                client
+                    .pull_blob(reference, blob.digest.as_str(), &mut data)
+                    .await
+                    .map(|()| data)
+            })
+            .await
+            .map_err(registry_error(&format!("pulling blob {} of", blob.digest), reference))?;
             store.put_blob(&blob.digest, &data)?;
             let _ = writeln!(out, "{short}: pulled ({})", size(data.len()));
         }
@@ -351,7 +406,9 @@ pub(crate) mod testing {
 
     /// Serves `routes` (path to response) on a free port until the test process ends; returns `127.0.0.1:<port>`.
     /// With `basic` set (`user:password`, base64), every request but `/v2/` needs that `Authorization`.
-    pub(crate) fn serve(routes: HashMap<String, Response>, basic: Option<String>) -> String {
+    /// The first `throttle` requests other than `/v2/` get `429 Too Many Requests`, as a rate-limited registry does.
+    pub(crate) fn serve(routes: HashMap<String, Response>, basic: Option<String>, throttle: usize) -> String {
+        let throttled = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let routes = std::sync::Arc::new(routes);
@@ -360,6 +417,7 @@ pub(crate) mod testing {
                 let Ok(mut stream) = stream else { continue };
                 let routes = routes.clone();
                 let basic = basic.clone();
+                let throttled = throttled.clone();
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     loop {
@@ -388,7 +446,17 @@ pub(crate) mod testing {
                             None => true,
                             Some(secret) => authorization.as_deref() == Some(&format!("Basic {secret}")),
                         };
+                        let throttle_now = path != "/v2/" && {
+                            let mut count = throttled.lock().unwrap();
+                            *count += 1;
+                            *count <= throttle
+                        };
                         let (status, content_type, body): (&str, &str, &[u8]) = match routes.get(&path) {
+                            _ if throttle_now => (
+                                "429 Too Many Requests",
+                                "application/json",
+                                br#"{"errors":[{"code":"TOOMANYREQUESTS","message":"Rate exceeded"}]}"#,
+                            ),
                             _ if !allowed => ("401 Unauthorized", "text/plain", b"unauthorized"),
                             Some(r) => ("200 OK", &r.content_type, &r.body),
                             None if path == "/v2/" => ("200 OK", "application/json", b"{}"),
@@ -423,7 +491,7 @@ pub(crate) mod testing {
 
     /// A registry holding `test/app:1` as an index of amd64 and arm64 images whose `Cmd` is `from-the-registry`;
     /// with `tamper`, every layer it serves is one bit off. Returns its address.
-    pub(crate) fn registry(name: &str, basic: Option<String>, tamper: bool) -> String {
+    pub(crate) fn registry(name: &str, basic: Option<String>, tamper: bool, throttle: usize) -> String {
         use super::{OCI_INDEX, OCI_MANIFEST};
         use crate::image::testing::{layer, manifest};
         let dir = crate::qemu::testing::scratch(name);
@@ -470,7 +538,7 @@ pub(crate) mod testing {
                 body: index.into_bytes(),
             },
         );
-        serve(routes, basic)
+        serve(routes, basic, throttle)
     }
 }
 
@@ -486,12 +554,44 @@ mod tests {
         Settings {
             auth_files,
             insecure: vec![address.to_string()],
+            retry_delays: vec![],
         }
     }
 
     #[test]
+    fn retries_a_registry_that_is_throttling() {
+        let address = registry("registry-throttled", None, false, 3);
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        let store = Store::open(&scratch("registry-throttled-store")).unwrap();
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &settings(&address, vec![]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("Rate exceeded"), "{err}");
+        let patient = Settings {
+            retry_delays: vec![std::time::Duration::ZERO; 3],
+            ..settings(&address, vec![])
+        };
+        let address = registry("registry-throttled-2", None, false, 3);
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        let patient = Settings {
+            insecure: vec![address.clone()],
+            ..patient
+        };
+        pull(&reference, "amd64", &store, &patient, &mut Vec::new()).unwrap();
+        assert!(transient("Registry error: OCI API error: Rate exceeded"));
+        assert!(!transient("manifest unknown"));
+        assert_eq!(default_retry_delays().len(), 4);
+    }
+
+    #[test]
     fn pulls_the_platform_an_image_is_run_on_and_verifies_it() {
-        let address = registry("registry-anon", None, false);
+        let address = registry("registry-anon", None, false, 0);
         let store = Store::open(&scratch("registry-anon-store")).unwrap();
         let reference = normalize(&format!("{address}/test/app:1")).unwrap();
         let mut out = Vec::new();
@@ -529,7 +629,7 @@ mod tests {
 
     #[test]
     fn a_tampered_blob_is_a_hard_error() {
-        let address = registry("registry-tampered", None, true);
+        let address = registry("registry-tampered", None, true, 0);
         let store = Store::open(&scratch("registry-tampered-store")).unwrap();
         let reference = normalize(&format!("{address}/test/app:1")).unwrap();
         let err = pull(
@@ -548,7 +648,7 @@ mod tests {
     #[test]
     fn pulls_with_credentials_from_an_auth_file() {
         let secret = hermit_proto::b64::encode(b"me:hunter2");
-        let address = registry("registry-auth", Some(secret.clone()), false);
+        let address = registry("registry-auth", Some(secret.clone()), false, 0);
         let reference = normalize(&format!("{address}/test/app:1")).unwrap();
 
         let store = Store::open(&scratch("registry-auth-store")).unwrap();
@@ -587,7 +687,7 @@ mod tests {
         let none = |_: &str, _: &str| None;
         let files = |paths: Vec<PathBuf>| Settings {
             auth_files: paths,
-            insecure: vec![],
+            ..Settings::default()
         };
         let encoded = hermit_proto::b64::encode(b"alice:s3cret");
 
@@ -654,6 +754,7 @@ mod tests {
         .collect();
         assert_eq!(settings.auth_files, expected);
         assert_eq!(settings.insecure, ["localhost:5000", "127.0.0.1:5001"]);
+        assert_eq!(settings.retry_delays, default_retry_delays());
         assert!(Settings::from_env(|_| None).auth_files.is_empty());
     }
 

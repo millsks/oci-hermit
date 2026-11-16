@@ -840,12 +840,12 @@ mod tests {
 
     #[test]
     fn pull_stores_an_image_that_run_then_uses() {
-        let address = registry::testing::registry("main-pull-registry", None, false);
+        let address = registry::testing::registry("main-pull-registry", None, false, 0);
         let reference = format!("{address}/test/app:1");
         let env = Env {
             registry: registry::Settings {
-                auth_files: vec![],
                 insecure: vec![address.clone()],
+                ..registry::Settings::default()
             },
             ..no_qemu("main-pull-env")
         };
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn run_pulls_a_missing_image_then_runs_it() {
-        let address = registry::testing::registry("main-run-pull-registry", None, false);
+        let address = registry::testing::registry("main-run-pull-registry", None, false, 0);
         let reference = format!("{address}/test/app:1");
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-run-pull");
@@ -882,8 +882,8 @@ mod tests {
         let guest = fake_guest("main-run-pull-guest");
         let env = Env {
             registry: registry::Settings {
-                auth_files: vec![],
                 insecure: vec![address.clone()],
+                ..registry::Settings::default()
             },
             ..with_bundle(&bundle, Some(&guest))
         };
