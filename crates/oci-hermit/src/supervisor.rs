@@ -1,18 +1,24 @@
 //! Launching and supervising one sandbox VM.
 //!
 //! Each sandbox is one QEMU process, started as the current user with software emulation only and a fixed, minimal
-//! device set: no default devices, no user config, no display, no network (#26), and the serial console written to
-//! a log file. QEMU exits when this process exits, whether it stops cleanly or is killed: through QEMU's
-//! `exit-with-parent` on Linux and macOS, and through a kill-on-close Job Object on Windows, where QEMU has no such
-//! option. A [`Sandbox`] that is dropped kills its QEMU as well.
+//! device set: no default devices, no user config, no display, no network (#26), the serial console written to a
+//! log file, and one virtio-serial port, [`hermit_proto::CONTROL_PORT`], for the control channel. That port is wired
+//! to QEMU's own stdin and stdout, which oci-hermit holds as an anonymous pipe pair, so nothing on the filesystem or
+//! the network reaches it. QEMU's diagnostics go to its stderr, kept in a log file.
+//!
+//! QEMU exits when this process exits, whether it stops cleanly or is killed: through QEMU's `exit-with-parent` on
+//! Linux and macOS, and through a kill-on-close Job Object on Windows, where QEMU has no such option. A [`Sandbox`]
+//! that is dropped kills its QEMU as well.
 
 use crate::qemu::{self, GuestArch};
+use hermit_proto::{Frame, Framer, GuestMessage, HostMessage, PROTOCOL_VERSION};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 /// The x86_64 guest CPU model. The agent's static glibc needs x86-64-v3 (its `init_cpu_features` uses AVX, so
@@ -40,17 +46,21 @@ pub struct Launch<'a> {
     pub spec: MachineSpec,
 }
 
-/// Why a sandbox could not be started or did not come up.
+/// Why a sandbox could not be started, did not come up, or did not stop.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SupervisorError {
     /// A path QEMU takes inside an option string is not valid UTF-8.
     NonUtf8Path(PathBuf),
-    /// Starting, watching or stopping QEMU failed.
+    /// Starting, talking to or stopping QEMU failed.
     Io(String),
-    /// QEMU exited before the console showed what was waited for.
+    /// QEMU exited while oci-hermit was waiting for the agent.
     Exited { status: String },
-    /// The console did not show what was waited for in time.
+    /// The agent did not answer in time.
     TimedOut { after: Duration },
+    /// The agent answered with an error, or with a protocol version this host does not speak.
+    Refused { message: String },
+    /// The agent sent something that is not a control message.
+    Protocol(String),
 }
 
 impl fmt::Display for SupervisorError {
@@ -58,10 +68,12 @@ impl fmt::Display for SupervisorError {
         match self {
             SupervisorError::NonUtf8Path(path) => write!(f, "path is not valid UTF-8: {}", path.display()),
             SupervisorError::Io(e) => write!(f, "{e}"),
-            SupervisorError::Exited { status } => write!(f, "QEMU exited before the guest was ready ({status})"),
+            SupervisorError::Exited { status } => write!(f, "QEMU exited before the agent answered ({status})"),
             SupervisorError::TimedOut { after } => {
-                write!(f, "the guest was not ready after {}s", after.as_secs())
+                write!(f, "the agent did not answer within {}s", after.as_secs_f64())
             }
+            SupervisorError::Refused { message } => write!(f, "the agent refused: {message}"),
+            SupervisorError::Protocol(what) => write!(f, "the agent broke the control protocol: {what}"),
         }
     }
 }
@@ -114,6 +126,11 @@ pub fn qemu_command(launch: &Launch<'_>) -> Result<(PathBuf, Vec<OsString>), Sup
     }
     let console = format!("file,id=console,path={}", option_value(launch.console_log)?);
     push(&["-chardev", &console, "-serial", "chardev:console"]);
+    // The control channel: a virtio-serial port on QEMU's stdin and stdout. `signal=off` keeps QEMU from treating
+    // a byte on that pipe as Ctrl-C.
+    let port = format!("virtserialport,chardev=control,name={}", hermit_proto::CONTROL_PORT);
+    push(&["-chardev", "stdio,id=control,signal=off"]);
+    push(&["-device", "virtio-serial-device", "-device", &port]);
     push(&["-append", kernel_cmdline(arch)]);
     args.extend([
         OsString::from("-L"),
@@ -137,71 +154,193 @@ pub fn run_dir(base: &Path) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// One running QEMU process.
+/// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
+type Incoming = Option<Frame>;
+
+/// One running QEMU process and the control channel to its agent.
 #[derive(Debug)]
 pub struct Sandbox {
     child: Option<Child>,
-    console_log: PathBuf,
+    to_agent: Option<ChildStdin>,
+    from_agent: Receiver<Incoming>,
     /// Windows closes this job's handle when oci-hermit exits, however it exits, and that kills QEMU.
     #[cfg(windows)]
     _job: win32job::Job,
 }
 
+/// Read QEMU's stdout, which carries the agent's side of the control channel, and pass on whole frames.
+fn read_frames(mut from_qemu: impl Read, frames: mpsc::Sender<Incoming>) {
+    let mut framer = Framer::new();
+    let mut buf = [0u8; 4096];
+    let mut cut = Vec::new();
+    loop {
+        match from_qemu.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                framer.push(&buf[..n], &mut cut);
+                for frame in cut.drain(..) {
+                    if frames.send(Some(frame)).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let _ = frames.send(None);
+}
+
 impl Sandbox {
-    /// Start `binary` with `args`, its own output going to `qemu_log`; the guest console goes to `console_log`.
-    pub fn spawn(binary: &Path, args: &[OsString], qemu_log: &Path, console_log: &Path) -> io::Result<Sandbox> {
+    /// Start `binary` with `args`. QEMU's stdin and stdout become the control channel; its stderr goes to
+    /// `qemu_log`.
+    pub fn spawn(binary: &Path, args: &[OsString], qemu_log: &Path) -> io::Result<Sandbox> {
         let log = File::create(qemu_log)?;
-        let child = Command::new(binary)
+        let mut child = Command::new(binary)
             .args(args)
-            .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(log)
             .spawn()?;
         #[cfg(windows)]
         let job = match kill_on_close(&child) {
             Ok(job) => job,
             Err(e) => {
-                let mut child = child;
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(e);
             }
         };
+        let to_agent = child.stdin.take();
+        let from_qemu = child.stdout.take().expect("stdout is piped");
+        let (frames, from_agent) = mpsc::channel();
+        std::thread::spawn(move || read_frames(from_qemu, frames));
         Ok(Sandbox {
             child: Some(child),
-            console_log: console_log.to_path_buf(),
+            to_agent,
+            from_agent,
             #[cfg(windows)]
             _job: job,
         })
     }
 
-    /// Wait until the console log contains `marker`, and return how long that took.
-    pub fn wait_for_console(&mut self, marker: &str, timeout: Duration) -> Result<Duration, SupervisorError> {
-        let start = Instant::now();
+    /// Send one message to the agent.
+    fn send(&mut self, msg: &HostMessage) -> Result<(), SupervisorError> {
+        let line = hermit_proto::encode(msg).map_err(|e| SupervisorError::Io(e.to_string()))?;
+        let pipe = self
+            .to_agent
+            .as_mut()
+            .ok_or_else(|| SupervisorError::Io("the control channel is closed".into()))?;
+        if let Err(e) = pipe.write_all(line.as_bytes()).and_then(|()| pipe.flush()) {
+            return Err(self.exit_status()?.unwrap_or(SupervisorError::Io(e.to_string())));
+        }
+        Ok(())
+    }
+
+    /// QEMU's exit, as an error, if it has exited.
+    fn exit_status(&mut self) -> Result<Option<SupervisorError>, SupervisorError> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(Some(SupervisorError::Exited {
+                status: "already stopped".into(),
+            }));
+        };
+        Ok(child.try_wait()?.map(|status| SupervisorError::Exited {
+            status: status.to_string(),
+        }))
+    }
+
+    /// The agent's next message, waiting until `deadline` at most.
+    fn receive(&mut self, deadline: Instant, timeout: Duration) -> Result<GuestMessage, SupervisorError> {
         loop {
-            let console = std::fs::read(&self.console_log).unwrap_or_default();
-            if String::from_utf8_lossy(&console).contains(marker) {
-                return Ok(start.elapsed());
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.from_agent.recv_timeout(left.min(Duration::from_millis(100))) {
+                Ok(Some(Frame::Line(line))) => {
+                    return hermit_proto::decode(&line)
+                        .map_err(|e| SupervisorError::Protocol(format!("not a control message ({e})")));
+                }
+                Ok(Some(Frame::TooLong)) => {
+                    return Err(SupervisorError::Protocol(format!(
+                        "a line longer than {} bytes",
+                        hermit_proto::MAX_LINE
+                    )));
+                }
+                Ok(Some(Frame::NotUtf8)) => return Err(SupervisorError::Protocol("a line that is not UTF-8".into())),
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                    // The channel closed: QEMU is exiting. Give it a moment to be reaped.
+                    let child = self
+                        .child
+                        .as_mut()
+                        .ok_or_else(|| SupervisorError::Io("no QEMU".into()))?;
+                    let status = loop {
+                        if let Some(status) = child.try_wait()? {
+                            break status.to_string();
+                        }
+                        if Instant::now() >= deadline {
+                            break "its stdout closed".into();
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    };
+                    return Err(SupervisorError::Exited { status });
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(exited) = self.exit_status()? {
+                        return Err(exited);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(SupervisorError::TimedOut { after: timeout });
+                    }
+                }
             }
-            let exited = match self.child.as_mut() {
-                Some(child) => child.try_wait()?,
-                None => None,
-            };
-            if let Some(status) = exited {
-                self.child = None;
-                return Err(SupervisorError::Exited {
-                    status: status.to_string(),
-                });
-            }
-            if start.elapsed() >= timeout {
-                return Err(SupervisorError::TimedOut { after: timeout });
-            }
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    /// Stop QEMU and wait for it to exit. Stopping a sandbox that already stopped does nothing.
+    /// Open a session with the agent: send `Hello` and wait for `Ready`. Returns how long that took and the
+    /// agent's protocol version.
+    pub fn handshake(&mut self, timeout: Duration) -> Result<(Duration, (u16, u16)), SupervisorError> {
+        let start = Instant::now();
+        let deadline = start + timeout;
+        self.send(&HostMessage::Hello {
+            version: PROTOCOL_VERSION,
+        })?;
+        match self.receive(deadline, timeout)? {
+            GuestMessage::Ready { version } if hermit_proto::compatible(version) => Ok((start.elapsed(), version)),
+            GuestMessage::Ready { version } => Err(SupervisorError::Refused {
+                message: format!(
+                    "it speaks control protocol {}.{}; this host speaks {}.{}",
+                    version.0, version.1, PROTOCOL_VERSION.0, PROTOCOL_VERSION.1
+                ),
+            }),
+            GuestMessage::Error { message } => Err(SupervisorError::Refused { message }),
+            GuestMessage::ShuttingDown => Err(SupervisorError::Protocol("shutting down instead of ready".into())),
+        }
+    }
+
+    /// Ask the agent to power the guest off, and wait for QEMU to exit. If it does not exit in time, QEMU is
+    /// killed and the timeout is reported.
+    pub fn shutdown(&mut self, timeout: Duration) -> Result<(), SupervisorError> {
+        let deadline = Instant::now() + timeout;
+        self.send(&HostMessage::Shutdown)?;
+        match self.receive(deadline, timeout) {
+            Ok(GuestMessage::ShuttingDown) | Err(SupervisorError::Exited { .. }) => {}
+            Ok(GuestMessage::Error { message }) => return Err(SupervisorError::Refused { message }),
+            Ok(other) => return Err(SupervisorError::Protocol(format!("{other:?} instead of shutting down"))),
+            Err(e) => {
+                self.stop()?;
+                return Err(e);
+            }
+        }
+        while self.exit_status()?.is_none() {
+            if Instant::now() >= deadline {
+                self.stop()?;
+                return Err(SupervisorError::TimedOut { after: timeout });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.child = None;
+        Ok(())
+    }
+
+    /// Kill QEMU and wait for it to exit. Stopping a sandbox that already stopped does nothing.
     pub fn stop(&mut self) -> io::Result<()> {
+        self.to_agent = None;
         if let Some(mut child) = self.child.take() {
             if child.try_wait()?.is_none() {
                 child.kill()?;
@@ -279,9 +418,12 @@ mod tests {
             assert!(args.iter().any(|a| a == flag), "missing {flag}");
         }
         assert_eq!(value_after(&args, "-display"), "none");
-        for flag in ["-netdev", "-nic", "-net", "-device", "-drive", "-usb"] {
+        for flag in ["-netdev", "-nic", "-net", "-drive", "-usb"] {
             assert!(!args.iter().any(|a| a == flag), "unexpected {flag}");
         }
+        // The only devices are the control channel's (`wires_the_control_port_to_qemus_stdio`).
+        let devices = args.iter().filter(|a| *a == "-device").count();
+        assert_eq!(devices, 2);
     }
 
     #[test]
@@ -353,19 +495,57 @@ mod tests {
 
     #[test]
     fn errors_say_what_happened() {
-        let exited = SupervisorError::Exited {
-            status: "exit status: 1".into(),
-        };
+        let cases = [
+            (
+                SupervisorError::Exited {
+                    status: "exit status: 1".into(),
+                },
+                "QEMU exited before the agent answered (exit status: 1)",
+            ),
+            (
+                SupervisorError::TimedOut {
+                    after: Duration::from_millis(1500),
+                },
+                "the agent did not answer within 1.5s",
+            ),
+            (
+                SupervisorError::Refused { message: "no".into() },
+                "the agent refused: no",
+            ),
+            (
+                SupervisorError::Protocol("noise".into()),
+                "the agent broke the control protocol: noise",
+            ),
+            (io::Error::other("denied").into(), "denied"),
+        ];
+        for (error, text) in cases {
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn wires_the_control_port_to_qemus_stdio() {
+        let (_, args) = args_of(GuestArch::X86_64, "/r/c");
+        let chardevs: Vec<_> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "-chardev")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert!(chardevs.contains(&"stdio,id=control,signal=off"), "{chardevs:?}");
+        let devices: Vec<_> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "-device")
+            .map(|(_, value)| value.as_str())
+            .collect();
         assert_eq!(
-            exited.to_string(),
-            "QEMU exited before the guest was ready (exit status: 1)"
+            devices,
+            [
+                "virtio-serial-device",
+                "virtserialport,chardev=control,name=org.oci-hermit.control"
+            ]
         );
-        let timed_out = SupervisorError::TimedOut {
-            after: Duration::from_secs(30),
-        };
-        assert_eq!(timed_out.to_string(), "the guest was not ready after 30s");
-        let io: SupervisorError = io::Error::other("denied").into();
-        assert_eq!(io.to_string(), "denied");
     }
 
     /// What happens when oci-hermit dies on Windows: its handle to the job closes, and Windows kills QEMU.
@@ -399,57 +579,105 @@ mod tests {
         use crate::qemu::testing::exec_lock;
         use std::os::unix::fs::PermissionsExt;
 
-        /// A shell script standing in for QEMU: it runs `body` with the console log path as `$1`.
-        fn script(dir: &Path, body: &str) -> PathBuf {
-            let path = dir.join("fake-qemu");
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
-        }
+        const READY: &str = r#"echo '{"type":"ready","version":[1,0]}'"#;
+        const SHUTTING_DOWN: &str = r#"echo '{"type":"shutting_down"}'"#;
 
+        /// A shell script standing in for QEMU, speaking the agent's side of the control channel on its stdio.
         fn spawn(name: &str, body: &str) -> (Sandbox, PathBuf) {
             let dir = scratch(name);
-            let console = dir.join("console.log");
-            let binary = script(&dir, body);
-            let sandbox = Sandbox::spawn(
-                &binary,
-                &[console.clone().into_os_string()],
-                &dir.join("qemu.log"),
-                &console,
-            )
-            .unwrap();
+            let binary = dir.join("fake-qemu");
+            std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let sandbox = Sandbox::spawn(&binary, &[], &dir.join("qemu.log")).unwrap();
             (sandbox, dir)
         }
 
         #[test]
-        fn waits_for_the_console_marker() {
+        fn handshakes_then_shuts_down_cleanly() {
             let _guard = exec_lock();
-            let (mut sandbox, _) = spawn("sup-ready", "sleep 0.2; echo 'hermit-agent: ready' >> \"$1\"; sleep 30");
-            let took = sandbox
-                .wait_for_console("hermit-agent: ready", Duration::from_secs(10))
-                .unwrap();
-            assert!(took >= Duration::from_millis(100));
+            let (mut sandbox, _) = spawn(
+                "sup-ok",
+                &format!("read hello; {READY}; read bye; {SHUTTING_DOWN}; exit 0"),
+            );
+            let (_, version) = sandbox.handshake(Duration::from_secs(10)).unwrap();
+            assert_eq!(version, (1, 0));
+            sandbox.shutdown(Duration::from_secs(10)).unwrap();
             sandbox.stop().unwrap();
-            sandbox.stop().unwrap();
+        }
+
+        #[test]
+        fn sends_hello_with_this_hosts_version() {
+            let _guard = exec_lock();
+            let (mut sandbox, dir) = spawn(
+                "sup-hello",
+                &format!("cd \"$(dirname \"$0\")\"; read hello; echo \"$hello\" > hello.seen; {READY}; sleep 30"),
+            );
+            sandbox.handshake(Duration::from_secs(10)).unwrap();
+            let seen = std::fs::read_to_string(dir.join("hello.seen")).unwrap();
+            assert_eq!(
+                hermit_proto::decode::<HostMessage>(&seen).unwrap(),
+                HostMessage::Hello {
+                    version: PROTOCOL_VERSION
+                }
+            );
+        }
+
+        #[test]
+        fn reports_an_agent_that_refuses() {
+            let _guard = exec_lock();
+            let (mut sandbox, _) = spawn(
+                "sup-refuse",
+                r#"read hello; echo '{"type":"error","message":"nope"}'; sleep 30"#,
+            );
+            let err = sandbox.handshake(Duration::from_secs(10)).unwrap_err();
+            assert_eq!(err, SupervisorError::Refused { message: "nope".into() });
+        }
+
+        #[test]
+        fn refuses_an_agent_of_another_major_version() {
+            let _guard = exec_lock();
+            let (mut sandbox, _) = spawn(
+                "sup-major",
+                r#"read hello; echo '{"type":"ready","version":[9,0]}'; sleep 30"#,
+            );
+            let err = sandbox.handshake(Duration::from_secs(10)).unwrap_err();
+            assert!(err.to_string().contains("control protocol 9.0"), "{err}");
+        }
+
+        #[test]
+        fn rejects_garbage_from_the_guest() {
+            let _guard = exec_lock();
+            let (mut sandbox, _) = spawn("sup-garbage", "read hello; echo 'rm -rf /'; sleep 30");
+            let err = sandbox.handshake(Duration::from_secs(10)).unwrap_err();
+            assert!(matches!(err, SupervisorError::Protocol(_)), "{err}");
+        }
+
+        #[test]
+        fn rejects_an_endless_line_from_the_guest() {
+            let _guard = exec_lock();
+            let (mut sandbox, _) = spawn(
+                "sup-endless",
+                "read hello; head -c 200000 /dev/zero | tr '\\0' x; echo; sleep 30",
+            );
+            let err = sandbox.handshake(Duration::from_secs(10)).unwrap_err();
+            assert!(err.to_string().contains("longer than"), "{err}");
         }
 
         #[test]
         fn reports_qemu_exiting_first() {
             let _guard = exec_lock();
             let (mut sandbox, dir) = spawn("sup-exit", "echo 'bad option' >&2; exit 1");
-            let err = sandbox.wait_for_console("ready", Duration::from_secs(10)).unwrap_err();
+            let err = sandbox.handshake(Duration::from_secs(10)).unwrap_err();
             assert!(matches!(err, SupervisorError::Exited { .. }), "{err}");
             let qemu_log = std::fs::read_to_string(dir.join("qemu.log")).unwrap();
             assert!(qemu_log.contains("bad option"));
         }
 
         #[test]
-        fn times_out_and_stops_qemu() {
+        fn times_out_and_drop_kills_qemu() {
             let _guard = exec_lock();
             let (mut sandbox, _) = spawn("sup-timeout", "sleep 30");
-            let err = sandbox
-                .wait_for_console("ready", Duration::from_millis(300))
-                .unwrap_err();
+            let err = sandbox.handshake(Duration::from_millis(300)).unwrap_err();
             assert!(matches!(err, SupervisorError::TimedOut { .. }));
             let start = Instant::now();
             drop(sandbox);
@@ -457,6 +685,21 @@ mod tests {
                 start.elapsed() < Duration::from_secs(5),
                 "drop kills QEMU instead of waiting for it"
             );
+        }
+
+        #[test]
+        fn kills_a_guest_that_does_not_power_off() {
+            let _guard = exec_lock();
+            let (mut sandbox, _) = spawn(
+                "sup-linger",
+                &format!("read hello; {READY}; read bye; {SHUTTING_DOWN}; sleep 30"),
+            );
+            sandbox.handshake(Duration::from_secs(10)).unwrap();
+            let start = Instant::now();
+            let err = sandbox.shutdown(Duration::from_millis(500)).unwrap_err();
+            assert!(matches!(err, SupervisorError::TimedOut { .. }), "{err}");
+            assert!(start.elapsed() < Duration::from_secs(5));
+            assert!(sandbox.send(&HostMessage::Shutdown).is_err(), "QEMU was stopped");
         }
     }
 }

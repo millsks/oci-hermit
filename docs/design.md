@@ -101,7 +101,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
   started with `-accel tcg -nodefaults -no-user-config -display none -no-reboot`, the console on a log file, and no
   network yet. It exits with the host tool: `-run-with exit-with-parent=on` on Linux and macOS, a kill-on-close Job
   Object on Windows. `oci-hermit machine boot` boots one sandbox until the agent is ready, as a self-check.
-- Control client: talks to the guest agent over virtio-serial.
+- Control client: talks to the guest agent over the virtio-serial port `org.oci-hermit.control`. QEMU wires that port to its own stdin and stdout, which the host tool holds as an anonymous pipe pair, so nothing on the filesystem or network can reach it. Messages are newline-delimited JSON (`hermit-proto`), at most 64 KiB a line; a session opens with `Hello`/`Ready` (major versions must match) and ends with `Shutdown`/`ShuttingDown`. Anything else from either side gets an error reply, and the host never trusts the guest to behave.
 - 9P file server: serves bind-mounted folders and enforces the mount policy.
 - Port publisher: listens on 127.0.0.1 and relays connections into the guest.
 
@@ -116,7 +116,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 **Guest agent (Rust, static, PID 1).**
 
 - Boots as init: mounts `/proc`, `/sys`, devtmpfs on `/dev`, devpts, and tmpfs on `/run` and `/tmp` (an already-mounted target is skipped), logs line-oriented `hermit-agent: ...` messages to the console, and reaps orphaned children.
-- Never exits: on a shutdown request or any fatal setup error it logs, syncs and powers the VM off, because a PID 1 that exits or panics panics the kernel. Until the control protocol carries a shutdown message, the request is SIGTERM or SIGINT; the agent logs a `ready` line with the protocol version once it is waiting. Run anywhere other than as PID 1 on Linux, it refuses to start.
+- Never exits: on a shutdown request or any fatal setup error it logs, syncs and powers the VM off, because a PID 1 that exits or panics panics the kernel. The shutdown request is the host's `Shutdown` message, or SIGTERM or SIGINT; the agent logs a `ready` line with the protocol version once it is waiting. Run anywhere other than as PID 1 on Linux, it refuses to start.
 - A static binary per guest architecture (`pixi run -e agent agent-build`, x86-64 and arm64). It is static glibc (`crt-static`, conda-forge's 2.39 sysroot) rather than musl, because conda-forge ships no musl Rust standard library.
 - Mounts the layer disks and builds an overlayfs root with a throwaway writable layer.
 - Mounts bind-mounted folders over 9P.

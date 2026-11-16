@@ -17,7 +17,7 @@ hermit-proto = { path = "crates/hermit-proto", version = "0.0.0" }
 # Windows only: QEMU runs in a Job Object that kills it when oci-hermit exits (QEMU has no exit-with-parent there).
 win32job = "2.1"
 # Guest agent only (Linux): safe wrappers for mount, sync, reboot, signal masks and waitpid.
-nix = { version = "0.32.0", default-features = false, features = ["fs", "mount", "reboot", "signal"] }
+nix = { version = "0.32.0", default-features = false, features = ["fs", "mount", "poll", "reboot", "signal"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
