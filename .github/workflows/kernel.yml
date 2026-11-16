@@ -307,9 +307,148 @@ jobs:
             # "timings: prepare 0.27s, boot 1.10s, ..." -> "| 1 | 0.27 | 1.10 | ..."
             echo "| $run | $(sed -E -e 's/^timings: //' -e 's/[a-z]+ ([0-9.]+)s/\1/g' -e 's/, / | /g' <<< "$line") |" >> "$GITHUB_STEP_SUMMARY"
           done
+      # #13: the same image again, run by a fresh account with no admin rights from a folder it cannot write to.
+      - name: Run as a standard user (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
+          if [ "$RUNNER_OS" = macOS ]; then
+            sudo sysadminctl -addUser hermit -password "$(uuidgen)" 2> /dev/null
+            membership=$(dseditgroup -o checkmember -m hermit admin || true)
+            grep -q 'NOT a member' <<< "$membership"
+          else
+            sudo useradd --create-home hermit
+            membership="hermit is in: $(id -nG hermit)"
+            if grep -qwE 'sudo|admin|adm|wheel|kvm|docker|lxd' <<< "$(id -nG hermit)"; then
+              echo "::error::$membership"
+              exit 1
+            fi
+            # Take KVM away entirely, so a run that worked cannot have used it.
+            if [ -e /dev/kvm ]; then sudo chmod 0600 /dev/kvm; fi
+          fi
+
+          install=/opt/oci-hermit
+          sudo mkdir -p "$install"
+          sudo cp target/release/oci-hermit debian.tar "$install/"
+          sudo cp -R qemu/out "$install/qemu"
+          sudo cp -R guest/out/sandbox "$install/guest"
+          sudo chown -R root "$install"
+          sudo chmod -R go-w,a+rX "$install"
+          tmp=$(sudo -u hermit mktemp -d /tmp/hermit.XXXXXX)
+          as_hermit() {
+            sudo -u hermit env -i PATH=/usr/bin:/bin HOME="$tmp" TMPDIR="$tmp" \
+              OCI_HERMIT_QEMU_DIR="$install/qemu" OCI_HERMIT_GUEST_DIR="$install/guest" "$@"
+          }
+
+          id=$(as_hermit id)
+          echo "$id"
+          if as_hermit sudo -n true 2> /dev/null; then
+            echo "::error::hermit can use sudo"
+            exit 1
+          fi
+          if as_hermit test -w "$install"; then
+            echo "::error::hermit can write to $install"
+            exit 1
+          fi
+          kvm=$([ -e /dev/kvm ] && ls -l /dev/kvm || echo "no /dev/kvm")
+
+          set +e
+          # shellcheck disable=SC2016 # expands in the guest's shell
+          out=$(as_hermit "$install/oci-hermit" run --platform "$platform" "$install/debian.tar" \
+            sh -c '. /etc/os-release; echo "$PRETTY_NAME on $(uname -m)"; exit 7')
+          code=$?
+          set -e
+          echo "$out"
+          [ "$code" = 7 ] || { echo "::error::exit code $code as a standard user, expected 7"; exit 1; }
+          grep -q '^Debian GNU/Linux 12' <<< "$out"
+
+          {
+            echo
+            echo "### As a standard user"
+            echo
+            echo "A new account with no admin rights ran oci-hermit from \`$install\`, which it cannot write to."
+            echo "\`sudo -n true\` failed for it. KVM: $kvm."
+            echo
+            echo '```console'
+            echo "$ id"
+            echo "$id"
+            echo "$membership"
+            echo "$ oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'"
+            echo "$out"
+            echo "(exit code 7)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run as a standard user (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $platform = if ('${{ matrix.arch }}' -eq 'x86_64') { 'linux/amd64' } else { 'linux/arm64' }
+          $password = ConvertTo-SecureString ('Hx1!' + [guid]::NewGuid()) -AsPlainText -Force
+          New-LocalUser -Name hermit -Password $password -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          Add-LocalGroupMember -Group Users -Member hermit
+
+          # Installed where only administrators can write, with a work folder the account owns.
+          $install = 'C:\oci-hermit'
+          $work = 'C:\hermit-work'
+          New-Item -ItemType Directory $install, $work, "$work\tmp" | Out-Null
+          Copy-Item target\release\oci-hermit.exe, debian.tar $install
+          Copy-Item -Recurse qemu\out "$install\qemu"
+          Copy-Item -Recurse guest\out\sandbox "$install\guest"
+          @"
+          @echo off
+          set TMP=$work\tmp
+          set TEMP=$work\tmp
+          set OCI_HERMIT_QEMU_DIR=$install\qemu
+          set OCI_HERMIT_GUEST_DIR=$install\guest
+          whoami > $work\whoami.txt
+          whoami /groups /fo csv > $work\groups.txt
+          whoami /priv /fo csv > $work\priv.txt
+          (echo x> $install\probe.txt) 2> nul && echo writable> $work\install-writable.txt
+          $install\oci-hermit.exe run --platform $platform $install\debian.tar sh -c ". /etc/os-release; echo `$PRETTY_NAME on `$(uname -m); exit 7" > $work\out.txt 2> $work\err.txt
+          exit /b %ERRORLEVEL%
+          "@ | Set-Content -Encoding ascii "$install\as-hermit.cmd"
+          icacls $install /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' 'Users:(OI)(CI)RX' | Out-Null
+          icacls $work /inheritance:r /grant:r 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' 'hermit:(OI)(CI)M' | Out-Null
+
+          $credential = New-Object System.Management.Automation.PSCredential('hermit', $password)
+          $p = Start-Process cmd.exe -ArgumentList '/c', "$install\as-hermit.cmd" -Credential $credential `
+            -WorkingDirectory $work -LoadUserProfile -Wait -PassThru
+          $code = $p.ExitCode
+          $whoami = (Get-Content "$work\whoami.txt" -Raw).Trim()
+          $groups = Get-Content "$work\groups.txt" -Raw
+          $privileges = Get-Content "$work\priv.txt" -Raw
+          $out = (Get-Content "$work\out.txt" -Raw).Trim()
+          Write-Output "whoami: $whoami" $groups $privileges $out
+          Get-Content "$work\err.txt"
+
+          if ($whoami -notmatch '\\hermit$') { throw "ran as $whoami, not hermit" }
+          if ($groups -match 'S-1-5-32-544') { throw 'hermit is in the Administrators group' }
+          if ($groups -notmatch 'Medium Mandatory Level') { throw 'hermit does not run at medium integrity' }
+          if (Test-Path "$work\install-writable.txt") { throw "hermit can write to $install" }
+          if ($code -ne 7) { throw "exit code $code as a standard user, expected 7" }
+          if ($out -notmatch '^Debian GNU/Linux 12') { throw "unexpected output: $out" }
+
+          $summary = @(
+            '', '### As a standard user', '',
+            "A new account in the Users group only ran oci-hermit from ``$install``, which it cannot write to.",
+            'It is not in Administrators (S-1-5-32-544) and runs at medium integrity, with no elevation.', '',
+            '```console', "> whoami", $whoami, '> whoami /groups (names only)',
+            (($groups | ConvertFrom-Csv).'Group Name' -join "`n"),
+            "> oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'", $out, '(exit code 7)', '```'
+          )
+          $summary -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           temp=$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || echo "$RUNNER_TEMP")
           cat "$temp"/oci-hermit/sandbox-*/console.log "$temp"/oci-hermit/sandbox-*/qemu.log || true
+          # The standard user's sandboxes, from the steps above.
+          if [ "$RUNNER_OS" = Windows ]; then
+            cat /c/hermit-work/tmp/oci-hermit/sandbox-*/*.log /c/hermit-work/*.txt 2> /dev/null || true
+          else
+            sudo sh -c 'cat /tmp/hermit.*/oci-hermit/sandbox-*/*.log' 2> /dev/null || true
+          fi
