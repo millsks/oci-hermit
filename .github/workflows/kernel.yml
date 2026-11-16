@@ -238,14 +238,18 @@ jobs:
           # shellcheck disable=SC2016 # expands in the guest's shell
           show='. /etc/os-release; echo "$PRETTY_NAME on $(uname -m), kernel $(uname -r)"; id; exit 7'
 
-          # Output and the exit code come back.
+          # Output and the exit code come back. No --platform (#19): the archive holds one architecture, and on a
+          # host of the other kind oci-hermit runs it anyway, under the matching emulated guest, with a warning.
           set +e
-          out=$("$hermit" run --platform "$platform" debian.tar sh -c "$show")
+          out=$("$hermit" run debian.tar sh -c "$show" 2> "$RUNNER_TEMP/run-stderr.txt")
           code=$?
           set -e
           echo "$out"
+          cat "$RUNNER_TEMP/run-stderr.txt"
           [ "$code" = 7 ] || { echo "::error::exit code $code, expected 7"; exit 1; }
           grep -q '^Debian GNU/Linux 12' <<< "$out"
+          grep -q " on ${{ matrix.arch }}," <<< "$out" || { echo "::error::not a ${{ matrix.arch }} guest"; exit 1; }
+          warning=$(grep '^WARNING' "$RUNNER_TEMP/run-stderr.txt" || true)
 
           # Piped stdin reaches the command.
           piped=$(echo "piped from the host" | "$hermit" run -i --platform "$platform" debian.tar cat)
@@ -273,7 +277,8 @@ jobs:
             echo "Host: $host. No root or admin rights, no WSL, no hypervisor: QEMU TCG."
             echo
             echo '```console'
-            echo "$ oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'"
+            echo "$ oci-hermit run debian.tar sh -c '...; exit 7'"
+            if [ -n "$warning" ]; then echo "$warning"; fi
             echo "$out"
             echo "(exit code 7)"
             echo "$ echo \"piped from the host\" | oci-hermit run -i --platform $platform debian.tar cat"

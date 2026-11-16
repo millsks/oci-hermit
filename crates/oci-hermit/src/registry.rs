@@ -211,6 +211,8 @@ pub enum PullError {
     /// The registry, the network or the credentials.
     Registry(String),
     Image(ImageError),
+    /// The image exists, but not for the platform asked for.
+    NoPlatform(String),
 }
 
 impl std::fmt::Display for PullError {
@@ -218,6 +220,7 @@ impl std::fmt::Display for PullError {
         match self {
             PullError::Registry(e) => write!(f, "{e}"),
             PullError::Image(e) => write!(f, "{e}"),
+            PullError::NoPlatform(e) => write!(f, "{e}"),
         }
     }
 }
@@ -325,7 +328,7 @@ pub fn pull(
                         .is_some_and(|p| p.os == "linux" && p.architecture == arch)
                 })
                 .ok_or_else(|| {
-                    PullError::Registry(format!(
+                    PullError::NoPlatform(format!(
                         "{reference} has no linux/{arch} variant (it has: {})",
                         if found.is_empty() {
                             "none listed".into()
@@ -350,10 +353,13 @@ pub fn pull(
             .config
             .as_ref()
             .ok_or_else(|| PullError::Image(ImageError::Invalid("the manifest has no config".into())))?;
-        for blob in std::iter::once(config).chain(&manifest.layers) {
+        for (i, blob) in std::iter::once(config).chain(&manifest.layers).enumerate() {
             let short = blob.digest.get(7..19).unwrap_or(&blob.digest);
             if store.has_blob(&blob.digest) {
                 let _ = writeln!(out, "{short}: already present");
+                if i == 0 {
+                    check_arch(reference, arch, &store.blob(&blob.digest)?)?;
+                }
                 continue;
             }
             let data = with_retries(delays, || async {
@@ -365,6 +371,10 @@ pub fn pull(
             })
             .await
             .map_err(registry_error(&format!("pulling blob {} of", blob.digest), reference))?;
+            // A single-platform image says its architecture only in its config: check it before any layer.
+            if i == 0 {
+                check_arch(reference, arch, &data)?;
+            }
             store.put_blob(&blob.digest, &data)?;
             let _ = writeln!(out, "{short}: pulled ({})", size(data.len()));
         }
@@ -379,6 +389,18 @@ pub fn pull(
         let _ = writeln!(out, "Digest: {digest}");
         Ok(Pulled { name, digest })
     })
+}
+
+/// Refuses an image whose config is for another architecture than `arch`.
+fn check_arch(reference: &Reference, arch: &str, config: &[u8]) -> Result<(), PullError> {
+    let config: serde_json::Value = serde_json::from_slice(config)
+        .map_err(|e| PullError::Image(ImageError::Invalid(format!("image config: {e}"))))?;
+    match config["architecture"].as_str() {
+        Some(found) if !found.is_empty() && found != arch => Err(PullError::NoPlatform(format!(
+            "{reference} has no linux/{arch} variant (it has: linux/{found})"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn size(bytes: usize) -> String {
@@ -492,19 +514,34 @@ pub(crate) mod testing {
     /// A registry holding `test/app:1` as an index of amd64 and arm64 images whose `Cmd` is `from-the-registry`;
     /// with `tamper`, every layer it serves is one bit off. Returns its address.
     pub(crate) fn registry(name: &str, basic: Option<String>, tamper: bool, throttle: usize) -> String {
+        registry_of(name, basic, tamper, throttle, &["amd64", "arm64"], true)
+    }
+
+    /// The same, for the given architectures; without `index`, `test/app:1` is the first architecture's manifest
+    /// alone, as single-platform images are served.
+    pub(crate) fn registry_of(
+        name: &str,
+        basic: Option<String>,
+        tamper: bool,
+        throttle: usize,
+        arches: &[&str],
+        index: bool,
+    ) -> String {
         use super::{OCI_INDEX, OCI_MANIFEST};
         use crate::image::testing::{layer, manifest};
         let dir = crate::qemu::testing::scratch(name);
         let config = r#"{"architecture":"ARCH","config":{"Cmd":["from-the-registry"]}}"#;
         let mut entries = Vec::new();
-        for arch in ["amd64", "arm64"] {
+        let mut first = None;
+        for arch in arches {
             let (digest, bytes) = manifest(&dir, arch, &layer(), config);
+            first.get_or_insert_with(|| bytes.clone());
             entries.push(format!(
                 r#"{{"mediaType":"{OCI_MANIFEST}","digest":"{digest}","size":{},"platform":{{"os":"linux","architecture":"{arch}"}}}}"#,
                 bytes.len()
             ));
         }
-        let index = format!(
+        let index_body = format!(
             r#"{{"schemaVersion":2,"mediaType":"{OCI_INDEX}","manifests":[{}]}}"#,
             entries.join(",")
         );
@@ -531,13 +568,18 @@ pub(crate) mod testing {
                 },
             );
         }
-        routes.insert(
-            "/v2/test/app/manifests/1".into(),
+        let tag = if index {
             Response {
                 content_type: OCI_INDEX.into(),
-                body: index.into_bytes(),
-            },
-        );
+                body: index_body.into_bytes(),
+            }
+        } else {
+            Response {
+                content_type: OCI_MANIFEST.into(),
+                body: first.unwrap(),
+            }
+        };
+        routes.insert("/v2/test/app/manifests/1".into(), tag);
         serve(routes, basic, throttle)
     }
 }
@@ -625,6 +667,48 @@ mod tests {
                 .contains("has no linux/s390x variant (it has: linux/amd64, linux/arm64)"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_single_platform_image_is_only_stored_for_its_own_architecture() {
+        let address = testing::registry_of("registry-single", None, false, 0, &["arm64"], false);
+        let store = Store::open(&scratch("registry-single-store")).unwrap();
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &settings(&address, vec![]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, PullError::NoPlatform(_)), "{err}");
+        assert!(
+            err.to_string()
+                .ends_with("has no linux/amd64 variant (it has: linux/arm64)"),
+            "{err}"
+        );
+        assert!(!store.has(&reference.whole(), "linux", "amd64"));
+        pull(
+            &reference,
+            "arm64",
+            &store,
+            &settings(&address, vec![]),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        // With the config already stored, the check still applies.
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &settings(&address, vec![]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, PullError::NoPlatform(_)), "{err}");
     }
 
     #[test]
