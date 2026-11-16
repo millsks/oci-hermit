@@ -270,6 +270,21 @@ fn run_container(args: &cli::RunArgs, env: &Env, out: &mut impl Write, err: &mut
     }
 }
 
+/// The first `run` flag given that is accepted but not implemented yet, as an error naming the issue that adds it.
+fn not_supported_yet(args: &cli::RunArgs) -> Option<String> {
+    let given = [
+        (args.detach, "-d/--detach", 22),
+        (args.name.is_some(), "--name", 20),
+        (!args.publish.is_empty(), "-p/--publish", 27),
+        (!args.volume.is_empty(), "-v/--volume", 33),
+        (args.pod.is_some(), "--pod", 35),
+    ];
+    given
+        .iter()
+        .find(|(set, ..)| *set)
+        .map(|(_, flag, issue)| format!("{flag} is not supported yet (#{issue}); run it without {flag}"))
+}
+
 fn run_in_sandbox(
     args: &cli::RunArgs,
     env: &Env,
@@ -277,6 +292,9 @@ fn run_in_sandbox(
     err: &mut impl Write,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let mut timings = Timings::new();
+    if let Some(refusal) = not_supported_yet(args) {
+        return Err(refusal.into());
+    }
     let arch = match &args.platform {
         Some(platform) => platform_arch(platform).ok_or_else(|| format!("unsupported --platform {platform}"))?,
         None => qemu::GuestArch::host().ok_or("cannot tell the host architecture; pass --platform")?,
@@ -616,6 +634,34 @@ mod tests {
         let (code, _, err) = run_with(&env, &["run", "--platform", "linux/arm64", "."]);
         assert_eq!(code, 125);
         assert!(err.contains("no bundled QEMU found"));
+    }
+
+    #[test]
+    fn run_refuses_flags_it_does_not_implement_yet() {
+        let env = no_qemu("main-run-flags");
+        for (args, flag, issue) in [
+            (&["-d"][..], "-d/--detach", "#22"),
+            (&["--name", "web"], "--name", "#20"),
+            (&["-p", "8080:80"], "-p/--publish", "#27"),
+            (&["-v", "./src:/src"], "-v/--volume", "#33"),
+            (&["--pod", "dev"], "--pod", "#35"),
+        ] {
+            let argv: Vec<&str> = std::iter::once("run")
+                .chain(args.iter().copied())
+                .chain(["."])
+                .collect();
+            let (code, out, err) = run_with(&env, &argv);
+            assert_eq!(code, 125, "{args:?}");
+            assert!(out.is_empty());
+            assert_eq!(
+                err,
+                format!("oci-hermit: {flag} is not supported yet ({issue}); run it without {flag}\n")
+            );
+        }
+        // --rm is what every run does already; it gets as far as looking for QEMU.
+        let (code, _, err) = run_with(&env, &["run", "--rm", "--platform", "linux/arm64", "."]);
+        assert_eq!(code, 125);
+        assert!(err.contains("no bundled QEMU found"), "{err}");
     }
 
     #[test]
