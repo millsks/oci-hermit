@@ -18,7 +18,8 @@ Testing a container image usually needs Docker, a Podman machine or WSL. On lock
 
 It targets smoke-testing prebuilt images: start an image and get a shell, or bring up a web app and hit it from your browser. Images arrive fully built; `npm install`, `pixi install` and the like happen before oci-hermit sees them.
 
-It is a development and testing tool, not a production runtime: it is slower than native and runs on its own guest kernel. [When to use oci-hermit](docs/when-to-use.md) covers what it is good for and where it differs from production.
+It is a development and testing tool, not a production runtime: it is slower than native and runs on its own guest kernel. [When to use oci-hermit](docs/when-to-use.md) covers what it is good for and where it differs from production, and
+[Running without admin rights](docs/no-admin.md) covers what it needs from the machine and how to check a locked-down one.
 
 ## What it will look like
 
