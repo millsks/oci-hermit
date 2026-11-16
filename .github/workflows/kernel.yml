@@ -3,8 +3,8 @@ name: Guest kernel
 # Builds the guest kernel (guest/kernel/build.sh) natively for each architecture and boot-tests it under the bundled
 # QEMU, built here the same way qemu.yml builds it. Then boots a whole sandbox (kernel, agent as PID 1) through the
 # host tool's supervisor with `oci-hermit machine boot`, and runs commands from a Debian image with `oci-hermit run`.
-# The windows job then does the same on a Windows host, with the Linux jobs' kernel, agent and image. Runs when the
-# kernel, the QEMU build, the host tool or the agent changes, on main, and by hand.
+# The hosts job then runs that image on Windows, macOS and Linux, for both guest architectures, with the kernel jobs'
+# files. Runs when the kernel, the QEMU build, the host tool or the agent changes, on main, and by hand.
 on:
   push:
     branches: ["main"]
@@ -127,7 +127,7 @@ jobs:
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true
-      # The guest files and the image for the windows job: they run inside the guest, so any host can use them.
+      # The guest files and the image for the hosts job: they run inside the guest, so any host can use them.
       - uses: actions/upload-artifact@v7
         with:
           name: sandbox-${{ matrix.arch }}
@@ -144,28 +144,43 @@ jobs:
           path: guest/out/${{ matrix.arch }}
           retention-days: 14
 
-  # A Linux image on a Windows host: no admin rights, no WSL, no Hyper-V; QEMU emulates the whole guest (TCG).
-  windows:
-    name: Run on Windows (${{ matrix.arch }} guest)
+  # A Linux image on every host oci-hermit supports, for both guest architectures: no root or admin rights, no WSL,
+  # no hypervisor; QEMU emulates the whole guest (TCG). The guest kernel, agent and image come from the kernel jobs.
+  hosts:
+    name: Run a Linux image (${{ matrix.host }} host, ${{ matrix.arch }} guest)
     needs: kernel
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        host: [win-64, osx-arm64, osx-64, linux-64, linux-aarch64]
         arch: [x86_64, aarch64]
+        include:
+          - { host: win-64, os: windows-latest }
+          - { host: osx-arm64, os: macos-latest }
+          - { host: osx-64, os: macos-15-intel }
+          - { host: linux-64, os: ubuntu-latest }
+          - { host: linux-aarch64, os: ubuntu-24.04-arm }
     env:
-      OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}\qemu\out
-      OCI_HERMIT_GUEST_DIR: ${{ github.workspace }}\guest\out\sandbox
+      OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}/qemu/out
+      OCI_HERMIT_GUEST_DIR: ${{ github.workspace }}/guest/out/sandbox
     steps:
       - uses: actions/checkout@v7
-      # Built as qemu.yml builds it, only when its inputs change.
+      # Built as qemu.yml builds it, only when its inputs change; the key matches the kernel jobs' on Linux.
       - name: Cache the QEMU bundle
         id: qemu-cache
         uses: actions/cache@v6
         with:
           path: qemu/out
           key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'pixi.lock') }}
-      - if: steps.qemu-cache.outputs.cache-hit != 'true'
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          environments: ${{ runner.os == 'Windows' && 'default' || 'default qemu-build' }}
+          cache: true
+      - if: steps.qemu-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+        name: Build the QEMU bundle
+        run: pixi run -e qemu-build qemu-build
+      - if: steps.qemu-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -186,35 +201,38 @@ jobs:
             mingw-w64-ucrt-x86_64-python-pip
             mingw-w64-ucrt-x86_64-python-setuptools
             mingw-w64-ucrt-x86_64-python-wheel
-      - if: steps.qemu-cache.outputs.cache-hit != 'true'
-        name: Build the QEMU bundle
+      - if: steps.qemu-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        name: Build the QEMU bundle (MSYS2)
         shell: msys2 {0}
         run: |
           python -m pip install --break-system-packages "qemu.qmp==0.0.6"
           bash qemu/build.sh qemu/out
-      - uses: prefix-dev/setup-pixi@v0.11.3
-        with:
-          environments: default
-          cache: true
       - name: Fetch the guest kernel, agent and Debian image
         uses: actions/download-artifact@v8
         with:
           name: sandbox-${{ matrix.arch }}
       - name: Build oci-hermit
         run: pixi run cargo build -q -p oci-hermit
-      # Sandboxes keep their logs under the temp directory; this one is shown at the end.
+      # Sandboxes keep their logs under the temp directory; they are shown at the end.
       - name: Use the runner's temp directory
         shell: bash
-        run: echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Boot a sandbox
         shell: bash
-        run: target/debug/oci-hermit.exe machine boot --arch "${{ matrix.arch }}" --timeout 600
+        run: target/debug/oci-hermit machine boot --arch "${{ matrix.arch }}" --timeout 600
       - name: Run commands from the Debian image
         shell: bash
         run: |
           set -euo pipefail
-          hermit=target/debug/oci-hermit.exe
+          hermit=target/debug/oci-hermit
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
+          case "$RUNNER_OS" in
+            Windows) host=$(cmd //c ver | tr -d '\r' | grep -v '^$') ;;
+            macOS) host="macOS $(sw_vers -productVersion) on $(uname -m)" ;;
+            *) host="$(. /etc/os-release; echo "$PRETTY_NAME") on $(uname -m)" ;;
+          esac
           # shellcheck disable=SC2016 # expands in the guest's shell
           show='. /etc/os-release; echo "$PRETTY_NAME on $(uname -m), kernel $(uname -r)"; id; exit 7'
 
@@ -228,30 +246,30 @@ jobs:
           grep -q '^Debian GNU/Linux 12' <<< "$out"
 
           # Piped stdin reaches the command.
-          piped=$(echo "piped from Windows" | "$hermit" run -i --platform "$platform" debian.tar cat)
-          [ "$piped" = "piped from Windows" ] || { echo "::error::stdin came back as '$piped'"; exit 1; }
+          piped=$(echo "piped from the host" | "$hermit" run -i --platform "$platform" debian.tar cat)
+          [ "$piped" = "piped from the host" ] || { echo "::error::stdin came back as '$piped'"; exit 1; }
 
           # With -t the command gets a terminal in the guest (the runner has no console to put in raw mode).
           set +e
           tty=$("$hermit" run -t --platform "$platform" debian.tar sh -c 'tty; exit 3' | tr -d '\r')
-          code=$?
+          code=${PIPESTATUS[0]}
           set -e
           echo "$tty"
           [ "$code" = 3 ] || { echo "::error::exit code $code with -t, expected 3"; exit 1; }
           grep -q '/dev/pts/' <<< "$tty"
 
           {
-            echo "## A Linux image on Windows (${{ matrix.arch }} guest)"
+            echo "## ${{ matrix.host }} host, ${{ matrix.arch }} guest"
             echo
-            echo "Host: $(cmd //c ver | tr -d '\r' | grep -v '^$'), no WSL, no Hyper-V; QEMU TCG."
+            echo "Host: $host. No root or admin rights, no WSL, no hypervisor: QEMU TCG."
             echo
             echo '```console'
-            echo "> oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'"
+            echo "$ oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'"
             echo "$out"
             echo "(exit code 7)"
-            echo "> echo \"piped from Windows\" | oci-hermit run -i --platform $platform debian.tar cat"
+            echo "$ echo \"piped from the host\" | oci-hermit run -i --platform $platform debian.tar cat"
             echo "$piped"
-            echo "> oci-hermit run -t --platform $platform debian.tar sh -c 'tty; exit 3'"
+            echo "$ oci-hermit run -t --platform $platform debian.tar sh -c 'tty; exit 3'"
             echo "$tty"
             echo "(exit code 3)"
             echo '```'
@@ -259,4 +277,6 @@ jobs:
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         shell: bash
-        run: cat "$RUNNER_TEMP"/oci-hermit/sandbox-*/console.log "$RUNNER_TEMP"/oci-hermit/sandbox-*/qemu.log || true
+        run: |
+          temp=$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || echo "$RUNNER_TEMP")
+          cat "$temp"/oci-hermit/sandbox-*/console.log "$temp"/oci-hermit/sandbox-*/qemu.log || true
