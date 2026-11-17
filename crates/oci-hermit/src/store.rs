@@ -100,14 +100,22 @@ impl Store {
         Ok(Store { dir, _lock: lock })
     }
 
-    /// The store under `data_dir`, for this command alone; [`Busy`] if another oci-hermit has it open.
-    pub fn open_exclusive(data_dir: &Path) -> Result<Store, Box<dyn std::error::Error>> {
+    /// The store under `data_dir`, for this command alone; [`Busy`] if another oci-hermit still has it open after
+    /// `patience`. A short wait rides out brief holders: a `run` reading its image, or a child process that has
+    /// inherited the lock between `fork` and `exec`.
+    pub fn open_exclusive(data_dir: &Path, patience: std::time::Duration) -> Result<Store, Box<dyn std::error::Error>> {
         let dir = Store::create(data_dir)?;
         let lock = lock_file(&dir)?;
-        match lock.try_lock() {
-            Ok(()) => Ok(Store { dir, _lock: lock }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(Box::new(Busy)),
-            Err(std::fs::TryLockError::Error(e)) => Err(Box::new(e)),
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(Store { dir, _lock: lock }),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => return Err(Box::new(Busy)),
+                Err(std::fs::TryLockError::Error(e)) => return Err(Box::new(e)),
+            }
         }
     }
 
@@ -443,16 +451,26 @@ mod tests {
     #[test]
     fn deleting_waits_for_no_one_else_to_have_the_store_open() {
         let data = scratch("store-lock");
+        let now = std::time::Duration::ZERO;
         let shared = Store::open(&data).unwrap();
-        let busy = Store::open_exclusive(&data).err().unwrap();
+        let busy = Store::open_exclusive(&data, now).err().unwrap();
         assert!(busy.to_string().contains("in use by another oci-hermit"), "{busy}");
         // Readers and writers share it.
         let second = Store::open(&data).unwrap();
         drop((shared, second));
-        let alone = Store::open_exclusive(&data).unwrap();
-        assert!(Store::open_exclusive(&data).is_err());
+        let alone = Store::open_exclusive(&data, now).unwrap();
+        assert!(Store::open_exclusive(&data, now).is_err());
         drop(alone);
-        assert!(Store::open_exclusive(&data).is_ok());
+        assert!(Store::open_exclusive(&data, now).is_ok());
+
+        // A holder that lets go within the patience is waited for.
+        let brief = Store::open(&data).unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(brief);
+        });
+        assert!(Store::open_exclusive(&data, std::time::Duration::from_secs(10)).is_ok());
+        holder.join().unwrap();
     }
 
     #[test]

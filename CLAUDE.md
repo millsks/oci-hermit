@@ -77,8 +77,8 @@ Everything runs through pixi.
   the image's size in RAM) and the agent chroots there with the command. EROFS layer disks (#16, #17) and crun (#21)
   replace both.
 - The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
-  store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs, and it fails fast with `Busy`
-  rather than wait. A pull writes blobs before naming them, so garbage collection without the exclusive lock would
+  store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs. It waits up to 2 s, then fails with
+  `Busy`: on Unix a child process holds an inherited lock between `fork` and `exec`, so a zero wait is flaky. A pull writes blobs before naming them, so garbage collection without the exclusive lock would
   delete a pull in progress. `run` keeps its shared store until the rootfs is read, then drops it. `index.json`
   changes go through `Store::update` under `index.lock`.
 - Every blob is verified against its digest when pulled, stored and read (#14); a mismatch is an error, never a

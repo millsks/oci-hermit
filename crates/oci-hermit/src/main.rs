@@ -546,7 +546,7 @@ fn image_command(
     use cli::{Command as C, ImageCommand as I};
     let exclusive = || -> Result<store::Store, Box<dyn std::error::Error>> {
         let dir = env.data_dir.as_ref().ok_or_else(no_data_dir)?;
-        store::Store::open_exclusive(dir)
+        store::Store::open_exclusive(dir, std::time::Duration::from_secs(2))
     };
     match command {
         C::Images(args) | C::Image(I::Ls(args)) => {
