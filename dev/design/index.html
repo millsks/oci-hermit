@@ -1838,7 +1838,7 @@
 <p><strong>Syntax</strong> follows Docker: <code>-v src:dst[:ro|:rw]</code> and <code>--mount type=bind,src=,dst=,readonly</code>. Compose <code>volumes:</code> entries follow the same rules. Named volumes come later.</p>
 <p><strong>Documented trade-off:</strong> an <code>:rw</code> mount is an intentional hole. Anything the container writes there lands on the host.</p>
 <h2 id="cli-and-compose-subset">CLI and Compose subset<a class="headerlink" href="#cli-and-compose-subset" title="Permanent link">&para;</a></h2>
-<p>Commands mirror Docker and Podman so existing habits carry over. <code>oci-hermit</code> is the binary name. An optional short alias, <code>ohm</code>, can be installed for daily use. No bare <code>hermit</code> binary is shipped, to avoid clashing with Cash App's Hermit on a user's PATH.</p>
+<p>Commands mirror Docker and Podman so existing habits carry over. <code>oci-hermit</code> is the binary name. A short name, <code>hrmt</code>, ships beside it for daily use (<a href="https://github.com/millsks/oci-hermit/issues/44">#44</a>). No bare <code>hermit</code> binary is shipped, to avoid clashing with Cash App's Hermit on a user's PATH.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># Images (host side)</span>
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>ghcr.io/org/app:1.2
 <a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>oci-hermit<span class="w"> </span>load<span class="w"> </span>-i<span class="w"> </span>app.tar<span class="w">            </span><span class="c1"># docker-archive or OCI layout</span>

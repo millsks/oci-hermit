@@ -579,6 +579,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="3. Run an image">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#private-registries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Private registries
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1498,6 +1515,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="3. Run an image">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#private-registries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Private registries
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1766,24 +1800,42 @@ file).</p>
 <a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>oci-hermit<span class="w"> </span>load<span class="w"> </span>-i<span class="w"> </span>app.tar<span class="w">                      </span><span class="c1"># from `docker save` or an OCI layout, offline</span>
 <a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>oci-hermit<span class="w"> </span>run<span class="w"> </span>./my-oci-layout<span class="w"> </span>sh<span class="w">               </span><span class="c1"># an OCI layout directory or .tar, without storing it</span>
 </code></pre></div>
-<p>Registry logins come from Podman or Docker: oci-hermit reads their auth files and credential helpers (see
-<a href="../field-manual/private-registry/">Pull from a private registry</a>). Pulls happen on the host. The sandbox itself
-never gets network access.</p>
+<p>Pulls happen on the host. The sandbox itself never gets network access.</p>
+<h3 id="private-registries">Private registries<a class="headerlink" href="#private-registries" title="Permanent link">&para;</a></h3>
+<p>Log in once, then pull and run as usual:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>oci-hermit<span class="w"> </span>login<span class="w"> </span>registry.example.com<span class="w">          </span><span class="c1"># asks for the user name and password</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>registry.example.com/team/app:1.4
+</code></pre></div>
+<ul>
+<li><code>login</code> checks the user name and password with the registry before it saves anything, so a typo is reported
+  straight away. With no registry it logs in to Docker Hub.</li>
+<li>In scripts and CI, pass the password on stdin rather than as an argument, where other users could see it:
+  <code>echo "$TOKEN" | oci-hermit login -u me --password-stdin ghcr.io</code>. Registries such as GHCR take an access token
+  as the password.</li>
+<li>The login is stored where Podman stores it (<code>$REGISTRY_AUTH_FILE</code>, else <code>$XDG_RUNTIME_DIR/containers/auth.json</code>,
+  else <code>~/.config/containers/auth.json</code>), readable by you only. Podman and skopeo use it too, and logins you already
+  made with <code>podman login</code> or <code>docker login</code> work in oci-hermit without logging in again. <code>machine info</code> lists
+  every auth file it reads and the one <code>login</code> writes.</li>
+<li><code>oci-hermit logout registry.example.com</code> removes the login; <code>logout --all</code> removes them all.</li>
+<li>More, including tokens for GHCR, GitLab and Harbor: <a href="../field-manual/private-registry/">Pull from a private registry</a>.</li>
+<li>Registry certificates are checked against your operating system's trust store, so a company certificate
+  authority that IT installed works. Per-registry certificates (<code>certs.d</code>) are <a href="https://github.com/millsks/oci-hermit/issues/86">#86</a>.</li>
+</ul>
 <p>Set <code>OCI_HERMIT_TIMINGS=1</code> to see how long each phase of a <code>run</code> took. Booting dominates; on CI hosts a shell is
 ready in 1 to 6 seconds (see <a href="../performance/">Performance and limits</a>).</p>
 <p><code>run</code> refuses the flags that are not implemented yet (<code>-d</code>, <code>--name</code>, <code>-p</code>, <code>-v</code>, <code>--pod</code>) instead of ignoring them.
 The <a href="../roadmap/">roadmap</a> says when they come.</p>
 <h2 id="managing-images">Managing images<a class="headerlink" href="#managing-images" title="Permanent link">&para;</a></h2>
 <p>The image commands work as in Podman and Docker. They only touch the image store, so they need no sandbox:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>oci-hermit<span class="w"> </span>images<span class="w">                                 </span><span class="c1"># or `image ls`; -q for IDs, --digests, --no-trunc</span>
-<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>oci-hermit<span class="w"> </span>tag<span class="w"> </span>alpine<span class="w"> </span>mine/alpine:test<span class="w">            </span><span class="c1"># another name for the same image</span>
-<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>oci-hermit<span class="w"> </span>inspect<span class="w"> </span>alpine<span class="w">                         </span><span class="c1"># config, layers and names as JSON</span>
-<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>oci-hermit<span class="w"> </span>image<span class="w"> </span><span class="nb">history</span><span class="w"> </span>alpine<span class="w">                   </span><span class="c1"># the steps that built it</span>
-<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>oci-hermit<span class="w"> </span>image<span class="w"> </span>exists<span class="w"> </span>alpine<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>stored<span class="w">     </span><span class="c1"># exit 0 if stored, 1 if not</span>
-<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a>oci-hermit<span class="w"> </span>save<span class="w"> </span>-o<span class="w"> </span>alpine.tar<span class="w"> </span>alpine<span class="w">              </span><span class="c1"># every platform stored; --platform for one</span>
-<a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a>oci-hermit<span class="w"> </span>rmi<span class="w"> </span>mine/alpine:test<span class="w">                   </span><span class="c1"># removes the name; blobs go when nothing uses them</span>
-<a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a>oci-hermit<span class="w"> </span>image<span class="w"> </span>prune<span class="w">                            </span><span class="c1"># images loaded without a name; -a for every image</span>
-<a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a>oci-hermit<span class="w"> </span>system<span class="w"> </span>df<span class="w">                              </span><span class="c1"># how much space the store uses</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>oci-hermit<span class="w"> </span>images<span class="w">                                 </span><span class="c1"># or `image ls`; -q for IDs, --digests, --no-trunc</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>oci-hermit<span class="w"> </span>tag<span class="w"> </span>alpine<span class="w"> </span>mine/alpine:test<span class="w">            </span><span class="c1"># another name for the same image</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>oci-hermit<span class="w"> </span>inspect<span class="w"> </span>alpine<span class="w">                         </span><span class="c1"># config, layers and names as JSON</span>
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a>oci-hermit<span class="w"> </span>image<span class="w"> </span><span class="nb">history</span><span class="w"> </span>alpine<span class="w">                   </span><span class="c1"># the steps that built it</span>
+<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>oci-hermit<span class="w"> </span>image<span class="w"> </span>exists<span class="w"> </span>alpine<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>stored<span class="w">     </span><span class="c1"># exit 0 if stored, 1 if not</span>
+<a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>oci-hermit<span class="w"> </span>save<span class="w"> </span>-o<span class="w"> </span>alpine.tar<span class="w"> </span>alpine<span class="w">              </span><span class="c1"># every platform stored; --platform for one</span>
+<a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a>oci-hermit<span class="w"> </span>rmi<span class="w"> </span>mine/alpine:test<span class="w">                   </span><span class="c1"># removes the name; blobs go when nothing uses them</span>
+<a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a>oci-hermit<span class="w"> </span>image<span class="w"> </span>prune<span class="w">                            </span><span class="c1"># images loaded without a name; -a for every image</span>
+<a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a>oci-hermit<span class="w"> </span>system<span class="w"> </span>df<span class="w">                              </span><span class="c1"># how much space the store uses</span>
 </code></pre></div>
 <ul>
 <li><strong>Names and IDs:</strong> images go by their full name (<code>docker.io/library/alpine:latest</code>; <code>alpine</code> means the same) or by
@@ -1832,20 +1884,20 @@ setting.</p>
 <div class="tabbed-block">
 <p><strong>"Windows protected your PC", or a blocked file:</strong> the browser marked the download (the Mark of the Web).
 Unblock the folder, if your organisation allows it:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nb">Get-ChildItem</span> <span class="n">-Recurse</span> <span class="p">.\</span><span class="n">oci-hermit</span> <span class="p">|</span> <span class="nb">Unblock-File</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="nb">Get-ChildItem</span> <span class="n">-Recurse</span> <span class="p">.\</span><span class="n">oci-hermit</span> <span class="p">|</span> <span class="nb">Unblock-File</span>
 </code></pre></div>
 <p><code>gh</code> downloads are not marked.</p>
 </div>
 <div class="tabbed-block">
 <p><strong>"cannot be opened because the developer cannot be verified":</strong> the browser quarantined the download. Remove
 the mark:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>xattr<span class="w"> </span>-dr<span class="w"> </span>com.apple.quarantine<span class="w"> </span>oci-hermit
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>xattr<span class="w"> </span>-dr<span class="w"> </span>com.apple.quarantine<span class="w"> </span>oci-hermit
 </code></pre></div>
 <p>Release binaries will be signed (<a href="https://github.com/millsks/oci-hermit/issues/39">#39</a>).</p>
 </div>
 <div class="tabbed-block">
 <p><strong>"permission denied" on a file that is executable:</strong> your home directory may be mounted <code>noexec</code>. Check:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>findmnt<span class="w"> </span>-no<span class="w"> </span>OPTIONS<span class="w"> </span>--target<span class="w"> </span>~
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a>findmnt<span class="w"> </span>-no<span class="w"> </span>OPTIONS<span class="w"> </span>--target<span class="w"> </span>~
 </code></pre></div>
 </div>
 </div>
@@ -1856,9 +1908,9 @@ software that inspects QEMU can slow it down a lot; give it longer with <code>--
 allowed first, and see <a href="../no-admin/">Running without admin rights</a> for what it needs and a checklist.</p>
 <h2 id="building-from-source">Building from source<a class="headerlink" href="#building-from-source" title="Permanent link">&para;</a></h2>
 <p>For working on oci-hermit itself. You need <a href="https://pixi.sh">pixi</a>, which installs per user.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/millsks/oci-hermit
-<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="nb">cd</span><span class="w"> </span>oci-hermit
-<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a>pixi<span class="w"> </span>run<span class="w"> </span>cargo<span class="w"> </span>build<span class="w"> </span>--release<span class="w"> </span>-p<span class="w"> </span>oci-hermit<span class="w">        </span><span class="c1"># target/release/oci-hermit</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/millsks/oci-hermit
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="nb">cd</span><span class="w"> </span>oci-hermit
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a>pixi<span class="w"> </span>run<span class="w"> </span>cargo<span class="w"> </span>build<span class="w"> </span>--release<span class="w"> </span>-p<span class="w"> </span>oci-hermit<span class="w">        </span><span class="c1"># target/release/oci-hermit</span>
 </code></pre></div>
 <p>On Windows, pixi's Rust links with Microsoft's linker, so Visual Studio Build Tools with the "Desktop development
 with C++" workload must be installed.</p>
@@ -1892,9 +1944,9 @@ with C++" workload must be installed.</p>
 <p>You can also take any of them from a CI run instead (<code>oci-hermit-qemu-&lt;host&gt;</code> from the QEMU bundle workflow,
 <code>sandbox-&lt;arch&gt;</code> from the Guest kernel workflow), or take the whole package above and replace only the binary.</p>
 <p>Point a source build at them with two settings, or copy them next to the binary in the package layout:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_QEMU_DIR</span><span class="o">=</span><span class="nv">$PWD</span>/qemu/out<span class="w">                 </span><span class="c1"># contains bin/qemu-system-*</span>
-<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_GUEST_DIR</span><span class="o">=</span><span class="nv">$PWD</span>/guest/out/sandbox<span class="w">       </span><span class="c1"># contains &lt;arch&gt;/kernel and &lt;arch&gt;/hermit-agent</span>
-<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a>target/release/oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
+<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_QEMU_DIR</span><span class="o">=</span><span class="nv">$PWD</span>/qemu/out<span class="w">                 </span><span class="c1"># contains bin/qemu-system-*</span>
+<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_GUEST_DIR</span><span class="o">=</span><span class="nv">$PWD</span>/guest/out/sandbox<span class="w">       </span><span class="c1"># contains &lt;arch&gt;/kernel and &lt;arch&gt;/hermit-agent</span>
+<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>target/release/oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
 </code></pre></div>
 <p><a href="../contributing/">CONTRIBUTING.md</a> covers the development workflow.</p>
 

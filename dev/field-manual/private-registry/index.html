@@ -685,10 +685,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#1-see-which-logins-oci-hermit-can-find" class="md-nav__link">
+  <a href="#1-log-in" class="md-nav__link">
     <span class="md-ellipsis">
       
-        1. See which logins oci-hermit can find
+        1. Log in
       
     </span>
   </a>
@@ -696,10 +696,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#2-log-in-with-a-tool-you-already-have" class="md-nav__link">
+  <a href="#2-see-which-logins-oci-hermit-can-find" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2. Log in with a tool you already have
+        2. See which logins oci-hermit can find
       
     </span>
   </a>
@@ -707,10 +707,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#3-or-write-an-auth-file-yourself" class="md-nav__link">
+  <a href="#3-or-use-a-login-you-already-have" class="md-nav__link">
     <span class="md-ellipsis">
       
-        3. Or write an auth file yourself
+        3. Or use a login you already have
       
     </span>
   </a>
@@ -718,10 +718,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#4-pull" class="md-nav__link">
+  <a href="#4-or-write-an-auth-file-yourself" class="md-nav__link">
     <span class="md-ellipsis">
       
-        4. Pull
+        4. Or write an auth file yourself
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-pull" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Pull
       
     </span>
   </a>
@@ -1414,10 +1425,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#1-see-which-logins-oci-hermit-can-find" class="md-nav__link">
+  <a href="#1-log-in" class="md-nav__link">
     <span class="md-ellipsis">
       
-        1. See which logins oci-hermit can find
+        1. Log in
       
     </span>
   </a>
@@ -1425,10 +1436,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#2-log-in-with-a-tool-you-already-have" class="md-nav__link">
+  <a href="#2-see-which-logins-oci-hermit-can-find" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2. Log in with a tool you already have
+        2. See which logins oci-hermit can find
       
     </span>
   </a>
@@ -1436,10 +1447,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#3-or-write-an-auth-file-yourself" class="md-nav__link">
+  <a href="#3-or-use-a-login-you-already-have" class="md-nav__link">
     <span class="md-ellipsis">
       
-        3. Or write an auth file yourself
+        3. Or use a login you already have
       
     </span>
   </a>
@@ -1447,10 +1458,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#4-pull" class="md-nav__link">
+  <a href="#4-or-write-an-auth-file-yourself" class="md-nav__link">
     <span class="md-ellipsis">
       
-        4. Pull
+        4. Or write an auth file yourself
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-pull" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Pull
       
     </span>
   </a>
@@ -1518,23 +1540,59 @@
 <h1 id="pull-from-a-private-registry">Pull from a private registry<a class="headerlink" href="#pull-from-a-private-registry" title="Permanent link">&para;</a></h1>
 <p><strong>When:</strong> your images are in a registry that needs a login (GitHub Container Registry, GitLab, Artifactory, Nexus,
 Harbor, a cloud registry), or in one whose certificate is issued by your company's own certificate authority.</p>
-<div class="admonition note">
-<p class="admonition-title"><code>oci-hermit login</code> is coming</p>
-<p><code>oci-hermit login</code> and <code>logout</code> are planned in <a href="https://github.com/millsks/oci-hermit/issues/75">#75</a>. Until then, oci-hermit uses the logins Podman and Docker
-already keep, or an auth file you write yourself, as described below.</p>
-</div>
 <p>Pulls always happen in the host tool. The credentials never reach the sandbox, and the sandbox has no network.</p>
-<h2 id="1-see-which-logins-oci-hermit-can-find">1. See which logins oci-hermit can find<a class="headerlink" href="#1-see-which-logins-oci-hermit-can-find" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
+<h2 id="1-log-in">1. Log in<a class="headerlink" href="#1-log-in" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>oci-hermit<span class="w"> </span>login<span class="w"> </span>ghcr.io
+</code></pre></div>
+<p>It asks for the user name and the password (the password is not shown as you type), checks them with the registry,
+and only then saves them:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>login<span class="w"> </span>ghcr.io
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="go">Username: your-user</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="go">Password:</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="go">Login Succeeded!</span>
+</code></pre></div>
+<p>A wrong password is reported and nothing is saved:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>login<span class="w"> </span>-u<span class="w"> </span>your-user<span class="w"> </span>ghcr.io
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="go">Password:</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="go">oci-hermit: login to ghcr.io failed: the registry rejected the user name or password</span>
+</code></pre></div>
+<p>Most registries (GHCR, GitLab, Harbor, Quay, Artifactory) take a personal access token in place of the password;
+create one with read access to packages. With no registry, <code>login</code> logs in to Docker Hub.</p>
+<p><strong>In scripts and CI</strong>, give the password on stdin, never as an argument, where other users on the machine could see
+it in the process list:</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:2"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">macOS and Linux</label><label for="__tabbed_1_2">Windows</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$GHCR_TOKEN</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>oci-hermit<span class="w"> </span>login<span class="w"> </span>-u<span class="w"> </span>your-user<span class="w"> </span>--password-stdin<span class="w"> </span>ghcr.io
+</code></pre></div>
+</div>
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nv">$env:GHCR_TOKEN</span> <span class="p">|</span> <span class="n">oci-hermit</span> <span class="n">login</span> <span class="n">-u</span> <span class="n">your-user</span> <span class="p">-</span><span class="n">-password-stdin</span> <span class="n">ghcr</span><span class="p">.</span><span class="n">io</span>
+</code></pre></div>
+</div>
+</div>
+</div>
+<p><code>-p</code> (<code>--password</code>) works too, with a warning. The login is stored where Podman stores it (see the table below),
+readable by you only, so Podman and skopeo use it as well. <code>--authfile &lt;FILE&gt;</code> stores it somewhere else.</p>
+<p>To see who you are logged in as, or to log out:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>oci-hermit<span class="w"> </span>login<span class="w"> </span>--get-login<span class="w"> </span>ghcr.io<span class="w">     </span><span class="c1"># prints the user name</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>oci-hermit<span class="w"> </span><span class="nb">logout</span><span class="w"> </span>ghcr.io<span class="w">                </span><span class="c1"># removes that login</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>oci-hermit<span class="w"> </span><span class="nb">logout</span><span class="w"> </span>--all<span class="w">                  </span><span class="c1"># removes every login in the file</span>
+</code></pre></div>
+<p><code>logout</code> only changes the file <code>login</code> writes. A login made with <code>docker login</code> lives in Docker's own file;
+<code>logout</code> says so and points you at <code>docker logout</code>.</p>
+<h2 id="2-see-which-logins-oci-hermit-can-find">2. See which logins oci-hermit can find<a class="headerlink" href="#2-see-which-logins-oci-hermit-can-find" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
 </code></pre></div>
 <p>The last section lists every place it looks for an auth file, in order, and whether each one exists:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="go">registries (pulls happen on the host, never in the sandbox):</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="go">  auth files: searched in this order; the first with a login for the registry is used</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="go">    1. [not set]   $REGISTRY_AUTH_FILE</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="go">    2. [not set]   $XDG_RUNTIME_DIR/containers/auth.json</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="go">    3. [not found] /Users/me/.config/containers/auth.json</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="go">    4. [found]     /Users/me/.docker/config.json</span>
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="go">  plain http: none (OCI_HERMIT_INSECURE_REGISTRIES)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="go">registries (pulls happen on the host, never in the sandbox):</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="go">  auth files: searched in this order; the first with a login for the registry is used</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="go">    1. [not set]   $REGISTRY_AUTH_FILE</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="go">    2. [not set]   $XDG_RUNTIME_DIR/containers/auth.json</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="go">    3. [not found] /Users/me/.config/containers/auth.json</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="go">    4. [found]     /Users/me/.docker/config.json</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="go">  login file: /Users/me/.config/containers/auth.json (where login writes)</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="go">  plain http: none (OCI_HERMIT_INSECURE_REGISTRIES)</span>
 </code></pre></div>
 <table>
 <thead>
@@ -1548,17 +1606,17 @@ already keep, or an auth file you write yourself, as described below.</p>
 <tr>
 <td>1</td>
 <td><code>$REGISTRY_AUTH_FILE</code></td>
-<td>you, or Podman when the variable is set</td>
+<td><code>oci-hermit login</code> and <code>podman login</code> when the variable is set, or you</td>
 </tr>
 <tr>
 <td>2</td>
 <td><code>$XDG_RUNTIME_DIR/containers/auth.json</code></td>
-<td><code>podman login</code> on Linux</td>
+<td><code>oci-hermit login</code> and <code>podman login</code> on Linux</td>
 </tr>
 <tr>
 <td>3</td>
 <td><code>~/.config/containers/auth.json</code> (<code>$XDG_CONFIG_HOME/containers/auth.json</code> when that is set)</td>
-<td><code>podman login</code> on macOS and Windows, or with <code>--authfile</code></td>
+<td><code>oci-hermit login</code> and <code>podman login</code> on macOS and Windows, and on Linux without <code>$XDG_RUNTIME_DIR</code></td>
 </tr>
 <tr>
 <td>4</td>
@@ -1567,16 +1625,17 @@ already keep, or an auth file you write yourself, as described below.</p>
 </tr>
 </tbody>
 </table>
-<p>For each registry, oci-hermit takes the first file that has a login for it. On Windows, <code>~</code> is your user profile
-(<code>%USERPROFILE%</code>).</p>
-<h2 id="2-log-in-with-a-tool-you-already-have">2. Log in with a tool you already have<a class="headerlink" href="#2-log-in-with-a-tool-you-already-have" title="Permanent link">&para;</a></h2>
-<p>If Podman or Docker is installed (it does not have to be able to run containers), log in with it:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>podman<span class="w"> </span>login<span class="w"> </span>ghcr.io
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="c1"># or</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>docker<span class="w"> </span>login<span class="w"> </span>ghcr.io
+<p>For each registry, oci-hermit takes the first file that has a login for it, so a login made with <code>oci-hermit login</code>
+wins over one in Docker's file. On Windows, <code>~</code> is your user profile (<code>%USERPROFILE%</code>).</p>
+<h2 id="3-or-use-a-login-you-already-have">3. Or use a login you already have<a class="headerlink" href="#3-or-use-a-login-you-already-have" title="Permanent link">&para;</a></h2>
+<p>Logins made with Podman or Docker work without logging in again. If either is installed (it does not have to be
+able to run containers), you can log in with it instead:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>podman<span class="w"> </span>login<span class="w"> </span>ghcr.io
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="c1"># or</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>docker<span class="w"> </span>login<span class="w"> </span>ghcr.io
 </code></pre></div>
 <p>Then pull as usual:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>ghcr.io/your-org/your-app:1.2
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>ghcr.io/your-org/your-app:1.2
 </code></pre></div>
 <p><strong>Credential helpers work too.</strong> When an auth file names a helper, in <code>credHelpers</code> for one registry or <code>credsStore</code>
 for all of them, oci-hermit runs <code>docker-credential-&lt;name&gt; get</code>, as Docker does. Docker Desktop's <code>desktop</code> helper,
@@ -1584,57 +1643,58 @@ for all of them, oci-hermit runs <code>docker-credential-&lt;name&gt; get</code>
 your <code>PATH</code>.</p>
 <p>Logins that hand out an identity token instead of a username and password (<code>&lt;token&gt;</code> as the username, as
 <code>az acr login</code> does) are not supported yet. Log in with a username and an access token instead.</p>
-<h2 id="3-or-write-an-auth-file-yourself">3. Or write an auth file yourself<a class="headerlink" href="#3-or-write-an-auth-file-yourself" title="Permanent link">&para;</a></h2>
-<p>Without Podman or Docker, write the file they would have written. Most registries accept a personal access token in
+<h2 id="4-or-write-an-auth-file-yourself">4. Or write an auth file yourself<a class="headerlink" href="#4-or-write-an-auth-file-yourself" title="Permanent link">&para;</a></h2>
+<p>Where <code>oci-hermit login</code> cannot be run interactively and stdin is not an option, write the file it would have
+written. Most registries accept a personal access token in
 place of a password; create one with read access to packages.</p>
 <p>The login is <code>username:token</code>, base64-encoded:</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="1:2"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">macOS and Linux</label><label for="__tabbed_1_2">Windows</label></div>
+<div class="tabbed-set tabbed-alternate" data-tabs="2:2"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">macOS and Linux</label><label for="__tabbed_2_2">Windows</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s1">'your-user:your-token'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>base64
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s1">'your-user:your-token'</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>base64
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="no">[Convert]</span><span class="p">::</span><span class="n">ToBase64String</span><span class="p">(</span><span class="no">[Text.Encoding]</span><span class="p">::</span><span class="n">UTF8</span><span class="p">.</span><span class="n">GetBytes</span><span class="p">(</span><span class="s1">'your-user:your-token'</span><span class="p">))</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="no">[Convert]</span><span class="p">::</span><span class="n">ToBase64String</span><span class="p">(</span><span class="no">[Text.Encoding]</span><span class="p">::</span><span class="n">UTF8</span><span class="p">.</span><span class="n">GetBytes</span><span class="p">(</span><span class="s1">'your-user:your-token'</span><span class="p">))</span>
 </code></pre></div>
 </div>
 </div>
 </div>
 <p>Put it in a file, under the registry's host name:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">"auths"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">    </span><span class="nt">"ghcr.io"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"auth"</span><span class="p">:</span><span class="w"> </span><span class="s2">"eW91ci11c2VyOnlvdXItdG9rZW4="</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="p">}</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="p">{</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span><span class="nt">"auths"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">    </span><span class="nt">"ghcr.io"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"auth"</span><span class="p">:</span><span class="w"> </span><span class="s2">"eW91ci11c2VyOnlvdXItdG9rZW4="</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="p">}</span>
 </code></pre></div>
 <p>Save it as <code>~/.config/containers/auth.json</code> (where <code>podman login</code> would put it), or anywhere you like and point
 <code>REGISTRY_AUTH_FILE</code> at it:</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="2:2"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">macOS and Linux</label><label for="__tabbed_2_2">Windows</label></div>
+<div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">macOS and Linux</label><label for="__tabbed_3_2">Windows</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">REGISTRY_AUTH_FILE</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/registry-auth.json"</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY_AUTH_FILE</span><span class="s2">"</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">REGISTRY_AUTH_FILE</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/registry-auth.json"</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">"</span><span class="nv">$REGISTRY_AUTH_FILE</span><span class="s2">"</span>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nv">$env:REGISTRY_AUTH_FILE</span> <span class="p">=</span> <span class="s2">"$HOME\registry-auth.json"</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">oci-hermit</span> <span class="n">machine</span> <span class="n">info</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nv">$env:REGISTRY_AUTH_FILE</span> <span class="p">=</span> <span class="s2">"$HOME\registry-auth.json"</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="n">oci-hermit</span> <span class="n">machine</span> <span class="n">info</span>
 </code></pre></div>
 </div>
 </div>
 </div>
 <p><code>machine info</code> now shows <code>[found]</code> next to it. The file holds a secret: keep it readable only by you, and out of
 version control.</p>
-<h2 id="4-pull">4. Pull<a class="headerlink" href="#4-pull" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>ghcr.io/your-org/your-app:1.2
+<h2 id="5-pull">5. Pull<a class="headerlink" href="#5-pull" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>ghcr.io/your-org/your-app:1.2
 </code></pre></div>
 <p>A pull prints each blob as it arrives, then the manifest's digest:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>pull<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="go">ab3fe4defd29: pulled (628 B)</span>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="go">3f26bc2dec0b: pulled (4.1 MB)</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="go">Digest: sha256:45e09956dc667c5eff3583c9d94830261fb1ca0be10a0a7db36266edf5de9e1d</span>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="go">Status: pulled public.ecr.aws/docker/library/alpine:3.20 for linux/arm64</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>pull<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="go">ab3fe4defd29: pulled (628 B)</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="go">3f26bc2dec0b: pulled (4.1 MB)</span>
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="go">Digest: sha256:45e09956dc667c5eff3583c9d94830261fb1ca0be10a0a7db36266edf5de9e1d</span>
+<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a><span class="go">Status: pulled public.ecr.aws/docker/library/alpine:3.20 for linux/arm64</span>
 </code></pre></div>
 <p>Every manifest, config and layer is checked against its sha256 digest before it is stored; a mismatch stops the pull
 and the image is not stored. Throttling and server errors (429, 502, 503, 504) are retried four times, after 1, 2, 4 and 8
@@ -1650,16 +1710,16 @@ system store, and IT needs to install it.</p>
 <h2 id="a-registry-over-plain-http">A registry over plain HTTP<a class="headerlink" href="#a-registry-over-plain-http" title="Permanent link">&para;</a></h2>
 <p>A local test registry often has no TLS at all. Name it in <code>OCI_HERMIT_INSECURE_REGISTRIES</code>, as <code>host:port</code>, comma
 separated:</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">macOS and Linux</label><label for="__tabbed_3_2">Windows</label></div>
+<div class="tabbed-set tabbed-alternate" data-tabs="4:2"><input checked="checked" id="__tabbed_4_1" name="__tabbed_4" type="radio" /><input id="__tabbed_4_2" name="__tabbed_4" type="radio" /><div class="tabbed-labels"><label for="__tabbed_4_1">macOS and Linux</label><label for="__tabbed_4_2">Windows</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_INSECURE_REGISTRIES</span><span class="o">=</span>localhost:5000
-<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>localhost:5000/my-app:dev
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_INSECURE_REGISTRIES</span><span class="o">=</span>localhost:5000
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>localhost:5000/my-app:dev
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="nv">$env:OCI_HERMIT_INSECURE_REGISTRIES</span> <span class="p">=</span> <span class="s2">"localhost:5000"</span>
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="n">oci-hermit</span> <span class="n">pull</span> <span class="n">localhost</span><span class="p">:</span><span class="n">5000</span><span class="p">/</span><span class="n">my-app</span><span class="p">:</span><span class="n">dev</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nv">$env:OCI_HERMIT_INSECURE_REGISTRIES</span> <span class="p">=</span> <span class="s2">"localhost:5000"</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="n">oci-hermit</span> <span class="n">pull</span> <span class="n">localhost</span><span class="p">:</span><span class="n">5000</span><span class="p">/</span><span class="n">my-app</span><span class="p">:</span><span class="n">dev</span>
 </code></pre></div>
 </div>
 </div>

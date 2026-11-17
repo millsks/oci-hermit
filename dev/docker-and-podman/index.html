@@ -1561,8 +1561,9 @@ nothing out.</p>
 <h2 id="what-is-shared-with-them">What is shared with them<a class="headerlink" href="#what-is-shared-with-them" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Images and names.</strong> The same references, with Docker's expansion: <code>alpine</code> is <code>docker.io/library/alpine:latest</code>.</li>
-<li><strong>Registry logins.</strong> oci-hermit reads Podman's and Docker's auth files and runs Docker credential helpers
-  (<a href="../field-manual/private-registry/">Pull from a private registry</a>). <code>oci-hermit login</code> is planned (<a href="https://github.com/millsks/oci-hermit/issues/75">#75</a>).</li>
+<li><strong>Registry logins.</strong> <code>oci-hermit login</code> and <code>logout</code> work as <code>podman login</code> and <code>podman logout</code> do and write the
+  same file; oci-hermit also reads Docker's auth file and runs Docker credential helpers
+  (<a href="../field-manual/private-registry/">Pull from a private registry</a>).</li>
 <li><strong>Archives.</strong> <code>oci-hermit load</code> reads <code>docker save</code> and <code>podman save</code> archives; <code>oci-hermit save</code> writes the
   Docker 25 format, which <code>docker load</code> and <code>podman load</code> read.</li>
 <li><strong>Exit codes.</strong> <code>run</code> exits with the command's code, or 125 when oci-hermit itself fails, as <code>docker run</code> does.</li>
