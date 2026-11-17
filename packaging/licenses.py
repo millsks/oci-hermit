@@ -124,6 +124,12 @@ def downloaded_info(record: dict) -> Path:
                 fail(f"{url}: no info-*.tar.zst inside")
             with tarfile.open(fileobj=io.BytesIO(z.read(member)), mode="r:zst") as t:
                 t.extractall(target, filter="data")
+            # Some packages carry part of info/ (their info/licenses, say) in the payload half.
+            payload = next((n for n in z.namelist() if n.startswith("pkg-") and n.endswith(".tar.zst")), None)
+            if payload:
+                with tarfile.open(fileobj=io.BytesIO(z.read(payload)), mode="r:zst") as t:
+                    members = [m for m in t.getmembers() if m.name.startswith("info/")]
+                    t.extractall(target, members=members, filter="data")
     else:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:bz2") as t:
             members = [m for m in t.getmembers() if m.name.startswith("info/")]
@@ -131,8 +137,9 @@ def downloaded_info(record: dict) -> Path:
     return target / "info"
 
 
-def conda_component(record: dict, licenses: Path) -> dict:
-    """Copies a conda package's license files (and its recipe's patches) and describes its source."""
+def conda_component(record: dict, licenses: Path, installed: list[Path] | None = None) -> dict:
+    """Copies a conda package's license files (and its recipe's patches) and describes its source. ``installed``
+    names folders in the environment that hold more of its license files, as a sysroot keeps glibc's."""
     package_dir = Path(record.get("extracted_package_dir") or record.get("link", {}).get("source", ""))
     info = package_dir / "info"
     if not info.is_dir():
@@ -140,6 +147,8 @@ def conda_component(record: dict, licenses: Path) -> dict:
         info = downloaded_info(record)
     dest = licenses / record["name"]
     found = copy_licenses(info / "licenses", dest, recursive=True) if (info / "licenses").is_dir() else []
+    for folder in installed or []:
+        found += copy_licenses(folder, dest, recursive=True)
     if not found:
         fail(f"{record['name']} {record['version']} ships no license files")
     patches = sorted((info / "recipe").rglob("*.patch")) + sorted((info / "recipe").rglob("*.diff"))
@@ -246,9 +255,26 @@ def glibc(dest: Path, prefix: Path) -> None:
     if not records:
         fail(f"no sysroot_linux-* package in {prefix}")
     licenses = dest / "licenses"
-    components = [conda_component(r, licenses) for r in records]
+    # glibc's own COPYING, COPYING.LIB and LICENSES, where the sysroot installs them.
+    glibc_licenses = sorted(prefix.glob("*/sysroot/usr/share/licenses/glibc"))
+    if not glibc_licenses:
+        fail(f"no */sysroot/usr/share/licenses/glibc in {prefix}")
+    components = [conda_component(r, licenses, glibc_licenses) for r in records]
     for c in components:
         c["license"] = c["license"] + " (statically linked into hermit-agent; relink from this repository's source)"
+        # conda-forge repackages Rocky Linux's binary RPMs; glibc's corresponding source is the matching source RPM,
+        # which Rocky keeps in its vault for every released build.
+        rpm = next((s["url"] for s in c["sources"] if re.search(r"/glibc-\d[^/]*\.rpm$", s["url"])), "")
+        built = re.match(
+            r"https://dl\.rockylinux\.org/(?:pub|vault)/rocky/([^/]+)/[^/]+/[^/]+/os/Packages/g/glibc-(.+)\.[a-z0-9_]+\.rpm$",
+            rpm,
+        )
+        if not built:
+            fail(f"{c['name']}: cannot tell glibc's source package from {rpm or c['sources']}")
+        release, nevr = built.group(1), built.group(2)
+        url = f"https://dl.rockylinux.org/vault/rocky/{release}/BaseOS/source/tree/Packages/g/glibc-{nevr}.src.rpm"
+        c["sources"] = [{"url": url, "sha256": None}]
+        c["from"] += f", built from Rocky Linux {release} glibc {nevr}"
     write_sources(licenses, components)
 
 
