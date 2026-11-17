@@ -1,0 +1,135 @@
+site_name: oci-hermit
+site_description: Run OCI images in a sealed, software-emulated sandbox without root, admin or a hypervisor
+site_url: https://millsks.github.io/oci-hermit/
+repo_url: https://github.com/millsks/oci-hermit
+repo_name: millsks/oci-hermit
+edit_uri: edit/main/docs/
+copyright: Apache-2.0 licensed
+
+docs_dir: docs
+# This lives under docs/ for the theme's sake; it is not a page.
+exclude_docs: |
+  overrides/
+strict: true
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Overview: index.md
+  - Getting started: getting-started.md
+  - When to use oci-hermit: when-to-use.md
+  - Field manual:
+      - Overview: field-manual/index.md
+      - Run a public image and get a shell: field-manual/run-a-public-image.md
+      - Pull from a private registry: field-manual/private-registry.md
+      - Bring images in without a registry: field-manual/without-a-registry.md
+      - Move images between machines: field-manual/move-images.md
+      - Manage the image store: field-manual/image-store.md
+      - Run on a managed device: no-admin.md
+      - Choose a platform: field-manual/platforms.md
+  - Command-line reference: cli.md
+  - oci-hermit, Docker and Podman: docker-and-podman.md
+  - Configuration: configuration.md
+  - How it works: how-it-works.md
+  - Performance and limits: performance.md
+  - Troubleshooting: troubleshooting.md
+  - Contributing:
+      - Overview: contributing.md
+      - Architecture: architecture.md
+      - Development: development.md
+      - Building QEMU: building-qemu.md
+      - Building the guest: building-guest.md
+      - Design: design.md
+  - Roadmap: roadmap.md
+  - Security policy: security.md
+  - Changelog: changelog.md
+
+hooks:
+  - mkdocs_hooks.py
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  favicon: assets/favicon.svg
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+    # One choice of Windows, macOS or Linux applies to every tab set on the site.
+    - content.tabs.link
+  # The Aesir brand (docs/overrides/oci-hermit.css): Inter for text, JetBrains Mono for code.
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    logo: oci-hermit/mark
+  # Light by default regardless of the OS preference; the toggle switches to dark. The colours are the brand's light
+  # and dark theme mapping, set in docs/overrides/oci-hermit.css.
+  palette:
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  # The architecture diagram in design.md is Mermaid, which GitHub renders too.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tasklist:
+      custom_checkbox: true
+      clickable_checkbox: true
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  # Aliases (`latest`) are real copies so GitHub Pages serves them without symlinks or redirects,
+  # and every version's pages declare the `latest` URL as canonical for search engines.
+  - mike:
+      alias_type: copy
+      canonical_version: latest
+
+extra:
+  # Repository files published as pages of the site (mkdocs_hooks.py).
+  repo_pages:
+    CHANGELOG.md: changelog.md
+    CONTRIBUTING.md: contributing.md
+    ROADMAP.md: roadmap.md
+    SECURITY.md: security.md
+    qemu/README.md: building-qemu.md
+    guest/README.md: building-guest.md
+  # Version selector fed by mike's versions.json; the site root opens `latest`.
+  version:
+    provider: mike
+    default: latest
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/millsks/oci-hermit

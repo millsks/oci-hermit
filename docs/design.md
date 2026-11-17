@@ -107,7 +107,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 
 **Emulator (bundled QEMU, TCG mode).** A helper process launched by the host tool. oci-hermit builds it itself, TCG-only, and refuses any other QEMU ([qemu/README.md](../qemu/README.md)).
 
-- `microvm` machine type, virtio devices only: block disks, one network card, serial channels, console.
+- `microvm` machine type for x86_64 guests and `virt` for aarch64 ones, virtio devices only: block disks, one network card, serial channels, console.
 - Multi-threaded TCG so a sandbox can have several vCPUs.
 - Emulates x86-64 or arm64 guests on any host, so `--platform` works everywhere.
 
@@ -159,7 +159,7 @@ The container root is an overlay of read-only image layers plus a throwaway writ
 
 ## CLI and Compose subset
 
-Commands mirror Docker and Podman so existing habits carry over. `oci-hermit` is the binary name. An optional short alias, `ohm`, can be installed for daily use. No bare `hermit` binary is shipped, to avoid clashing with Cash App's Hermit on a user's PATH.
+Commands mirror Docker and Podman so existing habits carry over. `oci-hermit` is the binary name. A short name, `hrmt`, ships beside it for daily use (#44). No bare `hermit` binary is shipped, to avoid clashing with Cash App's Hermit on a user's PATH.
 
 ```bash
 # Images (host side)

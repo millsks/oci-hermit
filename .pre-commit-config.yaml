@@ -12,6 +12,8 @@ repos:
         # A unified diff's blank context lines are a single space.
         exclude: ^qemu/patches/
       - id: check-yaml
+        # mkdocs.yml names a Python function with a !!python/name tag (the Mermaid fence); check its syntax only.
+        args: [--unsafe]
       - id: check-toml
       - id: check-merge-conflict
   - repo: local

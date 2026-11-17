@@ -4,6 +4,8 @@
 
 > A hermit for your containers: it lives alone, takes visitors only at the door you choose, and never goes out.
 
+**Documentation: https://millsks.github.io/oci-hermit/**
+
 > [!WARNING]
 > oci-hermit is an early spike. `oci-hermit pull` fetches an image from a registry and `oci-hermit load -i` reads one from a `docker save` or OCI archive, verifying every digest; `oci-hermit run` runs a command from it (or straight from a local OCI layout) on Linux, macOS and Windows; `images`, `rmi`, `inspect`, `tag`, `save` and the other image commands manage the store; `login` and `logout` handle private registries; most of the other commands below are still to come. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
 
@@ -43,6 +45,12 @@ Each sandbox is one emulator process launched as you. The host tool pulls and un
 
 [Getting started](docs/getting-started.md) has the commands for Windows, macOS and Linux: download the ready-to-run
 folder that CI builds for each host, check it, and run a Linux image. No admin rights needed.
+
+## Documentation
+
+The documentation site is at **https://millsks.github.io/oci-hermit/**: getting started on each OS, walk-throughs
+for private registries, offline images and managed devices, the command-line reference, configuration, how it
+works, and troubleshooting.
 
 ## Installation
 
