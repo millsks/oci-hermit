@@ -127,9 +127,30 @@ env = { CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C target-feature=+c
 [feature.dev.tasks]
 ci = { depends-on = ["pre-commit-run", "build", "check", "lint", "cov"] }
 
+# The documentation site (mkdocs.yml), set up as pixi-sbom's is. Its toolchain comes from PyPI rather than
+# conda-forge, the one place this project departs from conda-forge-first: conda-forge's only mkdocs 1.6.1 build
+# declares `click >=7.0,<8.3.0a0`, which holds click on 8.2.1 (PYSEC-2026-2132, a command injection in
+# `click.edit()`). mkdocs' own metadata asks for `click>=7.0`; the cap is the packaging, not the code. Revisit when
+# conda-forge ships an mkdocs build without it.
+[feature.docs.dependencies]
+python = "3.14.*"
+# Conda-side, so the PyPI solve sees it as already satisfied and cannot pull a capped one.
+click = ">=8.3.3"
+
+[feature.docs.pypi-dependencies]
+mkdocs = ">=1.6,<2"
+mkdocs-material = ">=9.6"
+pymdown-extensions = ">=10"
+mike = ">=2.1"
+
+[feature.docs.tasks]
+docs-serve = "mkdocs serve"
+docs-build = "mkdocs build --strict"
+
 [environments]
 default = ["lint", "cov", "dev"]
 lint = { features = ["lint"], no-default-feature = true }
+docs = { features = ["docs"], no-default-feature = true }
 msrv = { features = ["msrv"], no-default-feature = true }
 qemu-build = { features = ["qemu-build"], no-default-feature = true }
 kernel-build = { features = ["kernel-build"], no-default-feature = true }

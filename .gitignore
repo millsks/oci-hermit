@@ -36,3 +36,7 @@ Thumbs.db
 # Bundled QEMU builds (qemu/build.sh)
 /qemu/out/
 /qemu/work/
+
+# The docs site (pixi run -e docs docs-build), and mkdocs_hooks.py compiled
+/site/
+__pycache__/

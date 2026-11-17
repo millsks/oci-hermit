@@ -1,7 +1,7 @@
 # Getting started
 
 This page takes you from nothing to a shell in a Linux image on Windows, macOS or Linux. None of it needs admin
-rights, a hypervisor or WSL.
+rights, a hypervisor or WSL. Pick your operating system in any of the tabs below; the others follow.
 
 oci-hermit has no release yet (#39–#41). Until it does, every successful CI run on `main` publishes a ready-to-run
 folder for each host. GitHub keeps these for 14 days, and only signed-in GitHub users can download them.
@@ -14,7 +14,7 @@ One folder that runs from wherever you unpack it:
 oci-hermit/
   oci-hermit(.exe)        the host tool
   qemu/                   the bundled emulator (QEMU, TCG only)
-  guest/x86_64/           the guest kernel and agent, for x86_64 images
+  guest/x86_64/           the guest kernel and agent, for x86_64 (amd64) images
   guest/aarch64/          the same for arm64 images
 ```
 
@@ -32,23 +32,38 @@ silicon.
 
 ## 1. Download
 
-**With the GitHub CLI** (`gh`, signed in with `gh auth login`), from the latest successful run on `main`. Replace
-`<package>` with the name from the table.
+**With the GitHub CLI** (`gh`, signed in with `gh auth login`), from the latest successful run on `main`:
 
-Windows (PowerShell):
+=== "Windows"
 
-```powershell
-$run = gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId'
-gh run download $run -R millsks/oci-hermit -n oci-hermit-win-64
-```
+    In PowerShell:
 
-macOS and Linux:
+    ```powershell
+    $run = gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId'
+    gh run download $run -R millsks/oci-hermit -n oci-hermit-win-64
+    ```
 
-```bash
-run=$(gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
-gh run download "$run" -R millsks/oci-hermit -n <package>
-tar -xzf <package>.tar.gz
-```
+    This leaves an `oci-hermit` folder in the current directory.
+
+=== "macOS"
+
+    Use `oci-hermit-osx-arm64` on Apple silicon and `oci-hermit-osx-64` on an Intel Mac:
+
+    ```bash
+    run=$(gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
+    gh run download "$run" -R millsks/oci-hermit -n oci-hermit-osx-arm64
+    tar -xzf oci-hermit-osx-arm64.tar.gz
+    ```
+
+=== "Linux"
+
+    Use `oci-hermit-linux-64` on x86-64 and `oci-hermit-linux-aarch64` on arm64:
+
+    ```bash
+    run=$(gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
+    gh run download "$run" -R millsks/oci-hermit -n oci-hermit-linux-64
+    tar -xzf oci-hermit-linux-64.tar.gz
+    ```
 
 **With a browser:** open the [Guest kernel workflow](https://github.com/millsks/oci-hermit/actions/workflows/kernel.yml?query=branch%3Amain+is%3Asuccess),
 pick the newest run, and download your package from **Artifacts** at the bottom. Unzip it. On macOS and Linux, unpack
@@ -59,31 +74,125 @@ You now have an `oci-hermit` folder. The commands below run from the folder that
 
 ## 2. Check it
 
-Windows:
+=== "Windows"
 
-```powershell
-.\oci-hermit\oci-hermit.exe version
-.\oci-hermit\oci-hermit.exe machine info
-.\oci-hermit\oci-hermit.exe machine boot
+    ```powershell
+    .\oci-hermit\oci-hermit.exe version
+    .\oci-hermit\oci-hermit.exe machine info
+    .\oci-hermit\oci-hermit.exe machine boot
+    ```
+
+=== "macOS"
+
+    ```bash
+    ./oci-hermit/oci-hermit version
+    ./oci-hermit/oci-hermit machine info
+    ./oci-hermit/oci-hermit machine boot
+    ```
+
+=== "Linux"
+
+    ```bash
+    ./oci-hermit/oci-hermit version
+    ./oci-hermit/oci-hermit machine info
+    ./oci-hermit/oci-hermit machine boot
+    ```
+
+`version` prints the version and the control protocol the host speaks:
+
+```console
+$ oci-hermit version
+oci-hermit 0.0.0 (control protocol 1.2)
 ```
 
-macOS and Linux:
+`machine info` lists both emulators with `accel tcg`, both guests, the defaults `run` uses, where images are stored
+and how many there are, and which registry logins it found. Each path says whether it came from a setting or was
+found beside `oci-hermit`. On a Mac with Apple silicon it looks like this (paths shortened):
 
-```bash
-./oci-hermit/oci-hermit version
-./oci-hermit/oci-hermit machine info
-./oci-hermit/oci-hermit machine boot
+```console
+$ oci-hermit machine info
+oci-hermit 0.0.0 (control protocol 1.2)
+host: macos/aarch64, so images default to linux/arm64
+
+emulator (QEMU, software CPU only):
+  bundle:     /Users/me/oci-hermit/qemu (found beside oci-hermit)
+  x86_64:     QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg
+  aarch64:    QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg
+
+guest (kernel and agent each sandbox boots):
+  x86_64:     /Users/me/oci-hermit/guest/x86_64 (kernel 2.9 MB, agent 1.3 MB, found beside oci-hermit)
+  aarch64:    /Users/me/oci-hermit/guest/aarch64 (kernel 5.9 MB, agent 1.2 MB, found beside oci-hermit)
+
+sandbox defaults for run:
+  cpus:       1 (--cpus)
+  memory:     twice the image's size plus 256 MiB, at least 512 MiB (--memory)
+  network:    none: no egress; -p (127.0.0.1 only) is not implemented yet
+  run dir:    /var/folders/kb/…/T/oci-hermit (a sandbox-* folder per run: initramfs, console.log, qemu.log)
+
+image store (pull, load):
+  path:       /Users/me/Library/Application Support/oci-hermit/images (the platform default)
+  images:     none yet; created by the first pull or load
+
+registries (pulls happen on the host, never in the sandbox):
+  auth files: searched in this order; the first with a login for the registry is used
+    1. [not set]   $REGISTRY_AUTH_FILE
+    2. [not set]   $XDG_RUNTIME_DIR/containers/auth.json
+    3. [not found] /Users/me/.config/containers/auth.json
+    4. [found]     /Users/me/.docker/config.json
+  plain http: none (OCI_HERMIT_INSECURE_REGISTRIES)
 ```
 
-- `machine info` lists both emulators with `accel tcg`, both guests, the defaults `run` uses, where images are
-  stored and how many there are, and which registry logins it found. Each path says whether it came from a setting
-  or was found beside `oci-hermit`.
-- `machine boot` starts a sandbox, prints `agent ready after …s` and `guest powered off`. Add `--arch aarch64` or
-  `--arch x86_64` to try the other guest.
+`machine boot` starts a sandbox and stops it again, a self-check of QEMU, the kernel and the agent:
 
-To type `oci-hermit` without the folder in front, add the folder to your `PATH`. On Windows, for this window only:
-`$env:Path = "$PWD\oci-hermit;$env:Path"`. On macOS and Linux: `export PATH="$PWD/oci-hermit:$PATH"`. The rest of
-this page assumes you did.
+```console
+$ oci-hermit machine boot
+booting an aarch64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12655-1794883275062816000/console.log
+agent ready after 0.3s (control protocol 1.2)
+guest powered off; sandbox stopped
+```
+
+Add `--arch x86_64` or `--arch aarch64` to try the other guest.
+
+### Put it on your PATH
+
+To type `oci-hermit` without the folder in front, add the folder to your `PATH`:
+
+=== "Windows"
+
+    For this PowerShell window only:
+
+    ```powershell
+    $env:Path = "$PWD\oci-hermit;$env:Path"
+    ```
+
+    For good, for your account only (no admin rights needed); open a new window afterwards:
+
+    ```powershell
+    [Environment]::SetEnvironmentVariable("Path", "$PWD\oci-hermit;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
+    ```
+
+=== "macOS"
+
+    For this terminal only:
+
+    ```bash
+    export PATH="$PWD/oci-hermit:$PATH"
+    ```
+
+    For good, add the same line, with the full path instead of `$PWD`, to `~/.zshrc`.
+
+=== "Linux"
+
+    For this terminal only:
+
+    ```bash
+    export PATH="$PWD/oci-hermit:$PATH"
+    ```
+
+    For good, add the same line, with the full path instead of `$PWD`, to `~/.bashrc` (or your shell's startup
+    file).
+
+The rest of the documentation assumes you did.
 
 ## 3. Run an image
 
@@ -92,8 +201,19 @@ oci-hermit run public.ecr.aws/docker/library/debian:bookworm-slim sh -c 'uname -
 oci-hermit run -it public.ecr.aws/docker/library/debian:bookworm-slim bash
 ```
 
-The first `run` pulls the image, because it is not stored yet. The second one finds it. `uname -a` shows a Linux
-kernel, whatever your host is. Type `exit` to leave the shell.
+The first `run` pulls the image, because it is not stored yet. The second one finds it:
+
+```console
+$ oci-hermit run public.ecr.aws/docker/library/debian:bookworm-slim sh -c 'uname -a; cat /etc/debian_version'
+Unable to find image 'public.ecr.aws/docker/library/debian:bookworm-slim' locally
+5b6c2c6cbc90: pulled (468 B)
+2d66c782e484: pulled (28.1 MB)
+Digest: sha256:ec8534cda2cb30f29f44f23e135297af7a1496f2990fd8e4e84aa36b081a757a
+Linux (none) 6.18.63-oci-hermit-2 #1 SMP 2026-11-10 18:07:06 UTC aarch64 GNU/Linux
+12.15
+```
+
+`uname -a` shows oci-hermit's Linux kernel, whatever your host is. In the shell, type `exit` to leave.
 
 The same commands work in PowerShell. For `-it`, Windows Terminal works best.
 
@@ -103,16 +223,17 @@ Other ways in:
 oci-hermit pull alpine                          # Docker Hub names work; anonymous pulls there are rate-limited
 oci-hermit run alpine cat /etc/os-release
 oci-hermit run -u nobody alpine id              # as another user than the image's
-oci-hermit run --platform linux/arm64 alpine uname -m   # the other architecture
+oci-hermit run --platform linux/amd64 alpine uname -m   # the other architecture
 oci-hermit load -i app.tar                      # from `docker save` or an OCI layout, offline
 oci-hermit run ./my-oci-layout sh               # an OCI layout directory or .tar, without storing it
 ```
 
-Registry logins come from Podman or Docker: oci-hermit reads their auth files and credential helpers. Pulls happen on
-the host. The sandbox itself never gets network access.
+Registry logins come from Podman or Docker: oci-hermit reads their auth files and credential helpers (see
+[Pull from a private registry](field-manual/private-registry.md)). Pulls happen on the host. The sandbox itself
+never gets network access.
 
 Set `OCI_HERMIT_TIMINGS=1` to see how long each phase of a `run` took. Booting dominates; on CI hosts a shell is
-ready in 1 to 6 seconds (see [Measured start times](design.md#measured-start-times)).
+ready in 1 to 6 seconds (see [Performance and limits](performance.md)).
 
 `run` refuses the flags that are not implemented yet (`-d`, `--name`, `-p`, `-v`, `--pod`) instead of ignoring them.
 The [roadmap](../ROADMAP.md) says when they come.
@@ -143,6 +264,9 @@ oci-hermit system df                              # how much space the store use
 - **One at a time:** `rmi` and `image prune` refuse to run while another `pull`, `load` or `run` is reading the store,
   so they never delete an image that is in use. Try again when it has finished.
 
+[Manage the image store](field-manual/image-store.md) walks through them, and
+[Move images between machines](field-manual/move-images.md) covers `save` and `load`.
+
 ## Where it keeps things
 
 | What | Windows | macOS | Linux |
@@ -150,23 +274,47 @@ oci-hermit system df                              # how much space the store use
 | Pulled and loaded images | `%LOCALAPPDATA%\oci-hermit` | `~/Library/Application Support/oci-hermit` | `$XDG_DATA_HOME/oci-hermit` or `~/.local/share/oci-hermit` |
 | Each sandbox's logs | `%TMP%\oci-hermit\sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` (or `/tmp`) |
 
-`oci-hermit machine info` shows the ones in use. `OCI_HERMIT_DATA_DIR` moves the image store. Nothing is written into the `oci-hermit` folder itself, so it can live
-somewhere read-only.
+`oci-hermit machine info` shows the ones in use. `OCI_HERMIT_DATA_DIR` moves the image store. Nothing is written into
+the `oci-hermit` folder itself, so it can live somewhere read-only. [Configuration](configuration.md) lists every
+setting.
 
 ## If it will not start
 
-- **Windows, "Windows protected your PC" or a blocked file:** the browser marked the download. Unblock the folder
-  with `Get-ChildItem -Recurse .\oci-hermit | Unblock-File`, if your organisation allows it. `gh` downloads are not
-  marked.
-- **macOS, "cannot be opened because the developer cannot be verified":** the browser quarantined the download.
-  Remove the mark with `xattr -dr com.apple.quarantine oci-hermit`. Release binaries will be signed (#39).
-- **Linux, "permission denied" on a file that is executable:** your home directory may be mounted `noexec`. Check
-  with `findmnt -no OPTIONS --target ~`.
-- **`machine boot` times out:** the console log in the sandbox's folder (above) shows how far the guest got. Security
-  software that inspects QEMU can slow it down a lot; give it longer with `--timeout 600`.
+=== "Windows"
 
-On a managed (company) device, check that running an emulator is allowed first, and see
-[Running without admin rights](no-admin.md) for what it needs and a checklist.
+    **"Windows protected your PC", or a blocked file:** the browser marked the download (the Mark of the Web).
+    Unblock the folder, if your organisation allows it:
+
+    ```powershell
+    Get-ChildItem -Recurse .\oci-hermit | Unblock-File
+    ```
+
+    `gh` downloads are not marked.
+
+=== "macOS"
+
+    **"cannot be opened because the developer cannot be verified":** the browser quarantined the download. Remove
+    the mark:
+
+    ```bash
+    xattr -dr com.apple.quarantine oci-hermit
+    ```
+
+    Release binaries will be signed (#39).
+
+=== "Linux"
+
+    **"permission denied" on a file that is executable:** your home directory may be mounted `noexec`. Check:
+
+    ```bash
+    findmnt -no OPTIONS --target ~
+    ```
+
+**`machine boot` times out:** the console log in the sandbox's folder (above) shows how far the guest got. Security
+software that inspects QEMU can slow it down a lot; give it longer with `--timeout 600`.
+
+[Troubleshooting](troubleshooting.md) covers more. On a managed (company) device, check that running an emulator is
+allowed first, and see [Running without admin rights](no-admin.md) for what it needs and a checklist.
 
 ## Building from source
 

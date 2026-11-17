@@ -1,0 +1,164 @@
+# Troubleshooting
+
+Start with these two commands. Most problems show up in one of them, with the reason:
+
+```bash
+oci-hermit machine info
+oci-hermit machine boot
+```
+
+`machine info` says what oci-hermit found and where; `machine boot` boots a sandbox with no image involved. If both
+work, the problem is with the image or the command. Every error oci-hermit prints starts with `oci-hermit:`.
+
+## Where the logs are
+
+Each `run` and `machine boot` gets its own folder under the run dir that `machine info` shows:
+
+| OS | Run dir |
+| --- | --- |
+| Windows | `%TMP%\oci-hermit\sandbox-<pid>-<time>` |
+| macOS | `$TMPDIR/oci-hermit/sandbox-<pid>-<time>` |
+| Linux | `$TMPDIR/oci-hermit/sandbox-<pid>-<time>`, or under `/tmp` |
+
+- `console.log`: the guest's console, the kernel's boot messages and the agent's `hermit-agent: …` lines. It shows
+  how far the guest got.
+- `qemu.log`: QEMU's own messages.
+
+`machine boot` prints the console log's path as it starts, and an error from a sandbox names both files. The
+newest folder is the last run. oci-hermit does not delete these folders; remove old ones when you no longer need
+them.
+
+## It will not start at all
+
+=== "Windows"
+
+    **"Windows protected your PC" (SmartScreen), or the file is blocked.** A browser marks what it downloads with the
+    Mark of the Web, and SmartScreen warns about unsigned programs that carry it. Release binaries will be signed
+    (#39). Until then, unblock the folder, if your organisation allows it:
+
+    ```powershell
+    Get-ChildItem -Recurse .\oci-hermit | Unblock-File
+    ```
+
+    Or download with `gh run download` (see [Getting started](getting-started.md#1-download)), which does not mark
+    files.
+
+    **"This app has been blocked by your system administrator",** or nothing happens: application control
+    (AppLocker, App Control for Business) or endpoint protection blocked `oci-hermit.exe`, `qemu-system-*.exe` or one
+    of QEMU's DLLs. The Event Viewer, under *Applications and Services Logs > Microsoft > Windows > AppLocker* or
+    *CodeIntegrity*, names the blocked file, and *Windows Security > Protection history* shows Defender's blocks. This
+    needs your IT department; see [Running without admin rights](no-admin.md).
+
+=== "macOS"
+
+    **"cannot be opened because the developer cannot be verified", or "is damaged".** Gatekeeper refuses unsigned
+    programs downloaded with a browser, which marks them as quarantined. Release binaries will be signed (#39). Until
+    then, remove the mark from the folder:
+
+    ```bash
+    xattr -dr com.apple.quarantine oci-hermit
+    ```
+
+    Or download with `gh run download`, which does not set it. If *System Settings > Privacy & Security* has no
+    *Open Anyway* button and `xattr` is not allowed, your organisation manages this; see
+    [Running without admin rights](no-admin.md).
+
+=== "Linux"
+
+    **"Permission denied" on a file that is executable.** Your home directory may be mounted `noexec`:
+
+    ```bash
+    findmnt -no OPTIONS --target ~
+    ```
+
+    If the options include `noexec`, unpack oci-hermit somewhere that allows programs to run. `noexec` on the temp
+    directory is fine: oci-hermit only reads from there. If the mount is not the cause, check for a policy denial:
+    `fapolicyd`, SELinux (`ausearch -m avc -ts recent`) or AppArmor (`journalctl -k | grep apparmor`).
+
+## QEMU or the guest is missing
+
+```
+oci-hermit: no bundled QEMU found; looked in …/libexec/oci-hermit/qemu …/qemu (set OCI_HERMIT_QEMU_DIR to a bundle built by qemu/build.sh)
+```
+
+The `qemu/` folder is not beside `oci-hermit`. Keep the package's folder together: the binary, `qemu/` and `guest/`.
+Copying only `oci-hermit(.exe)` somewhere else breaks this. To keep them apart, set `OCI_HERMIT_QEMU_DIR` and
+`OCI_HERMIT_GUEST_DIR` ([Configuration](configuration.md)).
+
+```
+oci-hermit: no x86_64 guest kernel and agent found; looked in … (set OCI_HERMIT_GUEST_DIR to a directory with x86_64/kernel and x86_64/hermit-agent)
+```
+
+The guest for that architecture is missing. `machine info` shows which ones were found.
+
+A message saying a QEMU `is not the bundled QEMU` means the folder holds some other QEMU. oci-hermit runs only the
+bundle it was built for, from the same package or CI run.
+
+## The boot times out or is very slow
+
+`machine boot` waits 120 seconds for the agent by default, and so does `run`. A timeout ends with
+`the agent did not answer within …s` and the paths of both logs.
+
+1. Look at the end of `console.log`. If the kernel's messages stop early, the guest is stuck or very slow; if the
+   last line is `hermit-agent: ready …`, the agent started and something on the host side failed.
+2. Try the other guest: `oci-hermit machine boot --arch aarch64` or `--arch x86_64`.
+3. Give it longer: `oci-hermit machine boot --timeout 600`. If it then boots, the machine is just slow, or something
+   is slowing QEMU down (next section).
+
+`QEMU exited before the agent answered` means QEMU stopped; `qemu.log` says why.
+
+### It is much slower than expected
+
+Compare a boot with the [measured start times](performance.md#start-time). Endpoint protection often inspects
+programs that generate code as they run, which QEMU does all the time, and that can make it many times slower. Look
+for alerts from your security software naming `qemu-system-*`. Running oci-hermit from a folder IT has allowed, or
+asking IT for an exclusion, is the fix; there is nothing to change in oci-hermit.
+
+## Registry errors
+
+| Message | What to do |
+| --- | --- |
+| `logging in to pull …: error sending request for url (https://…/v2/)` | The registry cannot be reached: check the name, the network, the proxy, and that the registry's certificate is trusted by the system (open the URL in a browser on the same machine). |
+| `pulling the manifest of …: Not authorized` | No login was found for that registry, or it was refused. Check the auth files in `machine info` and log in again. See [Pull from a private registry](field-manual/private-registry.md). |
+| `pulling the manifest of …: … does not exist …` | Wrong repository or tag, or your login cannot see it. |
+| `toomanyrequests` or `rate exceeded` | The registry is throttling you; Docker Hub limits anonymous pulls. oci-hermit already retried four times. Log in, wait, or use a mirror such as `public.ecr.aws/docker/library/…` for official images. |
+| `… does not match its digest: the image is corrupt or has been altered` | A blob did not hash to its digest, so nothing was stored. Try again; if it repeats, something between you and the registry is changing the data. |
+
+A `run` with an image that is not stored tries to pull it first (`Unable to find image '…' locally`). For an image
+you loaded from a file, check the name with `oci-hermit images`, including the platform: asking for a platform the
+store does not have also leads to a pull.
+
+## The command fails to start
+
+| Message | What it means |
+| --- | --- |
+| `the agent refused: starting <cmd>: executable file not found in $PATH` | The image has no such program. Small images have `sh`, not `bash`. |
+| `user "<name>" is not in the image's /etc/passwd` | The image's `User`, or `-u`, names a user the image does not have. Use a number (`-u 1000:1000`) or a user it does have. |
+| `the image has no entrypoint or command, and none was given` | Give a command after the image name. |
+| `-d/--detach is not supported yet (#22); run it without -d/--detach` | The flag is planned, not implemented; the same for `--name`, `-p`, `-v` and `--pod`. |
+| `--memory 10m: use e.g. 512m or 2g, at least 64m` | `-m` needs a size with a unit, at least 64 MiB. |
+| `unsupported --platform …` | Only `linux/amd64` and `linux/arm64` run. |
+
+All of these make `run` exit with 125.
+
+## The image store is busy
+
+```
+oci-hermit: the image store is in use by another oci-hermit (a pull, load or run); try again when it has finished
+```
+
+`rmi` and `image prune` delete blobs, so they wait for no one: they refuse while another oci-hermit is reading the
+store. Let the other command finish and run them again. If no other oci-hermit is running, check for a stuck process
+(Task Manager, or `ps aux | grep oci-hermit`).
+
+## The command cannot reach the network
+
+That is by design: the sandbox has no network device, and nothing turns it on. Put what the command needs into the
+image beforehand. See [How it works](how-it-works.md#no-network-on-purpose).
+
+## Asking for help
+
+Open an [issue](https://github.com/millsks/oci-hermit/issues) with the output of `oci-hermit version` and
+`oci-hermit machine info`, the command you ran, the full error, and the end of `console.log` and `qemu.log`. Leave
+out anything your organisation treats as confidential. A security problem goes through the
+[security policy](security.md) instead.
