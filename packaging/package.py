@@ -72,6 +72,8 @@ def components(licenses_dir: Path) -> list[dict]:
         ) if folder.is_dir() else []
         if not files:
             fail(f"{component['name']}: no license files in {folder}")
+        if not component.get("license") or component["license"] == "unknown":
+            fail(f"{component['name']} {component['version']}: its license is not known")
         found.append({**component, "files": files})
     return found
 

@@ -166,6 +166,27 @@ def conda_component(record: dict, licenses: Path, installed: list[Path] | None =
     }
 
 
+def pacman_fields(info: str) -> dict[str, str]:
+    """``pacman -Qi`` output as a dict; its keys are padded (``Licenses        : MIT``)."""
+    fields = {}
+    for line in info.splitlines():
+        if ":" in line and not line.startswith(" "):
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def desc_field(desc: Path, name: str) -> str | None:
+    """A field of a pacman local-database ``desc`` file: the line after ``%NAME%``."""
+    if not desc.is_file():
+        return None
+    lines = desc.read_text().splitlines()
+    try:
+        return lines[lines.index(f"%{name}%") + 1].strip() or None
+    except (ValueError, IndexError):
+        return None
+
+
 def msys2_component(dll: Path, licenses: Path) -> dict:
     """Copies an MSYS2 package's license files and names its source package."""
 
@@ -174,13 +195,16 @@ def msys2_component(dll: Path, licenses: Path) -> dict:
 
     package = pacman("-Qqo", str(dll)).strip()
     version = pacman("-Q", package).split()[1]
-    fields = dict(
-        line.split(":", 1) for line in pacman("-Qi", package).splitlines() if ":" in line and not line.startswith(" ")
-    )
-    license_ = fields.get("Licenses", "unknown").strip()
-    base = re.sub(r"^mingw-w64-(ucrt|clang|mingw)-[a-z0-9_]+-", "mingw-w64-", package)
+    fields = pacman_fields(pacman("-Qi", package))
+    license_ = fields.get("Licenses", "").removeprefix("spdx:").strip()
+    if not license_ or license_ == "None":
+        fail(f"{package} {version}: pacman names no license")
     short = re.sub(r"^mingw-w64-(ucrt|clang|mingw)-[a-z0-9_]+-", "", package)
     root = Path(os.environ.get("MINGW_PREFIX", "/ucrt64"))
+    # The source package is named after the base a split package was built from (gettext-runtime comes from
+    # mingw-w64-gettext), which pacman keeps in its local database as %BASE%.
+    base = desc_field(root.parent / "var" / "lib" / "pacman" / "local" / f"{package}-{version}" / "desc", "BASE")
+    base = base or re.sub(r"^mingw-w64-(ucrt|clang|mingw)-[a-z0-9_]+-", "mingw-w64-", package)
     dest = licenses / package
     found = []
     for candidate in (root / "share" / "licenses" / short, root / "share" / "licenses" / package):
