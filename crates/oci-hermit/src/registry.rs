@@ -31,11 +31,21 @@ pub fn normalize(reference: &str) -> Result<Reference, String> {
         .map_err(|e| format!("{reference:?} is not an image reference: {e}"))
 }
 
+/// One place an auth file is looked for: how it is named, and the file if the variables it needs are set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLocation {
+    /// The location as written in Podman's and Docker's docs, e.g. `$XDG_RUNTIME_DIR/containers/auth.json`.
+    pub name: &'static str,
+    pub path: Option<PathBuf>,
+}
+
 /// Where registry settings come from.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     /// Podman and Docker auth files, in the order they are consulted.
     pub auth_files: Vec<PathBuf>,
+    /// Every place an auth file is looked for, set or not, in the same order; for `machine info`.
+    pub auth_locations: Vec<AuthLocation>,
     /// Registries reached over plain HTTP.
     pub insecure: Vec<String>,
     /// How long to wait before each retry of a request the registry turned away for now (rate limits, 5xx).
@@ -92,13 +102,37 @@ impl Settings {
     pub fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Settings {
         let path = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = path("HOME").or_else(|| path("USERPROFILE"));
-        let mut auth_files = Vec::new();
-        auth_files.extend(path("REGISTRY_AUTH_FILE"));
-        auth_files.extend(path("XDG_RUNTIME_DIR").map(|d| d.join("containers/auth.json")));
-        let config = path("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")));
-        auth_files.extend(config.map(|d| d.join("containers/auth.json")));
-        let docker = path("DOCKER_CONFIG").or_else(|| home.as_ref().map(|h| h.join(".docker")));
-        auth_files.extend(docker.map(|d| d.join("config.json")));
+        // A variable that overrides a home-folder default is named, so `machine info` shows which one applied.
+        let (config_name, config) = match path("XDG_CONFIG_HOME") {
+            Some(dir) => ("$XDG_CONFIG_HOME/containers/auth.json", Some(dir)),
+            None => (
+                "~/.config/containers/auth.json",
+                home.as_ref().map(|h| h.join(".config")),
+            ),
+        };
+        let (docker_name, docker) = match path("DOCKER_CONFIG") {
+            Some(dir) => ("$DOCKER_CONFIG/config.json", Some(dir)),
+            None => ("~/.docker/config.json", home.as_ref().map(|h| h.join(".docker"))),
+        };
+        let auth_locations = vec![
+            AuthLocation {
+                name: "$REGISTRY_AUTH_FILE",
+                path: path("REGISTRY_AUTH_FILE"),
+            },
+            AuthLocation {
+                name: "$XDG_RUNTIME_DIR/containers/auth.json",
+                path: path("XDG_RUNTIME_DIR").map(|d| d.join("containers/auth.json")),
+            },
+            AuthLocation {
+                name: config_name,
+                path: config.map(|d| d.join("containers/auth.json")),
+            },
+            AuthLocation {
+                name: docker_name,
+                path: docker.map(|d| d.join("config.json")),
+            },
+        ];
+        let auth_files = auth_locations.iter().filter_map(|l| l.path.clone()).collect();
         let insecure = var(INSECURE_ENV)
             .map(|v| {
                 v.to_string_lossy()
@@ -111,6 +145,7 @@ impl Settings {
             .unwrap_or_default();
         Settings {
             auth_files,
+            auth_locations,
             insecure,
             retry_delays: default_retry_delays(),
         }
@@ -376,7 +411,7 @@ pub fn pull(
                 check_arch(reference, arch, &data)?;
             }
             store.put_blob(&blob.digest, &data)?;
-            let _ = writeln!(out, "{short}: pulled ({})", size(data.len()));
+            let _ = writeln!(out, "{short}: pulled ({})", size(data.len() as u64));
         }
         store.put_blob(&digest, &bytes)?;
         let media_type = if manifest.media_type.is_empty() {
@@ -403,7 +438,8 @@ fn check_arch(reference: &Reference, arch: &str, config: &[u8]) -> Result<(), Pu
     }
 }
 
-fn size(bytes: usize) -> String {
+/// A byte count for people: `28.9 MB`, `2.6 kB`.
+pub(crate) fn size(bytes: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     let mb = bytes as f64 / 1_000_000.0;
     if mb >= 1.0 {
@@ -596,7 +632,7 @@ mod tests {
         Settings {
             auth_files,
             insecure: vec![address.to_string()],
-            retry_delays: vec![],
+            ..Settings::default()
         }
     }
 
@@ -839,7 +875,43 @@ mod tests {
         assert_eq!(settings.auth_files, expected);
         assert_eq!(settings.insecure, ["localhost:5000", "127.0.0.1:5001"]);
         assert_eq!(settings.retry_delays, default_retry_delays());
-        assert!(Settings::from_env(|_| None).auth_files.is_empty());
+        assert_eq!(settings.auth_locations.len(), 4);
+        // With nothing set, nothing is searched, but every location is still named.
+        let bare = Settings::from_env(|_| None);
+        assert!(bare.auth_files.is_empty());
+        let names: Vec<_> = bare.auth_locations.iter().map(|l| l.name).collect();
+        assert_eq!(
+            names,
+            [
+                "$REGISTRY_AUTH_FILE",
+                "$XDG_RUNTIME_DIR/containers/auth.json",
+                "~/.config/containers/auth.json",
+                "~/.docker/config.json"
+            ]
+        );
+        assert!(bare.auth_locations.iter().all(|l| l.path.is_none()));
+
+        // The variables that override the home-folder defaults are named when they apply.
+        let overridden = Settings::from_env(|name| match name {
+            "HOME" => Some("/home/me".into()),
+            "XDG_CONFIG_HOME" => Some("/cfg".into()),
+            "DOCKER_CONFIG" => Some("/dock".into()),
+            _ => None,
+        });
+        let shown: Vec<_> = overridden.auth_locations[2..]
+            .iter()
+            .map(|l| (l.name, l.path.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "$XDG_CONFIG_HOME/containers/auth.json",
+                    PathBuf::from("/cfg/containers/auth.json")
+                ),
+                ("$DOCKER_CONFIG/config.json", PathBuf::from("/dock/config.json")),
+            ]
+        );
     }
 
     #[test]
