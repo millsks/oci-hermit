@@ -1,12 +1,16 @@
 # Changelog
 
-oci-hermit has no release yet. Until the first one (#40), this page lists what has landed on `main`, newest first.
-The CI builds of `main` described in [Getting started](docs/getting-started.md) contain all of it.
+Each release's downloads are on its [GitHub release page](https://github.com/millsks/oci-hermit/releases).
 
-## Unreleased
+## 0.1.0 (2026-11-17)
+
+The first pre-release.
 
 ### Features
 
+- Releases: one download per host with `oci-hermit`, the `hrmt` alias, QEMU and both guests, their licenses, and a
+  separate archive with the source of every GPL and LGPL component (#89)
+- `login` and `logout`, checked with the registry and stored in Podman's `auth.json` (#88)
 - Image commands: `images` (`image ls`), `rmi` (`image rm`), `inspect`, `tag`, `save`, `image prune`,
   `image history`, `image exists`, `system df` and `info` (#85)
 - `machine info` shows the guest, the defaults `run` uses, the image store and the registry auth files it reads

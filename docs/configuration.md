@@ -81,7 +81,7 @@ same release from elsewhere, is refused. A missing guest for one architecture on
 
 ```console
 $ oci-hermit machine info
-oci-hermit 0.0.0 (control protocol 1.2)
+oci-hermit 0.1.0 (control protocol 1.2)
 host: macos/aarch64, so images default to linux/arm64
 ```
 
