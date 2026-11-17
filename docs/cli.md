@@ -12,6 +12,8 @@ and Podman; the [deliberate differences](docker-and-podman.md) are on their own 
 | [`run`](#run) | Run a command from an image in a new sandbox |
 | [`pull`](#pull) | Pull an image from a registry |
 | [`load`](#load) | Load images from a `docker save` archive or an OCI layout |
+| [`login`](#login) | Log in to a registry |
+| [`logout`](#logout) | Remove a registry login |
 | [`images`, `image ls`](#images) | List stored images |
 | [`inspect`, `image inspect`](#inspect) | Show details of images as JSON |
 | [`tag`, `image tag`](#tag) | Give an image another name |
@@ -118,9 +120,58 @@ Digest: sha256:45e09956dc667c5eff3583c9d94830261fb1ca0be10a0a7db36266edf5de9e1d
 Status: pulled public.ecr.aws/docker/library/alpine:3.20 for linux/arm64
 ```
 
-Logins come from the Podman and Docker auth files and credential helpers (see
+Logins come from [`login`](#login) and from the Podman and Docker auth files and credential helpers (see
 [Pull from a private registry](field-manual/private-registry.md)); with none, the pull is anonymous. Throttling and
 server errors are retried four times. Exits 0 on success, 1 on failure.
+
+## login
+
+Log in to a registry. The user name and password are checked with the registry before anything is saved, as
+`docker login` does, then stored where Podman keeps logins, so `pull`, Podman and skopeo all use them.
+
+```
+oci-hermit login [OPTIONS] [REGISTRY]
+```
+
+| Argument or option | Meaning |
+| --- | --- |
+| `REGISTRY` | The registry's host name and port, e.g. `ghcr.io` or `registry.example.com:5000`. Default: `docker.io`. |
+| `-u`, `--username <USERNAME>` | The user name. Asked for if not given. |
+| `-p`, `--password <PASSWORD>` | The password or access token. Other users can see it in the process list, so it prints a warning; prefer `--password-stdin`. Asked for, without echo, if neither is given. |
+| `--password-stdin` | Read the password from stdin. Needs `--username`. |
+| `--authfile <AUTHFILE>` | Store the login in this file. Default: `$REGISTRY_AUTH_FILE`, else `$XDG_RUNTIME_DIR/containers/auth.json`, else `~/.config/containers/auth.json`. |
+| `--get-login` | Print the user name logged in to `REGISTRY`, and nothing else. |
+
+```console
+$ echo "$GHCR_TOKEN" | oci-hermit login -u your-user --password-stdin ghcr.io
+Login Succeeded!
+```
+
+The file is written readable by you only (mode 0600 on Linux and macOS; on Windows it is in your user profile). A
+registry whose logins a credential helper keeps (`credHelpers` in that file) is refused. Exits 0 on success, 1 if the
+registry rejects the login, cannot be reached, or the options do not fit together; nothing is written then.
+
+## logout
+
+Remove a registry login from the file `login` writes.
+
+```
+oci-hermit logout [OPTIONS] [REGISTRY]
+```
+
+| Argument or option | Meaning |
+| --- | --- |
+| `REGISTRY` | The registry host. Default: `docker.io`. |
+| `-a`, `--all` | Remove every login in the file. |
+| `--authfile <AUTHFILE>` | Change this file instead. |
+
+```console
+$ oci-hermit logout ghcr.io
+Removed login credentials for ghcr.io
+```
+
+Exits 1 if there was no login to remove. A login made with `docker login` is in Docker's own file; `logout` names
+that file and suggests `docker logout`.
 
 ## load
 
@@ -370,7 +421,6 @@ Not in the command line yet, and planned:
 
 | Command | Issue |
 | --- | --- |
-| `login`, `logout` | #75 |
 | `manifest inspect` for remote images | #76 |
 | `create`, `start`, `restart` | #77 |
 | `wait`, `kill` | #78 |
@@ -380,4 +430,4 @@ Not in the command line yet, and planned:
 | `container prune` | #82 |
 | `healthcheck run` | #83 |
 | `port` | #84 |
-| `ohm`, a short alias for `oci-hermit` | #44 |
+| `hrmt`, a short name for `oci-hermit` | #44 |

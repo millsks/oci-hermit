@@ -7,7 +7,7 @@
 **Documentation: https://millsks.github.io/oci-hermit/**
 
 > [!WARNING]
-> oci-hermit is an early spike. `oci-hermit pull` fetches an image from a registry and `oci-hermit load -i` reads one from a `docker save` or OCI archive, verifying every digest; `oci-hermit run` runs a command from it (or straight from a local OCI layout) on Linux, macOS and Windows; `images`, `rmi`, `inspect`, `tag`, `save` and the other image commands manage the store; most of the other commands below are still to come. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
+> oci-hermit is an early spike. `oci-hermit pull` fetches an image from a registry and `oci-hermit load -i` reads one from a `docker save` or OCI archive, verifying every digest; `oci-hermit run` runs a command from it (or straight from a local OCI layout) on Linux, macOS and Windows; `images`, `rmi`, `inspect`, `tag`, `save` and the other image commands manage the store; `login` and `logout` handle private registries; most of the other commands below are still to come. See the [roadmap](ROADMAP.md) and the [design doc](docs/design.md).
 
 ## Why
 

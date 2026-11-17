@@ -159,7 +159,7 @@ The container root is an overlay of read-only image layers plus a throwaway writ
 
 ## CLI and Compose subset
 
-Commands mirror Docker and Podman so existing habits carry over. `oci-hermit` is the binary name. An optional short alias, `ohm`, can be installed for daily use. No bare `hermit` binary is shipped, to avoid clashing with Cash App's Hermit on a user's PATH.
+Commands mirror Docker and Podman so existing habits carry over. `oci-hermit` is the binary name. A short name, `hrmt`, ships beside it for daily use (#44). No bare `hermit` binary is shipped, to avoid clashing with Cash App's Hermit on a user's PATH.
 
 ```bash
 # Images (host side)

@@ -228,9 +228,30 @@ oci-hermit load -i app.tar                      # from `docker save` or an OCI l
 oci-hermit run ./my-oci-layout sh               # an OCI layout directory or .tar, without storing it
 ```
 
-Registry logins come from Podman or Docker: oci-hermit reads their auth files and credential helpers (see
-[Pull from a private registry](field-manual/private-registry.md)). Pulls happen on the host. The sandbox itself
-never gets network access.
+Pulls happen on the host. The sandbox itself never gets network access.
+
+### Private registries
+
+Log in once, then pull and run as usual:
+
+```bash
+oci-hermit login registry.example.com          # asks for the user name and password
+oci-hermit pull registry.example.com/team/app:1.4
+```
+
+- `login` checks the user name and password with the registry before it saves anything, so a typo is reported
+  straight away. With no registry it logs in to Docker Hub.
+- In scripts and CI, pass the password on stdin rather than as an argument, where other users could see it:
+  `echo "$TOKEN" | oci-hermit login -u me --password-stdin ghcr.io`. Registries such as GHCR take an access token
+  as the password.
+- The login is stored where Podman stores it (`$REGISTRY_AUTH_FILE`, else `$XDG_RUNTIME_DIR/containers/auth.json`,
+  else `~/.config/containers/auth.json`), readable by you only. Podman and skopeo use it too, and logins you already
+  made with `podman login` or `docker login` work in oci-hermit without logging in again. `machine info` lists
+  every auth file it reads and the one `login` writes.
+- `oci-hermit logout registry.example.com` removes the login; `logout --all` removes them all.
+- More, including tokens for GHCR, GitLab and Harbor: [Pull from a private registry](field-manual/private-registry.md).
+- Registry certificates are checked against your operating system's trust store, so a company certificate
+  authority that IT installed works. Per-registry certificates (`certs.d`) are #86.
 
 Set `OCI_HERMIT_TIMINGS=1` to see how long each phase of a `run` took. Booting dominates; on CI hosts a shell is
 ready in 1 to 6 seconds (see [Performance and limits](performance.md)).

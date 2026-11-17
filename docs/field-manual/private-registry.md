@@ -3,14 +3,65 @@
 **When:** your images are in a registry that needs a login (GitHub Container Registry, GitLab, Artifactory, Nexus,
 Harbor, a cloud registry), or in one whose certificate is issued by your company's own certificate authority.
 
-!!! note "`oci-hermit login` is coming"
-
-    `oci-hermit login` and `logout` are planned in #75. Until then, oci-hermit uses the logins Podman and Docker
-    already keep, or an auth file you write yourself, as described below.
-
 Pulls always happen in the host tool. The credentials never reach the sandbox, and the sandbox has no network.
 
-## 1. See which logins oci-hermit can find
+## 1. Log in
+
+```bash
+oci-hermit login ghcr.io
+```
+
+It asks for the user name and the password (the password is not shown as you type), checks them with the registry,
+and only then saves them:
+
+```console
+$ oci-hermit login ghcr.io
+Username: your-user
+Password:
+Login Succeeded!
+```
+
+A wrong password is reported and nothing is saved:
+
+```console
+$ oci-hermit login -u your-user ghcr.io
+Password:
+oci-hermit: login to ghcr.io failed: the registry rejected the user name or password
+```
+
+Most registries (GHCR, GitLab, Harbor, Quay, Artifactory) take a personal access token in place of the password;
+create one with read access to packages. With no registry, `login` logs in to Docker Hub.
+
+**In scripts and CI**, give the password on stdin, never as an argument, where other users on the machine could see
+it in the process list:
+
+=== "macOS and Linux"
+
+    ```bash
+    echo "$GHCR_TOKEN" | oci-hermit login -u your-user --password-stdin ghcr.io
+    ```
+
+=== "Windows"
+
+    ```powershell
+    $env:GHCR_TOKEN | oci-hermit login -u your-user --password-stdin ghcr.io
+    ```
+
+`-p` (`--password`) works too, with a warning. The login is stored where Podman stores it (see the table below),
+readable by you only, so Podman and skopeo use it as well. `--authfile <FILE>` stores it somewhere else.
+
+To see who you are logged in as, or to log out:
+
+```bash
+oci-hermit login --get-login ghcr.io     # prints the user name
+oci-hermit logout ghcr.io                # removes that login
+oci-hermit logout --all                  # removes every login in the file
+```
+
+`logout` only changes the file `login` writes. A login made with `docker login` lives in Docker's own file;
+`logout` says so and points you at `docker logout`.
+
+## 2. See which logins oci-hermit can find
 
 ```bash
 oci-hermit machine info
@@ -25,22 +76,24 @@ registries (pulls happen on the host, never in the sandbox):
     2. [not set]   $XDG_RUNTIME_DIR/containers/auth.json
     3. [not found] /Users/me/.config/containers/auth.json
     4. [found]     /Users/me/.docker/config.json
+  login file: /Users/me/.config/containers/auth.json (where login writes)
   plain http: none (OCI_HERMIT_INSECURE_REGISTRIES)
 ```
 
 | # | File | Written by |
 | --- | --- | --- |
-| 1 | `$REGISTRY_AUTH_FILE` | you, or Podman when the variable is set |
-| 2 | `$XDG_RUNTIME_DIR/containers/auth.json` | `podman login` on Linux |
-| 3 | `~/.config/containers/auth.json` (`$XDG_CONFIG_HOME/containers/auth.json` when that is set) | `podman login` on macOS and Windows, or with `--authfile` |
+| 1 | `$REGISTRY_AUTH_FILE` | `oci-hermit login` and `podman login` when the variable is set, or you |
+| 2 | `$XDG_RUNTIME_DIR/containers/auth.json` | `oci-hermit login` and `podman login` on Linux |
+| 3 | `~/.config/containers/auth.json` (`$XDG_CONFIG_HOME/containers/auth.json` when that is set) | `oci-hermit login` and `podman login` on macOS and Windows, and on Linux without `$XDG_RUNTIME_DIR` |
 | 4 | `~/.docker/config.json` (`$DOCKER_CONFIG/config.json` when that is set) | `docker login` |
 
-For each registry, oci-hermit takes the first file that has a login for it. On Windows, `~` is your user profile
-(`%USERPROFILE%`).
+For each registry, oci-hermit takes the first file that has a login for it, so a login made with `oci-hermit login`
+wins over one in Docker's file. On Windows, `~` is your user profile (`%USERPROFILE%`).
 
-## 2. Log in with a tool you already have
+## 3. Or use a login you already have
 
-If Podman or Docker is installed (it does not have to be able to run containers), log in with it:
+Logins made with Podman or Docker work without logging in again. If either is installed (it does not have to be
+able to run containers), you can log in with it instead:
 
 ```bash
 podman login ghcr.io
@@ -62,9 +115,10 @@ your `PATH`.
 Logins that hand out an identity token instead of a username and password (`<token>` as the username, as
 `az acr login` does) are not supported yet. Log in with a username and an access token instead.
 
-## 3. Or write an auth file yourself
+## 4. Or write an auth file yourself
 
-Without Podman or Docker, write the file they would have written. Most registries accept a personal access token in
+Where `oci-hermit login` cannot be run interactively and stdin is not an option, write the file it would have
+written. Most registries accept a personal access token in
 place of a password; create one with read access to packages.
 
 The login is `username:token`, base64-encoded:
@@ -112,7 +166,7 @@ Save it as `~/.config/containers/auth.json` (where `podman login` would put it),
 `machine info` now shows `[found]` next to it. The file holds a secret: keep it readable only by you, and out of
 version control.
 
-## 4. Pull
+## 5. Pull
 
 ```bash
 oci-hermit pull ghcr.io/your-org/your-app:1.2

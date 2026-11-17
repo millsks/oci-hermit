@@ -39,6 +39,11 @@ pub struct AuthLocation {
     pub path: Option<PathBuf>,
 }
 
+/// reqwest is built without a default crypto provider; this picks ring. A second call finds one installed.
+pub fn install_crypto() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Where registry settings come from.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
@@ -169,7 +174,8 @@ struct AuthEntry {
 }
 
 /// The keys an auth file may file `registry` under.
-fn keys(registry: &str) -> Vec<String> {
+/// The names auth files may keep a registry's login under.
+pub(crate) fn keys(registry: &str) -> Vec<String> {
     let mut keys = vec![registry.to_string(), format!("https://{registry}")];
     if matches!(registry, "docker.io" | "index.docker.io" | "registry-1.docker.io") {
         keys.extend(["https://index.docker.io/v1/", "index.docker.io", "docker.io"].map(String::from));
@@ -320,8 +326,7 @@ pub fn pull(
     settings: &Settings,
     out: &mut impl Write,
 ) -> Result<Pulled, PullError> {
-    // reqwest is built without a default crypto provider; this picks ring. A second call finds one installed.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    install_crypto();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

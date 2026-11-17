@@ -37,8 +37,9 @@ A flag that exists but is not implemented yet is refused with its issue number, 
 ## What is shared with them
 
 - **Images and names.** The same references, with Docker's expansion: `alpine` is `docker.io/library/alpine:latest`.
-- **Registry logins.** oci-hermit reads Podman's and Docker's auth files and runs Docker credential helpers
-  ([Pull from a private registry](field-manual/private-registry.md)). `oci-hermit login` is planned (#75).
+- **Registry logins.** `oci-hermit login` and `logout` work as `podman login` and `podman logout` do and write the
+  same file; oci-hermit also reads Docker's auth file and runs Docker credential helpers
+  ([Pull from a private registry](field-manual/private-registry.md)).
 - **Archives.** `oci-hermit load` reads `docker save` and `podman save` archives; `oci-hermit save` writes the
   Docker 25 format, which `docker load` and `podman load` read.
 - **Exit codes.** `run` exits with the command's code, or 125 when oci-hermit itself fails, as `docker run` does.

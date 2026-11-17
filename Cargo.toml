@@ -23,6 +23,8 @@ crossterm = { version = "0.29", default-features = false, features = ["windows"]
 # rustls with the ring provider, which builds without CMake or NASM on every host; sha256 verifies every manifest and
 # blob against its digest.
 oci-client = { version = "0.18", default-features = false, features = ["rustls-tls-no-provider"] }
+# `login` (#75) asks the registry itself, as `docker login` does; the same reqwest oci-client uses, so no new crates.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "query"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 sha2 = "0.11"

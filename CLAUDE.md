@@ -19,6 +19,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/images.rs` | `images`, `rmi`, `inspect`, `tag`, `save`, `image prune`/`history`/`exists`, `system df` over the store; `find` resolves names, references and ID prefixes for every command including `run` |
 | `crates/oci-hermit/src/load.rs` | `load -i`: OCI layouts (dir or `.tar`, every platform) and `docker save` archives (old and Docker 25+) into the store; unnamed images go by ID |
 | `crates/oci-hermit/src/registry.rs` | `pull` over oci-client (reqwest, rustls with ring): Podman/Docker auth files and credential helpers, `$OCI_HERMIT_INSECURE_REGISTRIES` for plain HTTP |
+| `crates/oci-hermit/src/login.rs` | `login`/`logout`: checks credentials with the registry (reqwest: `/v2/` with Basic, or its token server for a Bearer challenge), then writes Podman's `auth.json` (0600); never prints secrets |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
@@ -76,8 +77,8 @@ Everything runs through pixi.
   the image's size in RAM) and the agent chroots there with the command. EROFS layer disks (#16, #17) and crun (#21)
   replace both.
 - The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
-  store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs, and it fails fast with `Busy`
-  rather than wait. A pull writes blobs before naming them, so garbage collection without the exclusive lock would
+  store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs. It waits up to 2 s, then fails with
+  `Busy`: on Unix a child process holds an inherited lock between `fork` and `exec`, so a zero wait is flaky. A pull writes blobs before naming them, so garbage collection without the exclusive lock would
   delete a pull in progress. `run` keeps its shared store until the rootfs is read, then drops it. `index.json`
   changes go through `Store::update` under `index.lock`.
 - Every blob is verified against its digest when pulled, stored and read (#14); a mismatch is an error, never a
