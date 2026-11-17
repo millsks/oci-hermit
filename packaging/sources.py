@@ -26,9 +26,13 @@ def fail(message: str) -> None:
 
 
 def fetch(url: str, sha256: str | None) -> bytes:
-    """Downloads ``url``, retrying twice, and checks it against ``sha256`` when one is given."""
+    """Downloads ``url``, retrying with growing waits (source hosts such as git.kernel.org drop connections now
+    and then), and checks it against ``sha256`` when one is given."""
+    import time
+
     last = None
-    for _ in range(3):
+    for wait in (0, 5, 15, 30, 60):
+        time.sleep(wait)
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "oci-hermit-release"})
             with urllib.request.urlopen(request, timeout=300) as response:

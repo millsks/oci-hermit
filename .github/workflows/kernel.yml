@@ -105,7 +105,7 @@ jobs:
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
           command -v skopeo > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           skopeo --override-os linux --override-arch "$platform" \
-            copy docker://public.ecr.aws/docker/library/debian:bookworm-slim oci-archive:debian.tar
+            copy docker://mirror.gcr.io/library/debian:bookworm-slim oci-archive:debian.tar
           pixi run cargo build -q -p oci-hermit
           hermit=target/debug/oci-hermit
 
@@ -305,7 +305,7 @@ jobs:
           set -euo pipefail
           hermit=target/release/oci-hermit
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
-          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          image=mirror.gcr.io/library/debian:bookworm-slim
           pulled=$("$hermit" pull --platform "$platform" "$image")
           echo "$pulled"
           grep -q "^Status: pulled $image for $platform$" <<< "$pulled"
@@ -333,7 +333,7 @@ jobs:
           set -euo pipefail
           hermit=target/release/oci-hermit
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
-          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          image=mirror.gcr.io/library/debian:bookworm-slim
           "$hermit" tag "$image" hermit-test/debian:1
           listed=$("$hermit" images)
           echo "$listed"
@@ -373,7 +373,7 @@ jobs:
         run: |
           set -euo pipefail
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
-          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          image=mirror.gcr.io/library/debian:bookworm-slim
           for attempt in 1 2 3 4; do
             docker pull --platform "$platform" "$image" && break
             sleep $((attempt * 5))
