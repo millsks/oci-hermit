@@ -1826,6 +1826,9 @@
 </code></pre></div>
 <p>Every command takes <code>-h</code> or <code>--help</code>. <code>oci-hermit --version</code> (or <code>-V</code>) prints the version. The commands follow Docker
 and Podman; the <a href="../docker-and-podman/">deliberate differences</a> are on their own page.</p>
+<p><code>hrmt</code> is the same program under a shorter name: every package has it beside <code>oci-hermit</code> (a symlink on Linux and
+macOS, a copy on Windows), and <code>hrmt --help</code> says <code>hrmt</code>. A <code>hrmt</code> link put elsewhere, such as <code>~/bin</code>, still finds
+the <code>qemu/</code> and <code>guest/</code> folders beside the real file.</p>
 <table>
 <thead>
 <tr>
@@ -2487,10 +2490,6 @@ image.</p>
 <tr>
 <td><code>port</code></td>
 <td><a href="https://github.com/millsks/oci-hermit/issues/84">#84</a></td>
-</tr>
-<tr>
-<td><code>hrmt</code>, a short name for <code>oci-hermit</code></td>
-<td><a href="https://github.com/millsks/oci-hermit/issues/44">#44</a></td>
 </tr>
 </tbody>
 </table>
