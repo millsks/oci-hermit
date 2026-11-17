@@ -376,7 +376,7 @@ pub fn pull(
                 check_arch(reference, arch, &data)?;
             }
             store.put_blob(&blob.digest, &data)?;
-            let _ = writeln!(out, "{short}: pulled ({})", size(data.len()));
+            let _ = writeln!(out, "{short}: pulled ({})", size(data.len() as u64));
         }
         store.put_blob(&digest, &bytes)?;
         let media_type = if manifest.media_type.is_empty() {
@@ -403,7 +403,8 @@ fn check_arch(reference: &Reference, arch: &str, config: &[u8]) -> Result<(), Pu
     }
 }
 
-fn size(bytes: usize) -> String {
+/// A byte count for people: `28.9 MB`, `2.6 kB`.
+pub(crate) fn size(bytes: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     let mb = bytes as f64 / 1_000_000.0;
     if mb >= 1.0 {

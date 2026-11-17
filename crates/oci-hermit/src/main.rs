@@ -44,6 +44,8 @@ struct Env {
     timings: bool,
     /// Where the image store lives; `None` when there is no home or data folder to put it in.
     data_dir: Option<PathBuf>,
+    /// Whether `data_dir` came from `OCI_HERMIT_DATA_DIR` rather than the platform's default.
+    data_dir_from_env: bool,
     /// Auth files and plain-HTTP registries for pulls.
     registry: registry::Settings,
 }
@@ -96,6 +98,7 @@ fn main() -> ExitCode {
         run_base: std::env::temp_dir().join("oci-hermit"),
         timings: std::env::var_os(TIMINGS_ENV).is_some_and(|v| !v.is_empty() && v != "0"),
         data_dir: store::data_dir(std::env::var_os(store::DIR_ENV), |name| std::env::var_os(name)),
+        data_dir_from_env: std::env::var_os(store::DIR_ENV).is_some_and(|d| !d.is_empty()),
         registry: registry::Settings::from_env(|name| std::env::var_os(name)),
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
@@ -105,12 +108,7 @@ fn main() -> ExitCode {
 fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     match command {
         cli::Command::Version => {
-            let (major, minor) = hermit_proto::PROTOCOL_VERSION;
-            let _ = writeln!(
-                out,
-                "oci-hermit {} (control protocol {major}.{minor})",
-                env!("CARGO_PKG_VERSION")
-            );
+            let _ = writeln!(out, "{}", version_line());
             0
         }
         cli::Command::Machine(cli::MachineCommand::Info) => machine_info(env, out, err),
@@ -143,33 +141,190 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
     }
 }
 
-/// `machine info`: where the bundled QEMU is, and that both emulators are the build oci-hermit expects.
+/// `oci-hermit 0.1.0 (control protocol 1.2)`.
+fn version_line() -> String {
+    let (major, minor) = hermit_proto::PROTOCOL_VERSION;
+    format!(
+        "oci-hermit {} (control protocol {major}.{minor})",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Where a setting came from: its environment variable, or the search beside the executable.
+fn origin(env_value: Option<&OsString>, found: &std::path::Path, var: &str) -> String {
+    if env_value.is_some_and(|v| !v.is_empty() && std::path::Path::new(v) == found) {
+        format!("from {var}")
+    } else {
+        "found beside oci-hermit".into()
+    }
+}
+
+/// `machine info`: everything a sandbox is made from and where oci-hermit keeps things, as `podman info` does. Exits
+/// 1 when the emulators are missing or wrong, since nothing can run then; a missing guest is shown, not an error.
 fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
-    let bundle = match qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe)) {
-        Ok(bundle) => bundle,
-        Err(e) => {
-            let _ = writeln!(err, "oci-hermit: {e}");
-            return 1;
-        }
-    };
-    let _ = writeln!(out, "qemu bundle: {}", bundle.display());
     let mut status = 0;
-    for arch in qemu::GuestArch::ALL {
-        match qemu::verify(&bundle, arch) {
-            Ok(emulator) => {
-                let _ = writeln!(
-                    out,
-                    "{:<8} QEMU {} ({}), accel tcg",
-                    format!("{}:", emulator.arch.name()),
-                    emulator.version.version,
-                    emulator.version.marker.as_deref().unwrap_or_default()
-                );
-            }
-            Err(e) => {
-                let _ = writeln!(err, "oci-hermit: {e}");
-                status = 1;
+    let mut lines = vec![version_line()];
+    let row = |label: &str, value: String| {
+        let label = if label.is_empty() {
+            String::new()
+        } else {
+            format!("{label}:")
+        };
+        format!("  {label:<12}{value}")
+    };
+    let host_arch = qemu::GuestArch::host();
+    lines.push(format!(
+        "host: {}/{}, so images default to {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        host_arch.map_or("none (pass --platform)".into(), |a| format!(
+            "linux/{}",
+            image::oci_arch(a)
+        ))
+    ));
+
+    lines.push(String::new());
+    lines.push("emulator (QEMU, software CPU only):".into());
+    match qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe)) {
+        Ok(bundle) => {
+            lines.push(row(
+                "bundle",
+                format!(
+                    "{} ({})",
+                    bundle.display(),
+                    origin(env.qemu_dir.as_ref(), &bundle, qemu::DIR_ENV)
+                ),
+            ));
+            for arch in qemu::GuestArch::ALL {
+                match qemu::verify(&bundle, arch) {
+                    Ok(emulator) => lines.push(row(
+                        arch.name(),
+                        format!(
+                            "QEMU {} ({}), accel tcg",
+                            emulator.version.version,
+                            emulator.version.marker.as_deref().unwrap_or_default()
+                        ),
+                    )),
+                    Err(e) => {
+                        lines.push(row(arch.name(), "unusable (see below)".into()));
+                        let _ = writeln!(err, "oci-hermit: {e}");
+                        status = 1;
+                    }
+                }
             }
         }
+        Err(e) => {
+            lines.push(row("bundle", "not found (see below)".into()));
+            let _ = writeln!(err, "oci-hermit: {e}");
+            status = 1;
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("guest (kernel and agent each sandbox boots):".into());
+    let candidates = guest::candidates(env.guest_dir.clone(), &env.exe);
+    for arch in qemu::GuestArch::ALL {
+        let value = match guest::locate(&candidates, arch) {
+            Ok(found) => {
+                let len = |p: &std::path::Path| std::fs::metadata(p).map_or(0, |m| m.len());
+                let dir = found.kernel.parent().unwrap_or(&found.kernel);
+                let from = dir.parent().map_or_else(String::new, |d| {
+                    format!(", {}", origin(env.guest_dir.as_ref(), d, guest::DIR_ENV))
+                });
+                format!(
+                    "{} (kernel {}, agent {}{from})",
+                    dir.display(),
+                    registry::size(len(&found.kernel)),
+                    registry::size(len(&found.agent))
+                )
+            }
+            Err(_) => format!(
+                "not found; {} images cannot run (set {} to a folder with {}/kernel and {}/hermit-agent)",
+                image::oci_arch(arch),
+                guest::DIR_ENV,
+                arch.name(),
+                arch.name()
+            ),
+        };
+        lines.push(row(arch.name(), value));
+    }
+
+    lines.push(String::new());
+    lines.push("sandbox defaults for run:".into());
+    lines.push(row("cpus", "1 (--cpus)".into()));
+    lines.push(row(
+        "memory",
+        "twice the image's size plus 256 MiB, at least 512 MiB (--memory)".into(),
+    ));
+    lines.push(row(
+        "network",
+        "none: no egress; -p (127.0.0.1 only) is not implemented yet".into(),
+    ));
+    lines.push(row(
+        "run dir",
+        format!(
+            "{} (a sandbox-* folder per run: initramfs, console.log, qemu.log)",
+            env.run_base.display()
+        ),
+    ));
+
+    lines.push(String::new());
+    lines.push("image store (pull, load):".into());
+    match &env.data_dir {
+        Some(data) => {
+            let from = if env.data_dir_from_env {
+                format!("from {}", store::DIR_ENV)
+            } else {
+                "the platform default".into()
+            };
+            lines.push(row("path", format!("{} ({from})", data.join("images").display())));
+            match store::usage(data) {
+                Some(usage) => {
+                    lines.push(row(
+                        "images",
+                        format!(
+                            "{} image{} under {} name{} (one per name and platform)",
+                            usage.entries,
+                            if usage.entries == 1 { "" } else { "s" },
+                            usage.names,
+                            if usage.names == 1 { "" } else { "s" }
+                        ),
+                    ));
+                    lines.push(row("size", registry::size(usage.bytes)));
+                }
+                None => lines.push(row("images", "none yet; created by the first pull or load".into())),
+            }
+        }
+        None => lines.push(row(
+            "path",
+            format!("none: no home or data folder (set {})", store::DIR_ENV),
+        )),
+    }
+
+    lines.push(String::new());
+    lines.push("registries (pulls happen on the host, never in the sandbox):".into());
+    let auth: Vec<_> = env.registry.auth_files.iter().filter(|f| f.is_file()).collect();
+    if auth.is_empty() {
+        lines.push(row(
+            "auth files",
+            "none found (Podman and Docker logins are used when present)".into(),
+        ));
+    } else {
+        for (i, file) in auth.iter().enumerate() {
+            lines.push(row(if i == 0 { "auth files" } else { "" }, file.display().to_string()));
+        }
+    }
+    lines.push(row(
+        "plain http",
+        if env.registry.insecure.is_empty() {
+            format!("none ({})", registry::INSECURE_ENV)
+        } else {
+            format!("{} (from {})", env.registry.insecure.join(", "), registry::INSECURE_ENV)
+        },
+    ));
+
+    for line in lines {
+        let _ = writeln!(out, "{}", line.trim_end());
     }
     status
 }
@@ -572,6 +727,7 @@ mod tests {
             run_base: dir.join("run"),
             timings: false,
             data_dir: Some(dir.join("data")),
+            data_dir_from_env: true,
             registry: registry::Settings::default(),
         }
     }
@@ -586,6 +742,7 @@ mod tests {
             run_base: bundle.join("run"),
             timings: false,
             data_dir: Some(bundle.join("data")),
+            data_dir_from_env: true,
             registry: registry::Settings::default(),
         }
     }
@@ -612,7 +769,16 @@ mod tests {
     fn machine_info_without_a_bundle_fails() {
         let (code, out, err) = run_with(&no_qemu("main-none-3"), &["machine", "info"]);
         assert_eq!(code, 1);
-        assert!(out.is_empty());
+        // The rest is still shown: it says where things would be.
+        assert!(out.contains("  bundle:     not found (see below)"), "{out}");
+        assert!(
+            out.contains("  x86_64:     not found; amd64 images cannot run"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  images:     none yet; created by the first pull or load"),
+            "{out}"
+        );
         assert!(err.contains("no bundled QEMU found"));
     }
 
@@ -625,9 +791,60 @@ mod tests {
         let env = with_bundle(&dir, None);
         let (code, out, err) = run_with(&env, &["machine", "info"]);
         assert_eq!((code, err.as_str()), (0, ""));
-        assert!(out.contains(&format!("qemu bundle: {}", dir.display())));
-        assert!(out.contains("x86_64:  QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg"));
-        assert!(out.contains("aarch64: QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg"));
+        assert!(out.starts_with(&version_line()), "{out}");
+        assert!(out.contains(&format!("  bundle:     {} (from OCI_HERMIT_QEMU_DIR)", dir.display())));
+        assert!(out.contains("  x86_64:     QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg"));
+        assert!(out.contains("  aarch64:    QEMU 11.1.3 (oci-hermit-qemu-4), accel tcg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_info_shows_the_guest_store_and_registries() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-info-all");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-info-all-guest");
+        let auth = bundle.join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        let mut env = with_bundle(&bundle, Some(&guest));
+        env.registry.auth_files = vec![bundle.join("missing.json"), auth.clone(), auth.clone()];
+        env.registry.insecure = vec!["localhost:5000".into()];
+        env.data_dir_from_env = false;
+
+        // A store with one image for two platforms.
+        let store = store::Store::open(env.data_dir.as_ref().unwrap()).unwrap();
+        let blob = b"{}";
+        let digest = image::digest_of(blob);
+        store.put_blob(&digest, blob).unwrap();
+        for arch in ["amd64", "arm64"] {
+            store.tag("example.com/app:1", "linux", arch, "m", &digest, 2).unwrap();
+        }
+
+        let (code, out, err) = run_with(&env, &["machine", "info"]);
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        let x86 = guest.join("x86_64");
+        assert!(
+            out.contains(&format!(
+                "  x86_64:     {} (kernel 0.0 kB, agent 0.0 kB, from OCI_HERMIT_GUEST_DIR)",
+                x86.display()
+            )),
+            "{out}"
+        );
+        let images = env.data_dir.as_ref().unwrap().join("images");
+        assert!(out.contains(&format!("  path:       {} (the platform default)", images.display())));
+        assert!(
+            out.contains("  images:     2 images under 1 name (one per name and platform)"),
+            "{out}"
+        );
+        assert!(out.contains("  size:       0.0 kB"), "{out}");
+        assert!(out.contains(&format!(
+            "  auth files: {}\n              {}\n",
+            auth.display(),
+            auth.display()
+        )));
+        assert!(!out.contains("missing.json"));
+        assert!(out.contains("  plain http: localhost:5000 (from OCI_HERMIT_INSECURE_REGISTRIES)"));
+        assert!(out.contains(&format!("  run dir:    {}", env.run_base.display())));
     }
 
     #[cfg(unix)]

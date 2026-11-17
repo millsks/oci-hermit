@@ -131,6 +131,44 @@ impl Store {
     }
 }
 
+/// What a store holds, for `machine info`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// Entries in `index.json`: one per name and platform.
+    pub entries: usize,
+    /// Distinct image names.
+    pub names: usize,
+    /// The blobs' total size.
+    pub bytes: u64,
+}
+
+/// What the store under `data_dir` holds, read without creating anything; `None` if there is no store there yet.
+pub fn usage(data_dir: &Path) -> Option<Usage> {
+    let dir = data_dir.join("images");
+    let index: Value = serde_json::from_slice(&std::fs::read(dir.join("index.json")).ok()?).ok()?;
+    let manifests = index["manifests"].as_array().cloned().unwrap_or_default();
+    let mut names: Vec<_> = manifests
+        .iter()
+        .filter_map(|m| m["annotations"][REF_NAME].as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let bytes = std::fs::read_dir(dir.join("blobs").join("sha256"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok()?.metadata().ok())
+                .filter(std::fs::Metadata::is_file)
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0);
+    Some(Usage {
+        entries: manifests.len(),
+        names: names.len(),
+        bytes,
+    })
+}
+
 /// Writes `bytes` to a temporary file beside `path`, then renames it into place, so a reader never sees half a file.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut temp = path.as_os_str().to_owned();
@@ -226,6 +264,32 @@ mod tests {
             .unwrap();
         let index = std::fs::read_to_string(store.path().join("index.json")).unwrap();
         assert_eq!(index.matches("example.com/app:1").count(), 1);
+
+        // Another platform under the same name is a second entry, not a second name.
+        store
+            .tag(
+                "example.com/app:1",
+                "linux",
+                "arm64",
+                media,
+                &digest,
+                bytes.len() as u64,
+            )
+            .unwrap();
+        let usage = usage(&data).unwrap();
+        assert_eq!((usage.entries, usage.names), (2, 1));
+        let blobs: u64 = std::fs::read_dir(source.join("blobs/sha256"))
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum();
+        assert_eq!(usage.bytes, blobs);
+    }
+
+    #[test]
+    fn usage_creates_nothing() {
+        let data = scratch("store-usage-none");
+        assert_eq!(usage(&data), None);
+        assert!(!data.join("images").exists());
     }
 
     #[test]

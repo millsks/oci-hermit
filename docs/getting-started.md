@@ -75,7 +75,9 @@ macOS and Linux:
 ./oci-hermit/oci-hermit machine boot
 ```
 
-- `machine info` lists both emulators with `accel tcg`.
+- `machine info` lists both emulators with `accel tcg`, both guests, the defaults `run` uses, where images are
+  stored and how many there are, and which registry logins it found. Each path says whether it came from a setting
+  or was found beside `oci-hermit`.
 - `machine boot` starts a sandbox, prints `agent ready after …s` and `guest powered off`. Add `--arch aarch64` or
   `--arch x86_64` to try the other guest.
 
@@ -122,7 +124,7 @@ The [roadmap](../ROADMAP.md) says when they come.
 | Pulled and loaded images | `%LOCALAPPDATA%\oci-hermit` | `~/Library/Application Support/oci-hermit` | `$XDG_DATA_HOME/oci-hermit` or `~/.local/share/oci-hermit` |
 | Each sandbox's logs | `%TMP%\oci-hermit\sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` (or `/tmp`) |
 
-`OCI_HERMIT_DATA_DIR` moves the image store. Nothing is written into the `oci-hermit` folder itself, so it can live
+`oci-hermit machine info` shows the ones in use. `OCI_HERMIT_DATA_DIR` moves the image store. Nothing is written into the `oci-hermit` folder itself, so it can live
 somewhere read-only.
 
 ## If it will not start
