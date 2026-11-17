@@ -102,8 +102,18 @@ impl Settings {
     pub fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Settings {
         let path = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = path("HOME").or_else(|| path("USERPROFILE"));
-        let config = path("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")));
-        let docker = path("DOCKER_CONFIG").or_else(|| home.as_ref().map(|h| h.join(".docker")));
+        // A variable that overrides a home-folder default is named, so `machine info` shows which one applied.
+        let (config_name, config) = match path("XDG_CONFIG_HOME") {
+            Some(dir) => ("$XDG_CONFIG_HOME/containers/auth.json", Some(dir)),
+            None => (
+                "~/.config/containers/auth.json",
+                home.as_ref().map(|h| h.join(".config")),
+            ),
+        };
+        let (docker_name, docker) = match path("DOCKER_CONFIG") {
+            Some(dir) => ("$DOCKER_CONFIG/config.json", Some(dir)),
+            None => ("~/.docker/config.json", home.as_ref().map(|h| h.join(".docker"))),
+        };
         let auth_locations = vec![
             AuthLocation {
                 name: "$REGISTRY_AUTH_FILE",
@@ -114,11 +124,11 @@ impl Settings {
                 path: path("XDG_RUNTIME_DIR").map(|d| d.join("containers/auth.json")),
             },
             AuthLocation {
-                name: "~/.config/containers/auth.json",
+                name: config_name,
                 path: config.map(|d| d.join("containers/auth.json")),
             },
             AuthLocation {
-                name: "~/.docker/config.json",
+                name: docker_name,
                 path: docker.map(|d| d.join("config.json")),
             },
         ];
@@ -880,6 +890,28 @@ mod tests {
             ]
         );
         assert!(bare.auth_locations.iter().all(|l| l.path.is_none()));
+
+        // The variables that override the home-folder defaults are named when they apply.
+        let overridden = Settings::from_env(|name| match name {
+            "HOME" => Some("/home/me".into()),
+            "XDG_CONFIG_HOME" => Some("/cfg".into()),
+            "DOCKER_CONFIG" => Some("/dock".into()),
+            _ => None,
+        });
+        let shown: Vec<_> = overridden.auth_locations[2..]
+            .iter()
+            .map(|l| (l.name, l.path.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "$XDG_CONFIG_HOME/containers/auth.json",
+                    PathBuf::from("/cfg/containers/auth.json")
+                ),
+                ("$DOCKER_CONFIG/config.json", PathBuf::from("/dock/config.json")),
+            ]
+        );
     }
 
     #[test]

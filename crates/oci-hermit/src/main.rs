@@ -302,8 +302,10 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     lines.push("  auth files: searched in this order; the first with a login for the registry is used".into());
     for (i, location) in env.registry.auth_locations.iter().enumerate() {
         let (state, shown) = match &location.path {
-            Some(path) if path.is_file() => ("[found]", path.display().to_string()),
-            Some(path) => ("[not found]", path.display().to_string()),
+            Some(path) => (
+                if path.is_file() { "[found]" } else { "[not found]" },
+                format!("{} = {}", location.name, path.display()),
+            ),
             None => ("[not set]", location.name.to_string()),
         };
         lines.push(format!("    {}. {state:<12}{shown}", i + 1));
@@ -846,7 +848,7 @@ mod tests {
         assert!(out.contains("  size:       0.0 kB"), "{out}");
         assert!(
             out.contains(&format!(
-                "    1. [not set]   $REGISTRY_AUTH_FILE\n    2. [not found] {}\n    3. [found]     {}\n",
+                "    1. [not set]   $REGISTRY_AUTH_FILE\n    2. [not found] elsewhere = {}\n    3. [found]     here = {}\n",
                 bundle.join("missing.json").display(),
                 auth.display()
             )),
