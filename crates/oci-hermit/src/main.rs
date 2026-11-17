@@ -165,11 +165,7 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     let mut status = 0;
     let mut lines = vec![version_line()];
     let row = |label: &str, value: String| {
-        let label = if label.is_empty() {
-            String::new()
-        } else {
-            format!("{label}:")
-        };
+        let label = format!("{label}:");
         format!("  {label:<12}{value}")
     };
     let host_arch = qemu::GuestArch::host();
@@ -303,15 +299,13 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
 
     lines.push(String::new());
     lines.push("registries (pulls happen on the host, never in the sandbox):".into());
-    let auth: Vec<_> = env.registry.auth_files.iter().filter(|f| f.is_file()).collect();
-    if auth.is_empty() {
-        lines.push(row(
-            "auth files",
-            "none found (Podman and Docker logins are used when present)".into(),
-        ));
+    if env.registry.auth_files.is_empty() {
+        lines.push(row("auth files", "none to search: no home folder".into()));
     } else {
-        for (i, file) in auth.iter().enumerate() {
-            lines.push(row(if i == 0 { "auth files" } else { "" }, file.display().to_string()));
+        lines.push("  auth files: searched in this order; the first with a login for the registry is used".into());
+        for (i, file) in env.registry.auth_files.iter().enumerate() {
+            let state = if file.is_file() { "[found]" } else { "[not found]" };
+            lines.push(format!("    {}. {state:<12}{}", i + 1, file.display()));
         }
     }
     lines.push(row(
@@ -779,6 +773,7 @@ mod tests {
             out.contains("  images:     none yet; created by the first pull or load"),
             "{out}"
         );
+        assert!(out.contains("  auth files: none to search: no home folder"), "{out}");
         assert!(err.contains("no bundled QEMU found"));
     }
 
@@ -807,7 +802,7 @@ mod tests {
         let auth = bundle.join("auth.json");
         std::fs::write(&auth, "{}").unwrap();
         let mut env = with_bundle(&bundle, Some(&guest));
-        env.registry.auth_files = vec![bundle.join("missing.json"), auth.clone(), auth.clone()];
+        env.registry.auth_files = vec![bundle.join("missing.json"), auth.clone()];
         env.registry.insecure = vec!["localhost:5000".into()];
         env.data_dir_from_env = false;
 
@@ -837,12 +832,14 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("  size:       0.0 kB"), "{out}");
-        assert!(out.contains(&format!(
-            "  auth files: {}\n              {}\n",
-            auth.display(),
-            auth.display()
-        )));
-        assert!(!out.contains("missing.json"));
+        assert!(
+            out.contains(&format!(
+                "    1. [not found] {}\n    2. [found]     {}\n",
+                bundle.join("missing.json").display(),
+                auth.display()
+            )),
+            "{out}"
+        );
         assert!(out.contains("  plain http: localhost:5000 (from OCI_HERMIT_INSECURE_REGISTRIES)"));
         assert!(out.contains(&format!("  run dir:    {}", env.run_base.display())));
     }
