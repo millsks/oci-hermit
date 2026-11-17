@@ -184,7 +184,9 @@ jobs:
           dir="$check/oci-hermit"
           ls -l "$dir"
           unset OCI_HERMIT_QEMU_DIR OCI_HERMIT_GUEST_DIR
-          "$dir/oci-hermit$exe" version | grep -q "^oci-hermit ${{ needs.version.outputs.version }} "
+          # The binary reports the crate version; a dry run's package name adds -dev.<commit> to it.
+          version="${{ needs.version.outputs.version }}"
+          "$dir/oci-hermit$exe" version | grep -q "^oci-hermit ${version%%-dev.*} "
           "$dir/hrmt$exe" --help | grep -q "^Usage: hrmt "
           "$dir/oci-hermit$exe" machine info
           for arch in x86_64 aarch64; do "$dir/hrmt$exe" machine boot --arch "$arch" --timeout 600; done
