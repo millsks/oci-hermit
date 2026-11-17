@@ -17,7 +17,10 @@ targets = [
 [advisories]
 version = 2
 # Every RUSTSEC advisory fails the build. One with no fix yet goes here with the issue that tracks getting off it.
-ignore = []
+ignore = [
+  # chrono is unmaintained, no fix; it comes in through oci-client (#91).
+  { id = "RUSTSEC-2026-0543", reason = "transitive through oci-client, no fixed version (#91)" },
+]
 
 [licenses]
 version = 2
