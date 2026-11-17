@@ -22,6 +22,9 @@ QEMU_SHA256=5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
 BUNDLE_REVISION=4
 PKGVERSION="oci-hermit-qemu-${BUNDLE_REVISION}"
 
+# The repository, found before anything changes directory: $0 may be relative.
+repo=$(cd "$(dirname "$0")/.." && pwd)
+
 out=${1:?usage: qemu/build.sh <out-dir> [work-dir]}
 work=${2:-$(pwd)/qemu/work}
 mkdir -p "$out" "$work"
@@ -212,7 +215,7 @@ bundle_libs
 
 # The license of QEMU and of every library just bundled, and the source each was built from, for the release's
 # THIRD-PARTY-LICENSES and its source archives (packaging/licenses.py). Fails if a library's license is not known.
-python -I "$(cd "$(dirname "$0")/.." && pwd)/packaging/licenses.py" qemu "$out" "$src" "$patches_dir"
+python -I "$repo/packaging/licenses.py" qemu "$out" "$src" "$patches_dir"
 
 {
   echo "qemu_version=$QEMU_VERSION"
