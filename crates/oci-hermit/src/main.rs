@@ -301,10 +301,16 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     lines.push("registries (pulls happen on the host, never in the sandbox):".into());
     lines.push("  auth files: searched in this order; the first with a login for the registry is used".into());
     for (i, location) in env.registry.auth_locations.iter().enumerate() {
+        // A location that is a variable on its own keeps its name, so a value you set can be told from a default.
+        let bare_variable = location.name.starts_with('$') && !location.name.contains('/');
         let (state, shown) = match &location.path {
             Some(path) => (
                 if path.is_file() { "[found]" } else { "[not found]" },
-                format!("{} = {}", location.name, path.display()),
+                if bare_variable {
+                    format!("{} = {}", location.name, path.display())
+                } else {
+                    path.display().to_string()
+                },
             ),
             None => ("[not set]", location.name.to_string()),
         };
@@ -809,11 +815,11 @@ mod tests {
                 path: None,
             },
             registry::AuthLocation {
-                name: "elsewhere",
+                name: "$ELSEWHERE/auth.json",
                 path: Some(bundle.join("missing.json")),
             },
             registry::AuthLocation {
-                name: "here",
+                name: "$HERE",
                 path: Some(auth.clone()),
             },
         ];
@@ -848,7 +854,7 @@ mod tests {
         assert!(out.contains("  size:       0.0 kB"), "{out}");
         assert!(
             out.contains(&format!(
-                "    1. [not set]   $REGISTRY_AUTH_FILE\n    2. [not found] elsewhere = {}\n    3. [found]     here = {}\n",
+                "    1. [not set]   $REGISTRY_AUTH_FILE\n    2. [not found] {}\n    3. [found]     $HERE = {}\n",
                 bundle.join("missing.json").display(),
                 auth.display()
             )),
