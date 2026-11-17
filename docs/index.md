@@ -10,7 +10,7 @@ native, and the sandbox has no network at all.
 
 !!! warning "Early days"
 
-    oci-hermit has no release yet. You can pull, load, store and run images today; detached containers, published
+    oci-hermit is a pre-release (below 1.0). You can log in, pull, load, store and run images today; detached containers, published
     ports, bind mounts, pods and Compose are still to come. The [roadmap](roadmap.md) says when, and the
     [command-line reference](cli.md#planned-commands) lists every planned command with its issue.
 

@@ -54,8 +54,10 @@ works, and troubleshooting.
 
 ## Installation
 
-Not released yet; until then, use the CI builds in [Getting started](docs/getting-started.md). The plan is to publish
-on conda-forge, so it installs with:
+Download the package for your machine from the [releases page](https://github.com/millsks/oci-hermit/releases), unpack
+it, and run `oci-hermit` (or `hrmt`) from the folder: [Getting started](docs/getting-started.md) has the commands.
+Releases below 1.0 are pre-releases, and the binaries are not signed yet (#39). The plan is also to publish on
+conda-forge, so it installs with:
 
 ```bash
 pixi global install oci-hermit

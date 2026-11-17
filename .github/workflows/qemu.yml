@@ -7,6 +7,7 @@ on:
     branches: ["main"]
     paths:
       - qemu/**
+      - packaging/licenses.py
       - crates/oci-hermit/src/qemu.rs
       - pixi.toml
       - pixi.lock
@@ -14,6 +15,7 @@ on:
   pull_request:
     paths:
       - qemu/**
+      - packaging/licenses.py
       - crates/oci-hermit/src/qemu.rs
       - pixi.toml
       - pixi.lock

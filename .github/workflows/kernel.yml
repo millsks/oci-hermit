@@ -14,6 +14,7 @@ on:
       - Cargo.lock
       - guest/kernel/**
       - qemu/**
+      - packaging/**
       - pixi.toml
       - pixi.lock
       - .github/workflows/kernel.yml
@@ -24,6 +25,7 @@ on:
       - Cargo.lock
       - guest/kernel/**
       - qemu/**
+      - packaging/**
       - pixi.toml
       - pixi.lock
       - .github/workflows/kernel.yml
@@ -50,14 +52,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
-          environments: kernel-build qemu-build agent default
+          environments: kernel-build qemu-build agent package default
           cache: true
       - name: Cache the QEMU bundle
         id: qemu-cache
         uses: actions/cache@v6
         with:
           path: qemu/out
-          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'qemu/patches/**', 'pixi.lock') }}
+          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'qemu/patches/**', 'packaging/licenses.py', 'pixi.lock') }}
       - name: Build the QEMU bundle
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: pixi run -e qemu-build qemu-build
@@ -88,6 +90,10 @@ jobs:
           mkdir -p "guest/out/sandbox/$arch"
           cp "guest/out/$arch/$image" "guest/out/sandbox/$arch/kernel"
           cp "target/$arch-unknown-linux-gnu/release/hermit-agent" "guest/out/sandbox/$arch/hermit-agent"
+          # The kernel's license (from its build) and glibc's (statically linked into the agent), for the packages.
+          rm -rf "guest/out/sandbox/$arch/licenses"
+          cp -R "guest/out/$arch/licenses" "guest/out/sandbox/$arch/licenses"
+          pixi run -e package python -I packaging/licenses.py glibc "guest/out/sandbox/$arch" "$PWD/.pixi/envs/agent"
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
       - name: Run commands from a Debian image
         env:
@@ -99,7 +105,7 @@ jobs:
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
           command -v skopeo > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           skopeo --override-os linux --override-arch "$platform" \
-            copy docker://public.ecr.aws/docker/library/debian:bookworm-slim oci-archive:debian.tar
+            copy docker://mirror.gcr.io/library/debian:bookworm-slim oci-archive:debian.tar
           pixi run cargo build -q -p oci-hermit
           hermit=target/debug/oci-hermit
 
@@ -172,10 +178,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: qemu/out
-          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'qemu/patches/**', 'pixi.lock') }}
+          key: qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('qemu/build.sh', 'qemu/patches/**', 'packaging/licenses.py', 'pixi.lock') }}
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
-          environments: ${{ runner.os == 'Windows' && 'default' || 'default qemu-build' }}
+          environments: ${{ runner.os == 'Windows' && 'default package' || 'default qemu-build package' }}
           cache: true
       - if: steps.qemu-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
         name: Build the QEMU bundle
@@ -299,7 +305,7 @@ jobs:
           set -euo pipefail
           hermit=target/release/oci-hermit
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
-          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          image=mirror.gcr.io/library/debian:bookworm-slim
           pulled=$("$hermit" pull --platform "$platform" "$image")
           echo "$pulled"
           grep -q "^Status: pulled $image for $platform$" <<< "$pulled"
@@ -327,7 +333,7 @@ jobs:
           set -euo pipefail
           hermit=target/release/oci-hermit
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
-          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          image=mirror.gcr.io/library/debian:bookworm-slim
           "$hermit" tag "$image" hermit-test/debian:1
           listed=$("$hermit" images)
           echo "$listed"
@@ -367,7 +373,7 @@ jobs:
         run: |
           set -euo pipefail
           platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
-          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          image=mirror.gcr.io/library/debian:bookworm-slim
           for attempt in 1 2 3 4; do
             docker pull --platform "$platform" "$image" && break
             sleep $((attempt * 5))
@@ -557,8 +563,9 @@ jobs:
             "> oci-hermit run --platform $platform debian.tar sh -c '...; exit 7'", $out, '(exit code 7)', '```'
           )
           $summary -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
-      # A ready-to-run folder for this host (docs/getting-started.md): oci-hermit, its QEMU bundle and both guests, laid
-      # out so that it needs no settings. Packaged once per host, from the x86_64 job, until releases exist (#39).
+      # A ready-to-run folder for this host (docs/getting-started.md), built as a release builds it (packaging/package.py):
+      # oci-hermit and hrmt, its QEMU bundle, both guests, and their licenses. Packaged once per host, from the x86_64
+      # job; releases (release.yml) are built the same way from a tag.
       - if: matrix.arch == 'x86_64'
         name: Fetch the aarch64 guest for the package
         uses: actions/download-artifact@v8
@@ -573,24 +580,32 @@ jobs:
           set -euo pipefail
           temp=$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || echo "$RUNNER_TEMP")
           exe=oci-hermit$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          mkdir -p "$temp/guests"
+          cp -R guest/out/sandbox/x86_64 "$temp/guests/"
+          cp -R "$temp/aarch64-guest/guest/out/sandbox/aarch64" "$temp/guests/"
+          version="$("target/release/$exe" version | awk '{print $2}')-dev.${GITHUB_SHA::7}"
+          pixi run -e package python -I packaging/package.py --host "${{ matrix.host }}" --version "$version" \
+            --exe "target/release/$exe" --qemu qemu/out --guest "$temp/guests" --out "$temp/package" \
+            --archive-name "oci-hermit-${{ matrix.host }}" --keep-dir
           dir="$temp/package/oci-hermit"
-          mkdir -p "$dir/guest"
-          cp "target/release/$exe" "$dir/"
-          cp -R qemu/out "$dir/qemu"
-          cp -R guest/out/sandbox/x86_64 "$dir/guest/"
-          cp -R "$temp/aarch64-guest/guest/out/sandbox/aarch64" "$dir/guest/"
 
-          # The folder alone is enough: no OCI_HERMIT_* settings.
+          # The folder alone is enough: no OCI_HERMIT_* settings, under either name.
           unset OCI_HERMIT_QEMU_DIR OCI_HERMIT_GUEST_DIR
+          hrmt=hrmt$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          "$dir/$hrmt" --help | grep -q "^Usage: hrmt "
           "$dir/$exe" machine info
-          for arch in x86_64 aarch64; do "$dir/$exe" machine boot --arch "$arch" --timeout 600; done
+          for arch in x86_64 aarch64; do "$dir/$hrmt" machine boot --arch "$arch" --timeout 600; done
+          grep -q "^  qemu 11" "$dir/THIRD-PARTY-LICENSES"
+          grep -q "^  linux " "$dir/THIRD-PARTY-LICENSES"
 
-          # Artifacts are zipped, which loses the executable bit, so Linux and macOS get a tarball inside the zip.
+          # Artifacts are zipped, which loses the executable bit and symlinks, so Linux and macOS get the tarball;
+          # Windows gets the folder itself.
           if [ "$RUNNER_OS" = Windows ]; then
-            echo "path=$RUNNER_TEMP\\package" >> "$GITHUB_OUTPUT"
+            mkdir -p "$temp/artifact"
+            mv "$dir" "$temp/artifact/"
+            printf 'path=%s\\artifact\n' "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
           else
-            tar -czf "$temp/oci-hermit-${{ matrix.host }}.tar.gz" -C "$temp/package" oci-hermit
-            echo "path=$temp/oci-hermit-${{ matrix.host }}.tar.gz" >> "$GITHUB_OUTPUT"
+            echo "path=$temp/package/oci-hermit-${{ matrix.host }}.tar.gz" >> "$GITHUB_OUTPUT"
           fi
       - if: matrix.arch == 'x86_64'
         uses: actions/upload-artifact@v7

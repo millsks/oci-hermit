@@ -3,72 +3,80 @@
 This page takes you from nothing to a shell in a Linux image on Windows, macOS or Linux. None of it needs admin
 rights, a hypervisor or WSL. Pick your operating system in any of the tabs below; the others follow.
 
-oci-hermit has no release yet (#39–#41). Until it does, every successful CI run on `main` publishes a ready-to-run
-folder for each host. GitHub keeps these for 14 days, and only signed-in GitHub users can download them.
-
 ## What you get
 
-One folder that runs from wherever you unpack it:
+One file per kind of machine, from the [releases page](https://github.com/millsks/oci-hermit/releases). Each unpacks
+into one folder that runs from wherever you put it:
 
 ```
 oci-hermit/
   oci-hermit(.exe)        the host tool
+  hrmt(.exe)              the same program under a shorter name
   qemu/                   the bundled emulator (QEMU, TCG only)
   guest/x86_64/           the guest kernel and agent, for x86_64 (amd64) images
   guest/aarch64/          the same for arm64 images
+  LICENSE                 oci-hermit's license (Apache-2.0)
+  THIRD-PARTY-LICENSES    every bundled component and its license
+  README.txt
 ```
 
 oci-hermit finds `qemu/` and `guest/` next to itself, so there is nothing to configure. Both guests run on every
 host, because the CPU is emulated: an arm64 image runs on an Intel PC, and an amd64 image runs on a Mac with Apple
 silicon.
 
-| Your machine | Package |
+| Your machine | File |
 | --- | --- |
-| Windows, x64 | `oci-hermit-win-64` |
-| macOS, Apple silicon | `oci-hermit-osx-arm64` |
-| macOS, Intel | `oci-hermit-osx-64` |
-| Linux, x86-64 | `oci-hermit-linux-64` |
-| Linux, arm64 | `oci-hermit-linux-aarch64` |
+| Windows, x64 | `oci-hermit-<version>-win-64.zip` |
+| macOS, Apple silicon | `oci-hermit-<version>-osx-arm64.tar.gz` |
+| macOS, Intel | `oci-hermit-<version>-osx-64.tar.gz` |
+| Linux, x86-64 | `oci-hermit-<version>-linux-64.tar.gz` |
+| Linux, arm64 | `oci-hermit-<version>-linux-aarch64.tar.gz` |
+
+Releases below 1.0 are marked as pre-releases. The binaries are not signed yet (#39), so Windows and macOS warn the
+first time; see [If it will not start](#if-it-will-not-start).
 
 ## 1. Download
 
-**With the GitHub CLI** (`gh`, signed in with `gh auth login`), from the latest successful run on `main`:
+**With a browser:** open the [releases page](https://github.com/millsks/oci-hermit/releases), and under **Assets** of
+the newest release download the file for your machine. No GitHub account is needed. Unpack it: on Windows,
+right-click the `.zip` and choose **Extract All**; on macOS, double-click the `.tar.gz`.
+
+**From a terminal**, with the GitHub CLI (`gh`):
 
 === "Windows"
 
     In PowerShell:
 
     ```powershell
-    $run = gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId'
-    gh run download $run -R millsks/oci-hermit -n oci-hermit-win-64
+    $tag = gh release list -R millsks/oci-hermit -L 1 --json tagName -q '.[0].tagName'
+    gh release download $tag -R millsks/oci-hermit -p '*-win-64.zip' -p SHA256SUMS
+    Expand-Archive oci-hermit-*-win-64.zip -DestinationPath .
     ```
-
-    This leaves an `oci-hermit` folder in the current directory.
 
 === "macOS"
 
-    Use `oci-hermit-osx-arm64` on Apple silicon and `oci-hermit-osx-64` on an Intel Mac:
+    Use `osx-arm64` on Apple silicon and `osx-64` on an Intel Mac:
 
     ```bash
-    run=$(gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
-    gh run download "$run" -R millsks/oci-hermit -n oci-hermit-osx-arm64
-    tar -xzf oci-hermit-osx-arm64.tar.gz
+    tag=$(gh release list -R millsks/oci-hermit -L 1 --json tagName -q '.[0].tagName')
+    gh release download "$tag" -R millsks/oci-hermit -p '*-osx-arm64.tar.gz' -p SHA256SUMS
+    shasum -a 256 --ignore-missing -c SHA256SUMS
+    tar -xzf oci-hermit-*-osx-arm64.tar.gz
     ```
 
 === "Linux"
 
-    Use `oci-hermit-linux-64` on x86-64 and `oci-hermit-linux-aarch64` on arm64:
+    Use `linux-64` on x86-64 and `linux-aarch64` on arm64:
 
     ```bash
-    run=$(gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
-    gh run download "$run" -R millsks/oci-hermit -n oci-hermit-linux-64
-    tar -xzf oci-hermit-linux-64.tar.gz
+    tag=$(gh release list -R millsks/oci-hermit -L 1 --json tagName -q '.[0].tagName')
+    gh release download "$tag" -R millsks/oci-hermit -p '*-linux-64.tar.gz' -p SHA256SUMS
+    sha256sum --ignore-missing -c SHA256SUMS
+    tar -xzf oci-hermit-*-linux-64.tar.gz
     ```
 
-**With a browser:** open the [Guest kernel workflow](https://github.com/millsks/oci-hermit/actions/workflows/kernel.yml?query=branch%3Amain+is%3Asuccess),
-pick the newest run, and download your package from **Artifacts** at the bottom. Unzip it. On macOS and Linux, unpack
-the `.tar.gz` inside it as well. Files a browser downloads are marked as coming from the internet; see
-[If it will not start](#if-it-will-not-start).
+`gh release list` takes the newest release, pre-releases included; `gh release download` alone would skip those.
+`SHA256SUMS` lets you check the download, as the macOS and Linux tabs do.
 
 You now have an `oci-hermit` folder. The commands below run from the folder that contains it.
 
@@ -336,6 +344,20 @@ software that inspects QEMU can slow it down a lot; give it longer with `--timeo
 
 [Troubleshooting](troubleshooting.md) covers more. On a managed (company) device, check that running an emulator is
 allowed first, and see [Running without admin rights](no-admin.md) for what it needs and a checklist.
+
+## Development builds
+
+Every successful CI run on `main` also publishes the same folder for each host, built from that commit. GitHub
+keeps these for 14 days, and only signed-in GitHub users can download them. With `gh`:
+
+```bash
+run=$(gh run list -R millsks/oci-hermit -w kernel.yml -b main -s success -L 1 --json databaseId -q '.[0].databaseId')
+gh run download "$run" -R millsks/oci-hermit -n oci-hermit-osx-arm64   # or -win-64, -osx-64, -linux-64, -linux-aarch64
+```
+
+On Windows this leaves the `oci-hermit` folder; elsewhere it leaves `oci-hermit-<host>.tar.gz` to unpack. In a
+browser: the [Guest kernel workflow](https://github.com/millsks/oci-hermit/actions/workflows/kernel.yml?query=branch%3Amain+is%3Asuccess),
+the newest run, **Artifacts**.
 
 ## Building from source
 
