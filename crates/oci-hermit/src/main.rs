@@ -9,6 +9,7 @@ mod image;
 mod images;
 mod initramfs;
 mod load;
+mod login;
 mod qemu;
 mod registry;
 mod rootfs;
@@ -51,6 +52,66 @@ struct Env {
     registry: registry::Settings,
     /// Reads a yes or no after a question has been printed, for `image prune`.
     confirm: fn() -> bool,
+    /// Asks the user for something `login` needs.
+    ask: fn(Ask) -> std::io::Result<String>,
+}
+
+/// What `login` asks for when it is not on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Username,
+    /// Without echo, on the terminal.
+    Password,
+    /// All of stdin, for `--password-stdin`.
+    Stdin,
+}
+
+/// Asks on the terminal: the user name with echo, the password without.
+fn ask_on_terminal(what: Ask) -> std::io::Result<String> {
+    use std::io::{BufRead, IsTerminal, Read};
+    if what == Ask::Stdin {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        return Ok(text.trim_end_matches(['\r', '\n']).to_string());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(std::io::Error::other(
+            "there is no terminal to ask on; pass --username, and --password-stdin with the password on stdin",
+        ));
+    }
+    let mut err = std::io::stderr();
+    if what == Ask::Username {
+        write!(err, "Username: ")?;
+        err.flush()?;
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        return Ok(line.trim().to_string());
+    }
+    write!(err, "Password: ")?;
+    err.flush()?;
+    crossterm::terminal::enable_raw_mode()?;
+    let typed = read_secret(&mut std::io::stdin().lock());
+    let _ = crossterm::terminal::disable_raw_mode();
+    writeln!(err)?;
+    typed
+}
+
+/// Reads a line typed in raw mode: Enter ends it, Backspace removes a character, Ctrl-C cancels.
+fn read_secret(input: &mut impl std::io::Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    let mut byte = [0u8; 1];
+    while input.read(&mut byte)? == 1 {
+        match byte[0] {
+            b'\r' | b'\n' => break,
+            3 => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled")),
+            8 | 0x7f => {
+                // A whole character, not just its last byte.
+                while bytes.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
+            }
+            b => bytes.push(b),
+        }
+    }
+    String::from_utf8(bytes).map_err(std::io::Error::other)
 }
 
 /// A yes from stdin: `y` or `yes`, in any case.
@@ -111,6 +172,7 @@ fn main() -> ExitCode {
         data_dir_from_env: std::env::var_os(store::DIR_ENV).is_some_and(|d| !d.is_empty()),
         registry: registry::Settings::from_env(|name| std::env::var_os(name)),
         confirm: confirm_on_stdin,
+        ask: ask_on_terminal,
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
 }
@@ -142,6 +204,20 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
             load::load(std::path::Path::new(input), &store, out).map_err(Box::<dyn std::error::Error>::from)
         }) {
             Ok(_) => 0,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
+        cli::Command::Login(args) => match login_command(args, env, out, err) {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
+        cli::Command::Logout(args) => match logout_command(args, env, out, err) {
+            Ok(code) => code,
             Err(e) => {
                 let _ = writeln!(err, "oci-hermit: {e}");
                 1
@@ -341,6 +417,13 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
         lines.push(format!("    {}. {state:<12}{shown}", i + 1));
     }
     lines.push(row(
+        "login file",
+        login::login_file(&env.registry).map_or_else(
+            || "none: no home folder (set REGISTRY_AUTH_FILE)".into(),
+            |f| format!("{} (where login writes)", f.display()),
+        ),
+    ));
+    lines.push(row(
         "plain http",
         if env.registry.insecure.is_empty() {
             format!("none ({})", registry::INSECURE_ENV)
@@ -353,6 +436,104 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
         let _ = writeln!(out, "{}", line.trim_end());
     }
     status
+}
+
+/// The auth file `login` and `logout` change: `--authfile`, else Podman's.
+fn login_file(authfile: Option<&str>, env: &Env) -> Result<PathBuf, String> {
+    match authfile {
+        Some(file) => Ok(PathBuf::from(file)),
+        None => login::login_file(&env.registry).ok_or_else(|| {
+            "cannot tell where to keep logins: no home folder; set REGISTRY_AUTH_FILE or pass --authfile".into()
+        }),
+    }
+}
+
+/// `login`: asks for what the command line does not give, checks it with the registry, then stores it.
+fn login_command(
+    args: &cli::LoginArgs,
+    env: &Env,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<u8, Box<dyn std::error::Error>> {
+    let registry = login::registry_name(args.registry.as_deref().unwrap_or("docker.io"))?;
+    let file = login_file(args.authfile.as_deref(), env)?;
+    if args.get_login {
+        return Ok(match login::user(&file, &registry) {
+            Some(user) => {
+                let _ = writeln!(out, "{user}");
+                0
+            }
+            None => {
+                let _ = writeln!(err, "oci-hermit: not logged in to {registry}");
+                1
+            }
+        });
+    }
+    if args.password.is_some() && args.password_stdin {
+        return Err("--password and --password-stdin cannot be used together".into());
+    }
+    if args.password_stdin && args.username.is_none() {
+        return Err("--password-stdin needs --username, since stdin holds the password".into());
+    }
+    let user = match &args.username {
+        Some(user) => user.clone(),
+        None => (env.ask)(Ask::Username)?,
+    };
+    let password = match &args.password {
+        Some(password) => {
+            let _ = writeln!(
+                err,
+                "WARNING! --password on the command line can be seen by other users; use --password-stdin."
+            );
+            password.clone()
+        }
+        None if args.password_stdin => (env.ask)(Ask::Stdin)?,
+        None => (env.ask)(Ask::Password)?,
+    };
+    if user.is_empty() || password.is_empty() {
+        return Err("a user name and a password are both needed".into());
+    }
+    login::verify(&registry, &user, &password, &env.registry)?;
+    login::store(&file, &registry, &user, &password)?;
+    let _ = writeln!(out, "Login Succeeded!");
+    Ok(0)
+}
+
+/// `logout`: removes the registry's login (or every login) from the auth file `login` writes.
+fn logout_command(
+    args: &cli::LogoutArgs,
+    env: &Env,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<u8, Box<dyn std::error::Error>> {
+    let file = login_file(args.authfile.as_deref(), env)?;
+    if args.all {
+        if args.registry.is_some() {
+            return Err("give a registry or --all, not both".into());
+        }
+        login::remove_all(&file)?;
+        let _ = writeln!(out, "Removed login credentials for all registries");
+        return Ok(0);
+    }
+    let registry = login::registry_name(args.registry.as_deref().unwrap_or("docker.io"))?;
+    if login::remove(&file, &registry)? {
+        let _ = writeln!(out, "Removed login credentials for {registry}");
+        return Ok(0);
+    }
+    match login::elsewhere(&env.registry, &file, &registry) {
+        Some(other) => {
+            let _ = writeln!(
+                err,
+                "oci-hermit: not logged in to {registry} with oci-hermit or Podman; the login in {} was made by \
+                 another tool (`docker logout {registry}` removes it)",
+                other.display()
+            );
+        }
+        None => {
+            let _ = writeln!(err, "oci-hermit: not logged in to {registry}");
+        }
+    }
+    Ok(1)
 }
 
 /// The image commands (`images`, `rmi`, `inspect`, `tag`, `save`, `image ...`, `system df`).
@@ -847,6 +1028,7 @@ mod tests {
             data_dir_from_env: true,
             registry: registry::Settings::default(),
             confirm: || false,
+            ask: |_| Err(std::io::Error::other("no terminal in tests")),
         }
     }
 
@@ -863,6 +1045,7 @@ mod tests {
             data_dir_from_env: true,
             registry: registry::Settings::default(),
             confirm: || false,
+            ask: |_| Err(std::io::Error::other("no terminal in tests")),
         }
     }
 
@@ -1040,6 +1223,140 @@ mod tests {
         assert_eq!(code, 1);
         assert!(err.contains("in use by another oci-hermit"), "{err}");
         drop(held);
+    }
+
+    /// An environment whose logins go to `file` and whose registry at `address` is plain HTTP.
+    fn login_env(name: &str, address: &str, ask: fn(Ask) -> std::io::Result<String>) -> (Env, PathBuf) {
+        let base = no_qemu(name);
+        let file = base.run_base.with_file_name("auth.json");
+        let env = Env {
+            registry: registry::Settings {
+                auth_files: vec![file.clone()],
+                auth_locations: vec![registry::AuthLocation {
+                    name: "$REGISTRY_AUTH_FILE",
+                    path: Some(file.clone()),
+                }],
+                insecure: vec![address.to_string()],
+                ..registry::Settings::default()
+            },
+            ask,
+            ..base
+        };
+        (env, file)
+    }
+
+    fn answers(what: Ask) -> std::io::Result<String> {
+        Ok(match what {
+            Ask::Username => "alice".into(),
+            Ask::Password | Ask::Stdin => "s3cret".into(),
+        })
+    }
+
+    #[test]
+    fn login_checks_with_the_registry_then_stores_it() {
+        let secret = hermit_proto::b64::encode(b"alice:s3cret");
+        let address = login::testing::registry(&secret, true);
+        let (env, file) = login_env("main-login", &address, answers);
+
+        // Asked for both, checked through the token server, stored.
+        let (code, out, err) = run_with(&env, &["login", &address]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "Login Succeeded!\n", ""));
+        assert_eq!(login::user(&file, &address).as_deref(), Some("alice"));
+        let (code, out, _) = run_with(&env, &["login", "--get-login", &address]);
+        assert_eq!((code, out.as_str()), (0, "alice\n"));
+
+        // A wrong password is turned down and nothing changes.
+        let before = std::fs::read(&file).unwrap();
+        let (code, _, err) = run_with(&env, &["login", "-u", "alice", "-p", "nope", &address]);
+        assert_eq!(code, 1);
+        assert!(err.contains("WARNING! --password on the command line"), "{err}");
+        assert!(err.contains("rejected the user name or password"), "{err}");
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+
+        let (code, out, _) = run_with(&env, &["login", "-u", "alice", "--password-stdin", &address]);
+        assert_eq!((code, out.as_str()), (0, "Login Succeeded!\n"));
+        assert!(machine_info_text(&env).contains(&format!("login file: {} (where login writes)", file.display())));
+
+        let (code, out, _) = run_with(&env, &["logout", &address]);
+        assert_eq!(
+            (code, out.trim()),
+            (0, format!("Removed login credentials for {address}").as_str())
+        );
+        let (code, _, err) = run_with(&env, &["logout", &address]);
+        assert_eq!(code, 1);
+        assert!(err.contains(&format!("not logged in to {address}")), "{err}");
+        let (code, _, err) = run_with(&env, &["login", "--get-login", &address]);
+        assert_eq!(code, 1);
+        assert!(err.contains("not logged in"));
+    }
+
+    fn machine_info_text(env: &Env) -> String {
+        run_with(env, &["machine", "info"]).1
+    }
+
+    #[test]
+    fn login_refuses_what_it_cannot_use() {
+        let (env, file) = login_env("main-login-bad", "127.0.0.1:9", answers);
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["login", "-p", "x", "--password-stdin", "r.example"],
+                "cannot be used together",
+            ),
+            (&["login", "--password-stdin", "r.example"], "needs --username"),
+            (&["login", "ghcr.io/org/app"], "not a registry"),
+            (&["logout", "--all", "ghcr.io"], "not both"),
+        ];
+        for (args, message) in cases {
+            let (code, _, err) = run_with(&env, args);
+            assert_eq!(code, 1, "{args:?}");
+            assert!(err.contains(message), "{args:?}: {err}");
+        }
+        let empty = |_: Ask| Ok(String::new());
+        let (env_empty, _) = login_env("main-login-empty", "127.0.0.1:9", empty);
+        let (code, _, err) = run_with(&env_empty, &["login", "r.example"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("both needed"), "{err}");
+        // With no terminal, asking fails with a hint.
+        let (code, _, err) = run_with(
+            &no_qemu("main-login-noterm"),
+            &["login", "--authfile", "a.json", "r.example"],
+        );
+        assert_eq!(code, 1);
+        assert!(err.contains("no terminal in tests"), "{err}");
+
+        // logout --all, and a login another tool made.
+        login::store(&file, "ghcr.io", "a", "b").unwrap();
+        let (code, out, _) = run_with(&env, &["logout", "--all"]);
+        assert_eq!((code, out.trim()), (0, "Removed login credentials for all registries"));
+        let docker = file.with_file_name("config.json");
+        std::fs::write(&docker, r#"{"auths":{"https://index.docker.io/v1/":{"auth":"eDp5"}}}"#).unwrap();
+        let env = Env {
+            registry: registry::Settings {
+                auth_files: vec![file.clone(), docker.clone()],
+                ..env.registry.clone()
+            },
+            ..env
+        };
+        let (code, _, err) = run_with(&env, &["logout"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("docker logout docker.io"), "{err}");
+        let nowhere = Env {
+            registry: registry::Settings::default(),
+            ..no_qemu("main-login-nowhere")
+        };
+        let (code, _, err) = run_with(&nowhere, &["logout"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no home folder"), "{err}");
+    }
+
+    #[test]
+    fn passwords_are_read_without_echo_handling() {
+        let read = |bytes: &[u8]| read_secret(&mut &bytes[..]);
+        assert_eq!(read(b"s3cret\r").unwrap(), "s3cret");
+        assert_eq!(read(b"ab\x7fc\n").unwrap(), "ac");
+        assert_eq!(read("p\u{e9}\x08x\r".as_bytes()).unwrap(), "px");
+        assert_eq!(read(b"no newline").unwrap(), "no newline");
+        assert_eq!(read(b"ab\x03").unwrap_err().kind(), std::io::ErrorKind::Interrupted);
     }
 
     #[test]

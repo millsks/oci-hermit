@@ -1034,6 +1034,7 @@ dependencies = [
  "flate2",
  "hermit-proto",
  "oci-client",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",

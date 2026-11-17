@@ -26,6 +26,10 @@ pub enum Command {
         /// Image reference, e.g. debian:bookworm-slim or ghcr.io/org/app:1.2
         image: String,
     },
+    /// Log in to a registry, storing the login where Podman keeps it
+    Login(LoginArgs),
+    /// Remove a registry login
+    Logout(LogoutArgs),
     /// Load an image from a docker-archive or OCI layout tarball
     Load {
         /// Path to the tarball or OCI layout directory
@@ -96,6 +100,8 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Pull { .. } => "pull",
+            Command::Login(_) => "login",
+            Command::Logout(_) => "logout",
             Command::Load { .. } => "load",
             Command::Images(_) => "images",
             Command::Rmi(_) => "rmi",
@@ -118,6 +124,39 @@ impl Command {
             Command::Version => "version",
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct LoginArgs {
+    /// User name (asked for if not given)
+    #[arg(short, long)]
+    pub username: Option<String>,
+    /// Password; visible to other users in the process list, so prefer --password-stdin
+    #[arg(short, long)]
+    pub password: Option<String>,
+    /// Read the password from stdin
+    #[arg(long)]
+    pub password_stdin: bool,
+    /// Auth file to write (default: Podman's)
+    #[arg(long)]
+    pub authfile: Option<String>,
+    /// Print the user name logged in to the registry, and nothing else
+    #[arg(long)]
+    pub get_login: bool,
+    /// Registry host, e.g. ghcr.io or registry.example.com:5000 (default: docker.io)
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct LogoutArgs {
+    /// Remove the logins for every registry in the auth file
+    #[arg(short, long)]
+    pub all: bool,
+    /// Auth file to change (default: Podman's)
+    #[arg(long)]
+    pub authfile: Option<String>,
+    /// Registry host (default: docker.io)
+    pub registry: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -371,6 +410,8 @@ mod tests {
         let cases: &[(&[&str], &str)] = &[
             (&["pull", "alpine"], "pull"),
             (&["load", "-i", "app.tar"], "load"),
+            (&["login", "-u", "me", "ghcr.io"], "login"),
+            (&["logout", "--all"], "logout"),
             (&["images"], "images"),
             (&["rmi", "alpine"], "rmi"),
             (&["inspect", "web"], "inspect"),
