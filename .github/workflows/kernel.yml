@@ -342,7 +342,10 @@ jobs:
           if "$hermit" image exists "$id"; then echo "::error::rmi left $id"; exit 1; fi
           "$hermit" system df
           "$hermit" load -i "$RUNNER_TEMP/debian-saved.tar"
-          [ "$("$hermit" run --platform "$platform" "${id:0:6}" cat /etc/debian_version | tr -d '\r' | cut -d. -f1)" = 12 ]
+          # In sh -c, because Git Bash on Windows rewrites a bare /etc/... argument into a Windows path.
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          version=$("$hermit" run --platform "$platform" "${id:0:6}" sh -c 'cat /etc/debian_version' | tr -d '\r')
+          [ "${version%%.*}" = 12 ] || { echo "::error::ran ${id:0:6} and got '$version'"; exit 1; }
           {
             echo
             echo "### Image commands"
