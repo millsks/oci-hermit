@@ -98,12 +98,46 @@ def conda_owner(prefix: Path, file_name: str) -> dict:
     return {}
 
 
+def downloaded_info(record: dict) -> Path:
+    """The ``info/`` folder of a conda package, downloaded from where the environment got it and checked against the
+    sha256 the environment recorded. Handles ``.conda`` (a zip holding ``info-*.tar.zst``) and ``.tar.bz2``."""
+    import hashlib
+    import io
+    import tarfile
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    url, expected = record.get("url"), record.get("sha256")
+    if not url or not expected:
+        fail(f"{record['name']}: no package cache and no URL and sha256 to fetch it from")
+    request = urllib.request.Request(url, headers={"User-Agent": "oci-hermit-release"})
+    with urllib.request.urlopen(request, timeout=300) as response:
+        data = response.read()
+    if hashlib.sha256(data).hexdigest() != expected:
+        fail(f"{url}: sha256 does not match the environment's record")
+    target = Path(tempfile.mkdtemp(prefix=f"{record['name']}-"))
+    if url.endswith(".conda"):
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            member = next((n for n in z.namelist() if n.startswith("info-") and n.endswith(".tar.zst")), None)
+            if member is None:
+                fail(f"{url}: no info-*.tar.zst inside")
+            with tarfile.open(fileobj=io.BytesIO(z.read(member)), mode="r:zst") as t:
+                t.extractall(target, filter="data")
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:bz2") as t:
+            members = [m for m in t.getmembers() if m.name.startswith("info/")]
+            t.extractall(target, members=members, filter="data")
+    return target / "info"
+
+
 def conda_component(record: dict, licenses: Path) -> dict:
     """Copies a conda package's license files (and its recipe's patches) and describes its source."""
     package_dir = Path(record.get("extracted_package_dir") or record.get("link", {}).get("source", ""))
     info = package_dir / "info"
     if not info.is_dir():
-        fail(f"{record['name']}: the package cache {package_dir} is gone; reinstall the environment")
+        # An environment restored from CI's cache has no package cache beside it: fetch the package itself.
+        info = downloaded_info(record)
     dest = licenses / record["name"]
     found = copy_licenses(info / "licenses", dest, recursive=True) if (info / "licenses").is_dir() else []
     if not found:
