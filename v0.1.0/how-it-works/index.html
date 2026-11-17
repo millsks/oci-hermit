@@ -1,0 +1,2198 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Run OCI images in a sealed, software-emulated sandbox without root, admin or a hypervisor">
+      
+      
+      
+        <link rel="canonical" href="https://millsks.github.io/oci-hermit/latest/how-it-works/">
+      
+      
+        <link rel="prev" href="../configuration/">
+      
+      
+        <link rel="next" href="../performance/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>How it works - oci-hermit</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <style>/* The Aesir brand on Material for MkDocs: the brand package's light and dark theme mapping (colors/COLORS.md). The
+   light page stays white so Deep Emerald links read at 4.76:1 (AA); on Cloud Gray they would be 4.40:1. */
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #f5f6f7;
+  --md-primary-fg-color--dark: #f5f6f7;
+  --md-primary-bg-color: #1a1d20;
+  --md-primary-bg-color--light: #5b636b;
+  --md-accent-fg-color: #2fb889;
+  --md-accent-fg-color--transparent: rgba(47, 184, 137, 0.1);
+  --md-typeset-a-color: #07835d;
+  --md-code-bg-color: #f5f6f7;
+  --md-footer-bg-color: #1a1d20;
+  --md-footer-bg-color--dark: #111315;
+  --aesir-mark: #07835d;
+  --aesir-crossbar: #1a1d20;
+  --aesir-rule: #c9ced3;
+  --aesir-surface: #ffffff;
+  --aesir-tint: #d3f5e7;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #052620;
+  --md-default-bg-color--light: rgba(5, 38, 32, 0.54);
+  --md-default-bg-color--lighter: rgba(5, 38, 32, 0.26);
+  --md-default-bg-color--lightest: rgba(5, 38, 32, 0.07);
+  --md-default-fg-color: rgba(234, 251, 243, 0.9);
+  --md-default-fg-color--light: rgba(169, 217, 198, 0.9);
+  --md-default-fg-color--lighter: rgba(169, 217, 198, 0.4);
+  --md-default-fg-color--lightest: rgba(169, 217, 198, 0.14);
+  --md-typeset-color: #eafbf3;
+  --md-primary-fg-color: #031915;
+  --md-primary-fg-color--light: #0a3a30;
+  --md-primary-fg-color--dark: #031915;
+  --md-primary-bg-color: #eafbf3;
+  --md-primary-bg-color--light: #a9d9c6;
+  --md-accent-fg-color: #5ae9b6;
+  --md-accent-fg-color--transparent: rgba(90, 233, 182, 0.1);
+  --md-typeset-a-color: #5ae9b6;
+  --md-code-bg-color: #0a3a30;
+  --md-code-fg-color: #eafbf3;
+  --md-footer-bg-color: #031915;
+  --md-footer-bg-color--dark: #021210;
+  --aesir-mark: #5ae9b6;
+  --aesir-crossbar: #ffffff;
+  --aesir-rule: #125244;
+  --aesir-surface: #0a3a30;
+  --aesir-tint: #0a3a30;
+}
+
+/* The oci-hermit mark: an emerald shell with a charcoal door on light, Aesir Emerald with a white door on dark. */
+.md-logo svg .oci-hermit-mark__shell { fill: var(--aesir-mark); }
+.md-logo svg .oci-hermit-mark__door { fill: var(--aesir-crossbar); }
+
+/* A white header needs a rule under it and a visible search field. */
+.md-header { box-shadow: 0 1px 0 var(--aesir-rule); }
+.md-header[data-md-state="shadow"], .md-header--shadow { box-shadow: 0 1px 0 var(--aesir-rule), 0 0.2rem 0.4rem rgba(0, 0, 0, 0.08); }
+[data-md-color-scheme="default"] .md-search__form { background-color: rgba(26, 29, 32, 0.06); }
+[data-md-color-scheme="default"] .md-search__form:hover { background-color: rgba(26, 29, 32, 0.1); }
+
+/* Inter ExtraBold and Bold for headings, tracked in as the brand sets them. */
+.md-typeset h1 { font-weight: 800; letter-spacing: -0.025em; color: var(--md-typeset-color); }
+.md-typeset h2 { font-weight: 700; letter-spacing: -0.02em; }
+.md-typeset h3 { font-weight: 700; }
+.md-header__title { font-weight: 700; }
+
+/* Architecture diagrams (how-it-works.md): inline SVGs, so they follow the colour scheme. Host in emerald, QEMU in
+   amber, the guest in blue, the command in violet; planned parts are grey and dashed. */
+:root,
+[data-md-color-scheme="default"] {
+  --oh-text: #1a1d20;
+  --oh-muted: #5b636b;
+  --oh-surface: #ffffff;
+  --oh-surface-2: #f0f2f3;
+  --oh-border: #c9ced3;
+  --oh-accent: #07835d;
+  --oh-host-fill: #e6f6ee;
+  --oh-host-stroke: #07835d;
+  --oh-qemu-fill: #fcf3e3;
+  --oh-qemu-stroke: #9a5b00;
+  --oh-guest-fill: #e8f1fa;
+  --oh-guest-stroke: #1f64a8;
+  --oh-cmd-fill: #f2ebfb;
+  --oh-cmd-stroke: #6c40b8;
+  --oh-plan: #6b737b;
+  --oh-band-a: rgba(7, 131, 93, 0.06);
+  --oh-band-b: rgba(154, 91, 0, 0.06);
+}
+
+[data-md-color-scheme="slate"] {
+  --oh-text: #eafbf3;
+  --oh-muted: #a9d9c6;
+  --oh-surface: #0a3a30;
+  --oh-surface-2: #0f4a3d;
+  --oh-border: #1d6a58;
+  --oh-accent: #5ae9b6;
+  --oh-host-fill: rgba(90, 233, 182, 0.1);
+  --oh-host-stroke: #5ae9b6;
+  --oh-qemu-fill: rgba(227, 162, 75, 0.12);
+  --oh-qemu-stroke: #e8ad5c;
+  --oh-guest-fill: rgba(122, 184, 245, 0.12);
+  --oh-guest-stroke: #8cc3f7;
+  --oh-cmd-fill: rgba(180, 149, 240, 0.14);
+  --oh-cmd-stroke: #c0a6f4;
+  --oh-plan: #8fb5a6;
+  --oh-band-a: rgba(90, 233, 182, 0.06);
+  --oh-band-b: rgba(227, 162, 75, 0.07);
+}
+
+.md-typeset figure.oh-diagram { display: block; width: 100%; max-width: 100%; margin: 1.5em 0; padding: 0.6rem; border: 1px solid var(--oh-border); border-radius: 0.4rem; background: var(--oh-surface); }
+.md-typeset figure.oh-diagram figcaption { max-width: none; margin: 0.6rem 0.2rem 0.1rem; font-style: normal; text-align: left; color: var(--md-default-fg-color--light); }
+.oh-diagram .oh-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.oh-diagram svg { display: block; width: 100%; height: auto; min-width: 640px; }
+.oh-diagram svg text { font-family: var(--md-text-font-family), system-ui, sans-serif; fill: var(--oh-text); font-size: 13px; }
+.oh-diagram svg .mono { font-family: var(--md-code-font-family), ui-monospace, monospace; font-size: 12px; }
+.oh-diagram svg .b { font-weight: 600; }
+.oh-diagram svg .t { font-weight: 700; font-size: 14px; }
+.oh-diagram svg .m { fill: var(--oh-muted); font-size: 12.5px; }
+.oh-diagram svg .small { font-size: 12px; }
+.oh-diagram svg .halo { paint-order: stroke; stroke: var(--oh-surface); stroke-width: 5px; stroke-linejoin: round; }
+.oh-diagram svg .r-host { fill: var(--oh-host-fill); stroke: var(--oh-host-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-qemu { fill: var(--oh-qemu-fill); stroke: var(--oh-qemu-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-guest { fill: var(--oh-guest-fill); stroke: var(--oh-guest-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-cmd { fill: var(--oh-cmd-fill); stroke: var(--oh-cmd-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-box { fill: var(--oh-surface); stroke: var(--oh-border); stroke-width: 1.2; }
+.oh-diagram svg .r-host-box { fill: var(--oh-surface); stroke: var(--oh-host-stroke); stroke-width: 1.2; }
+.oh-diagram svg .r-qemu-box { fill: var(--oh-surface); stroke: var(--oh-qemu-stroke); stroke-width: 1.2; }
+.oh-diagram svg .r-guest-box { fill: var(--oh-surface); stroke: var(--oh-guest-stroke); stroke-width: 1.2; }
+.oh-diagram svg .r-chroot { fill: none; stroke: var(--oh-cmd-stroke); stroke-width: 1.3; stroke-dasharray: 6 4; }
+.oh-diagram svg .r-plan { fill: var(--oh-surface); stroke: var(--oh-plan); stroke-width: 1.3; stroke-dasharray: 6 4; }
+.oh-diagram svg .r-mod { fill: var(--oh-surface-2); stroke: none; }
+.oh-diagram svg .lbl-host { fill: var(--oh-host-stroke); }
+.oh-diagram svg .lbl-qemu { fill: var(--oh-qemu-stroke); }
+.oh-diagram svg .lbl-guest { fill: var(--oh-guest-stroke); }
+.oh-diagram svg .lbl-cmd { fill: var(--oh-cmd-stroke); }
+.oh-diagram svg .lbl-plan { fill: var(--oh-plan); }
+.oh-diagram svg .lbl-accent { fill: var(--oh-accent); }
+.oh-diagram svg .ln { stroke: var(--oh-text); stroke-width: 1.5; fill: none; }
+.oh-diagram svg .ln-accent { stroke: var(--oh-accent); stroke-width: 2; fill: none; }
+.oh-diagram svg .ln-muted { stroke: var(--oh-muted); stroke-width: 1.4; fill: none; }
+.oh-diagram svg .ln-dash { stroke-dasharray: 5 4; }
+.oh-diagram svg .life { stroke: var(--oh-border); stroke-width: 1.5; stroke-dasharray: 4 5; }
+.oh-diagram svg .band-a { fill: var(--oh-band-a); }
+.oh-diagram svg .band-b { fill: var(--oh-band-b); }
+.oh-diagram svg .loop { fill: none; stroke: var(--oh-muted); stroke-width: 1.2; }
+.oh-diagram svg .loop-tab { fill: var(--oh-surface-2); }
+.oh-diagram svg .ln-guest-msg { stroke: var(--oh-guest-stroke); stroke-width: 1.6; fill: none; }
+.oh-diagram svg .ln-host-msg { stroke: var(--oh-host-stroke); stroke-width: 1.6; fill: none; }
+.oh-diagram svg marker path { stroke: none; }
+.oh-diagram svg .ah path { fill: var(--oh-text); }
+.oh-diagram svg .ah-acc path, .oh-diagram svg .ah-host path { fill: var(--oh-host-stroke); }
+.oh-diagram svg .ah-mut path { fill: var(--oh-muted); }
+.oh-diagram svg .ah-guest path { fill: var(--oh-guest-stroke); }</style>
+  
+  <script>
+    (function () {
+      try {
+        var key = "__source_fetched_at";
+        var fetched = Number(sessionStorage.getItem(key) || 0);
+        if (Date.now() - fetched > 10 * 60 * 1000) {
+          sessionStorage.removeItem("__source");
+          sessionStorage.setItem(key, String(Date.now()));
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#how-it-works" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="oci-hermit" class="md-header__button md-logo" aria-label="oci-hermit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="380 380 1288 1288"><path class="oci-hermit-mark__shell" fill-rule="evenodd" d="M 540 400 L 1508 400 A 140 140 0 0 1 1648 540 L 1648 1508 A 140 140 0 0 1 1508 1648 L 540 1648 A 140 140 0 0 1 400 1508 L 400 540 A 140 140 0 0 1 540 400 z M 620 620 L 620 1428 L 1428 1428 L 1428 620 z"/><path class="oci-hermit-mark__door" d="M 904 1648 L 904 1180 A 120 120 0 0 1 1144 1180 L 1144 1648 z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            oci-hermit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              How it works
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/millsks/oci-hermit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    millsks/oci-hermit
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+                
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="oci-hermit" class="md-nav__button md-logo" aria-label="oci-hermit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="380 380 1288 1288"><path class="oci-hermit-mark__shell" fill-rule="evenodd" d="M 540 400 L 1508 400 A 140 140 0 0 1 1648 540 L 1648 1508 A 140 140 0 0 1 1508 1648 L 540 1648 A 140 140 0 0 1 400 1508 L 400 540 A 140 140 0 0 1 540 400 z M 620 620 L 620 1428 L 1428 1428 L 1428 620 z"/><path class="oci-hermit-mark__door" d="M 904 1648 L 904 1180 A 120 120 0 0 1 1144 1180 L 1144 1648 z"/></svg>
+
+    </a>
+    oci-hermit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/millsks/oci-hermit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    millsks/oci-hermit
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../when-to-use/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    When to use oci-hermit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Field manual
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Field manual
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/run-a-public-image/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run a public image and get a shell
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/private-registry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pull from a private registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/without-a-registry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bring images in without a registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/move-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Move images between machines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/image-store/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manage the image store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../no-admin/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run on a managed device
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choose a platform
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command-line reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-and-podman/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    oci-hermit, Docker and Podman
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-short-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The short version
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#components" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Components
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-happens-when-you-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What happens when you run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#isolation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Isolation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#no-network-on-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        No network, on purpose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-image-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The image store
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-control-protocol" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The control protocol
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-qemu-command-line" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The QEMU command line
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-changes-later" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What changes later
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance and limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <label class="md-nav__link" for="__nav_11" id="__nav_11_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../building-qemu/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building QEMU
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../building-guest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building the guest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+                
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" hidden>
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-short-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The short version
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#components" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Components
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-happens-when-you-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What happens when you run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#isolation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Isolation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#no-network-on-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        No network, on purpose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-image-store" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The image store
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-control-protocol" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The control protocol
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-qemu-command-line" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The QEMU command line
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-changes-later" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What changes later
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+  
+
+
+
+  
+    <a href="https://github.com/millsks/oci-hermit/edit/main/docs/how-it-works.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">&para;</a></h1>
+<p>This page describes what oci-hermit does today, and marks what is planned. The full design, including the parts not
+built yet, is in the <a href="../design/">design document</a>.</p>
+<h2 id="the-short-version">The short version<a class="headerlink" href="#the-short-version" title="Permanent link">&para;</a></h2>
+<p>Each <code>oci-hermit run</code> is one small virtual machine, started for that command and powered off when it ends:</p>
+<ol>
+<li><strong>On the host,</strong> oci-hermit finds the image: a local OCI layout or <code>.tar</code>, else an image in its store, else it
+   pulls the image from the registry. Every manifest, config and layer is checked against its sha256 digest.</li>
+<li>It applies the image's layers in memory, works out the user to run as from the image's own <code>/etc/passwd</code>, and
+   writes an initramfs: the guest agent as <code>/init</code>, and the image's files under <code>/rootfs</code>. Nothing is mounted and
+   nothing needs privileges.</li>
+<li>It starts the bundled QEMU as a normal child process, with a software CPU (<code>-accel tcg</code>), no network device and
+   no disks, and boots oci-hermit's own Linux kernel with that initramfs.</li>
+<li><strong>In the guest,</strong> the agent runs as PID 1. It mounts <code>/proc</code>, <code>/sys</code> and <code>/dev</code>, says it is ready, and waits for
+   instructions on a private serial channel.</li>
+<li>oci-hermit sends the command. The agent enters <code>/rootfs</code> with <code>chroot</code>, starts the command as the image's user,
+   and relays its input, output and exit code.</li>
+<li>When the command exits, oci-hermit asks the agent to power off, and exits with the command's exit code.</li>
+</ol>
+<h2 id="components">Components<a class="headerlink" href="#components" title="Permanent link">&para;</a></h2>
+<figure class="oh-diagram">
+<div class="oh-scroll">
+<svg viewBox="0 0 1000 760" role="img" aria-labelledby="oh-comp-title oh-comp-desc">
+<title id="oh-comp-title">oci-hermit components</title>
+<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a chroot as the image's user. A dashed box lists the planned parts: layer disks and overlayfs, crun, networking, bind mounts and an OS sandbox around QEMU.</desc>
+<defs>
+<marker id="oh-ah" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="oh-ah-acc" class="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="oh-ah-mut" class="ah-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+</defs>
+<rect class="r-host" x="10" y="10" width="410" height="740" rx="12"/>
+<text x="26" y="34" class="t lbl-host">HOST &#183; your user account, no root, no admin</text>
+<rect class="r-host-box" x="30" y="46" width="370" height="34" rx="6"/>
+<text x="44" y="68" class="mono">$ oci-hermit run -it IMAGE CMD</text>
+<rect class="r-host-box" x="30" y="92" width="116" height="46" rx="6"/>
+<text x="88" y="111" text-anchor="middle" class="b">images</text>
+<text x="88" y="128" text-anchor="middle" class="m small">store, .tar or dir</text>
+<rect class="r-host-box" x="157" y="92" width="116" height="46" rx="6"/>
+<text x="215" y="111" text-anchor="middle" class="b">QEMU bundle</text>
+<text x="215" y="128" text-anchor="middle" class="m small">qemu-system-*</text>
+<rect class="r-host-box" x="284" y="92" width="116" height="46" rx="6"/>
+<text x="342" y="111" text-anchor="middle" class="b">guest dir</text>
+<text x="342" y="128" text-anchor="middle" class="m small">kernel + agent</text>
+<path class="ln-muted" d="M88,138 V151" marker-end="url(#oh-ah-mut)"/>
+<path class="ln-muted" d="M215,138 V151" marker-end="url(#oh-ah-mut)"/>
+<path class="ln-muted" d="M342,138 V151" marker-end="url(#oh-ah-mut)"/>
+<rect class="r-host-box" x="30" y="152" width="370" height="452" rx="10"/>
+<text x="44" y="173" class="b">oci-hermit &#183; Rust host tool</text>
+<rect class="r-mod" x="42" y="182" width="346" height="28" rx="5"/>
+<text x="54" y="201" class="mono b">cli.rs</text><text x="166" y="201" class="m">clap; Docker-style commands</text>
+<rect class="r-mod" x="42" y="214" width="346" height="28" rx="5"/>
+<text x="54" y="233" class="mono b">main.rs</text><text x="166" y="233" class="m">dispatch; run; machine boot, info</text>
+<rect class="r-mod" x="42" y="246" width="346" height="28" rx="5"/>
+<text x="54" y="265" class="mono b">registry.rs</text><text x="166" y="265" class="m">pull on the host; logins</text>
+<rect class="r-mod" x="42" y="278" width="346" height="28" rx="5"/>
+<text x="54" y="297" class="mono b">load.rs</text><text x="166" y="297" class="m">load -i: docker save, OCI</text>
+<rect class="r-mod" x="42" y="310" width="346" height="28" rx="5"/>
+<text x="54" y="329" class="mono b">store.rs</text><text x="166" y="329" class="m">image store (OCI layout), lock</text>
+<rect class="r-mod" x="42" y="342" width="346" height="28" rx="5"/>
+<text x="54" y="361" class="mono b">images.rs</text><text x="166" y="361" class="m">images, rmi, inspect, tag, save</text>
+<rect class="r-mod" x="42" y="374" width="346" height="28" rx="5"/>
+<text x="54" y="393" class="mono b">image.rs</text><text x="166" y="393" class="m">manifest per arch; sha256 checks</text>
+<rect class="r-mod" x="42" y="406" width="346" height="28" rx="5"/>
+<text x="54" y="425" class="mono b">rootfs.rs</text><text x="166" y="425" class="m">apply layers in memory</text>
+<rect class="r-mod" x="42" y="438" width="346" height="28" rx="5"/>
+<text x="54" y="457" class="mono b">users.rs</text><text x="166" y="457" class="m">User from the image's /etc/passwd</text>
+<rect class="r-mod" x="42" y="470" width="346" height="28" rx="5"/>
+<text x="54" y="489" class="mono b">qemu.rs</text><text x="166" y="489" class="m">locate + verify the bundle</text>
+<rect class="r-mod" x="42" y="502" width="346" height="28" rx="5"/>
+<text x="54" y="521" class="mono b">guest.rs</text><text x="166" y="521" class="m">kernel + agent per arch</text>
+<rect class="r-mod" x="42" y="534" width="346" height="28" rx="5"/>
+<text x="54" y="553" class="mono b">initramfs.rs</text><text x="166" y="553" class="m">newc cpio, no privileges</text>
+<rect class="r-mod" x="42" y="566" width="346" height="28" rx="5"/>
+<text x="54" y="585" class="mono b">supervisor.rs</text><text x="166" y="585" class="m">QEMU argv, Sandbox, protocol</text>
+<path class="ln-muted" d="M30,63 H20 V196 H40" marker-end="url(#oh-ah-mut)"/>
+<rect class="r-box" x="30" y="622" width="370" height="114" rx="8"/>
+<rect class="r-mod" x="42" y="632" width="104" height="58" rx="5"/>
+<text x="94" y="655" text-anchor="middle" class="mono b">initrd.cpio</text>
+<text x="94" y="675" text-anchor="middle" class="m small">/init + /rootfs</text>
+<rect class="r-mod" x="164" y="632" width="104" height="58" rx="5"/>
+<text x="216" y="655" text-anchor="middle" class="mono b">console.log</text>
+<text x="216" y="675" text-anchor="middle" class="m small">serial console</text>
+<rect class="r-mod" x="286" y="632" width="104" height="58" rx="5"/>
+<text x="338" y="655" text-anchor="middle" class="mono b">qemu.log</text>
+<text x="338" y="675" text-anchor="middle" class="m small">QEMU stderr</text>
+<text x="44" y="718" class="mono m">$TMPDIR/oci-hermit/sandbox-&lt;pid&gt;-&lt;ns&gt;/</text>
+<path class="ln-muted" d="M94,604 V631" marker-end="url(#oh-ah-mut)"/>
+<path class="ln-accent" d="M388,580 H446 V97 H499" marker-start="url(#oh-ah-acc)" marker-end="url(#oh-ah-acc)"/>
+<text transform="translate(463 340) rotate(-90)" text-anchor="middle" class="b small lbl-accent">stdin / stdout pipes &#183; NDJSON</text>
+<path class="ln-muted" d="M400,656 H479" marker-end="url(#oh-ah-mut)"/>
+<text x="440" y="649" text-anchor="middle" class="mono small m">-initrd</text>
+<path class="ln-muted ln-dash" d="M479,706 H401" marker-end="url(#oh-ah-mut)"/>
+<text x="440" y="699" text-anchor="middle" class="small m">logs</text>
+<rect class="r-qemu" x="480" y="10" width="510" height="740" rx="12"/>
+<text x="496" y="34" class="t lbl-qemu">QEMU helper &#183; separate GPL-2.0 process</text>
+<text x="496" y="54" class="mono small m">-accel tcg -nodefaults -no-user-config -display none</text>
+<rect class="r-qemu-box" x="500" y="68" width="232" height="60" rx="6"/>
+<text x="512" y="88" class="b">virtio-serial port</text>
+<text x="512" y="105" class="mono small">org.oci-hermit.control</text>
+<text x="512" y="121" class="m small">chardev stdio, signal=off</text>
+<rect class="r-qemu-box" x="748" y="68" width="222" height="60" rx="6"/>
+<text x="760" y="88" class="b">serial console</text>
+<text x="760" y="105" class="mono small">ttyS0 / ttyAMA0</text>
+<text x="760" y="121" class="m small">chardev file &#8594; console.log</text>
+<rect class="r-guest" x="500" y="142" width="470" height="396" rx="10"/>
+<text x="740" y="163" text-anchor="middle" class="b lbl-guest">guest VM &#183; microvm (x86_64) / virt (aarch64)</text>
+<rect class="r-guest-box" x="620" y="174" width="240" height="52" rx="6"/>
+<text x="740" y="195" text-anchor="middle" class="b">Linux 6.18 LTS kernel</text>
+<text x="740" y="214" text-anchor="middle" class="m small">tinyconfig + fragments, no modules</text>
+<rect class="r-guest-box" x="520" y="238" width="430" height="140" rx="8"/>
+<text x="534" y="260" class="b">hermit-agent &#183; PID 1 (/init) &#183; static glibc</text>
+<text x="534" y="282" class="small">&#8226; mounts /proc, /sys, /dev, /dev/pts, /run, /tmp</text>
+<text x="534" y="301" class="small">&#8226; signalfd (TERM, INT, CHLD) + poll on the control port</text>
+<text x="534" y="320" class="small">&#8226; Framer: lines &#8804; 64 KiB; bad input gets an error reply</text>
+<text x="534" y="339" class="small">&#8226; one Run per sandbox; relays I/O; reaps children</text>
+<text x="534" y="358" class="small">&#8226; never exits: sync, then reboot(POWER_OFF)</text>
+<path class="ln-accent" d="M580,128 V237" marker-start="url(#oh-ah-acc)" marker-end="url(#oh-ah-acc)"/>
+<path class="ln-muted" d="M910,238 V129" marker-end="url(#oh-ah-mut)"/>
+<rect class="r-chroot" x="520" y="392" width="430" height="134" rx="8"/>
+<text x="534" y="412" class="b lbl-cmd small">chroot /rootfs &#183; image files held in initramfs RAM</text>
+<rect class="r-cmd" x="540" y="424" width="396" height="92" rx="6"/>
+<text x="554" y="444" class="b">container command</text>
+<text x="554" y="464" class="small">posix_spawn, empty sigmask, own process group</text>
+<text x="554" y="482" class="small">-t: pty, setsid, tcsetpgrp &#183; otherwise 3 pipes</text>
+<text x="554" y="500" class="small">as the image's User, or -u (protocol 1.2)</text>
+<path class="ln" d="M910,378 V423" marker-end="url(#oh-ah)"/>
+<text x="902" y="408" text-anchor="end" class="mono small">Run</text>
+<rect class="r-plan" x="500" y="556" width="470" height="176" rx="8"/>
+<text x="514" y="578" class="b lbl-plan small">PLANNED &#183; not in the code yet</text>
+<text x="514" y="602" class="small"><tspan class="mono b">M2</tspan>  EROFS layer disks (virtio-blk, ro), overlayfs root (#16, #17)</text>
+<text x="514" y="624" class="small"><tspan class="mono b">M3</tspan>  crun, OCI runtime bundles, namespaces, cgroups (#21)</text>
+<text x="514" y="646" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
+<text x="514" y="668" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
+<text x="514" y="690" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
+<text x="514" y="716" class="small m">Today the VM has no network device and no disks.</text>
+</svg>
+</div>
+<figcaption>The green arrows are the control channel. oci-hermit holds QEMU's stdin and stdout as an anonymous pipe pair, QEMU's <code>-chardev stdio</code> connects them to the virtio-serial port, and the agent finds the port through <code>/sys/class/virtio-ports</code>. Nothing on the filesystem or the network can reach it. QEMU must never print to stdout, so its diagnostics go to <code>qemu.log</code>. Registry pulls, logins and digest checks all happen in the host tool; the guest never sees a registry or a credential.</figcaption>
+</figure>
+
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Host tool</td>
+<td><code>oci-hermit</code>, one Rust binary. The only process you start. It reads images, talks to registries, builds the initramfs and supervises QEMU.</td>
+</tr>
+<tr>
+<td>QEMU</td>
+<td>The bundled emulator (<code>qemu/</code> in the package), started as a separate process. oci-hermit builds it itself, with only the two guest targets and no hypervisor accelerators, and refuses any other QEMU: its <code>--version</code> must be exactly <code>11.1.3 (oci-hermit-qemu-4)</code> and it must offer the <code>tcg</code> accelerator. See <a href="../building-qemu/">Building QEMU</a>.</td>
+</tr>
+<tr>
+<td>Guest kernel</td>
+<td>Linux 6.18 LTS, built by the project from <code>tinyconfig</code> plus a short list of options. x86_64 guests use QEMU's <code>microvm</code> machine; aarch64 guests use <code>virt</code>. See <a href="../building-guest/">Building the guest</a>.</td>
+</tr>
+<tr>
+<td>Guest agent</td>
+<td><code>hermit-agent</code>, a static Rust binary that runs as PID 1. It never exits: on a shutdown request or any fatal error it syncs and powers the VM off.</td>
+</tr>
+<tr>
+<td>Control protocol</td>
+<td>Newline-delimited JSON over the virtio-serial port <code>org.oci-hermit.control</code>, at most 64 KiB a line. Version 1.2.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="what-happens-when-you-run">What happens when you run<a class="headerlink" href="#what-happens-when-you-run" title="Permanent link">&para;</a></h2>
+<figure class="oh-diagram">
+<div class="oh-scroll">
+<svg viewBox="0 0 1000 905" role="img" aria-labelledby="oh-seq-title oh-seq-desc">
+<title id="oh-seq-title">Sequence of oci-hermit run -it</title>
+<desc id="oh-seq-desc">Prepare on the host: choose the architecture, locate QEMU, find or pull the image with digest checks, locate the guest, apply the layers and resolve the user, write the initramfs. Boot QEMU, then the Hello and Ready handshake. Run and Started, a loop of Stdin and Output, Exited. Then Shutdown and ShuttingDown, and the guest powers off.</desc>
+<defs>
+<marker id="oh-ah2" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="oh-ah-host" class="ah-host" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="oh-ah-guest" class="ah-guest" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
+</defs>
+<rect class="band-a" x="0" y="66" width="1000" height="230"/>
+<rect class="band-b" x="0" y="300" width="1000" height="152"/>
+<rect class="band-a" x="0" y="456" width="1000" height="282"/>
+<rect class="band-b" x="0" y="742" width="1000" height="160"/>
+<text x="992" y="84" text-anchor="end" class="mono small m">PREPARE</text>
+<text x="992" y="318" text-anchor="end" class="mono small m">BOOT</text>
+<text x="992" y="474" text-anchor="end" class="mono small m">COMMAND</text>
+<text x="992" y="760" text-anchor="end" class="mono small m">STOP</text>
+<line class="life" x1="70" y1="58" x2="70" y2="895"/>
+<line class="life" x1="225" y1="58" x2="225" y2="895"/>
+<line class="life" x1="390" y1="58" x2="390" y2="895"/>
+<line class="life" x1="560" y1="58" x2="560" y2="895"/>
+<line class="life" x1="730" y1="58" x2="730" y2="895"/>
+<line class="life" x1="905" y1="58" x2="905" y2="895"/>
+<rect class="r-box" x="10" y="12" width="120" height="46" rx="6"/>
+<text x="70" y="33" text-anchor="middle" class="b">you</text><text x="70" y="50" text-anchor="middle" class="m small">terminal</text>
+<rect class="r-host" x="160" y="12" width="130" height="46" rx="6"/>
+<text x="225" y="33" text-anchor="middle" class="b">oci-hermit</text><text x="225" y="50" text-anchor="middle" class="m small">main + supervisor</text>
+<rect class="r-host-box" x="325" y="12" width="130" height="46" rx="6"/>
+<text x="390" y="33" text-anchor="middle" class="b">host files</text><text x="390" y="50" text-anchor="middle" class="m small">bundle, guest, store</text>
+<rect class="r-qemu" x="495" y="12" width="130" height="46" rx="6"/>
+<text x="560" y="33" text-anchor="middle" class="b">QEMU (TCG)</text><text x="560" y="50" text-anchor="middle" class="m small">helper process</text>
+<rect class="r-guest" x="665" y="12" width="130" height="46" rx="6"/>
+<text x="730" y="33" text-anchor="middle" class="b">hermit-agent</text><text x="730" y="50" text-anchor="middle" class="m small">PID 1</text>
+<rect class="r-cmd" x="845" y="12" width="120" height="46" rx="6"/>
+<text x="905" y="33" text-anchor="middle" class="b">command</text><text x="905" y="50" text-anchor="middle" class="m small">chroot /rootfs</text>
+<line class="ln" x1="70" y1="92" x2="223" y2="92" marker-end="url(#oh-ah2)"/>
+<text x="147" y="86" text-anchor="middle" class="mono small halo">run -it IMAGE CMD</text>
+<path class="ln" d="M225,114 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
+<text x="262" y="125" class="small halo">arch: --platform, else the host's (then the other one, with a warning)</text>
+<line class="ln" x1="225" y1="152" x2="388" y2="152" marker-end="url(#oh-ah2)"/>
+<text x="307" y="146" text-anchor="middle" class="mono small halo">qemu::locate</text>
+<text x="400" y="156" class="small m halo">$OCI_HERMIT_QEMU_DIR, then the install layouts beside oci-hermit</text>
+<line class="ln" x1="225" y1="182" x2="388" y2="182" marker-end="url(#oh-ah2)"/>
+<text x="307" y="176" text-anchor="middle" class="mono small halo">open_image</text>
+<text x="400" y="186" class="small m halo">a path, else a stored name or ID, else pulled; every blob checked against its digest</text>
+<line class="ln" x1="225" y1="212" x2="388" y2="212" marker-end="url(#oh-ah2)"/>
+<text x="307" y="206" text-anchor="middle" class="mono small halo">verify, guest::locate</text>
+<text x="400" y="216" class="small m halo">"11.1.3 (oci-hermit-qemu-4)", tcg; &lt;arch&gt;/kernel and &lt;arch&gt;/hermit-agent</text>
+<path class="ln" d="M225,234 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
+<text x="262" y="245" class="small halo">rootfs(): layers in order; whiteouts, opaque dirs; ".." refused; User from /etc/passwd</text>
+<path class="ln" d="M225,264 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
+<text x="262" y="275" class="small halo">initrd.cpio = agent as /init + /dev/console + /rootfs; RAM = 256 MiB + 2 x image (min 512)</text>
+<line class="ln" x1="225" y1="324" x2="558" y2="324" marker-end="url(#oh-ah2)"/>
+<text x="392" y="318" text-anchor="middle" class="small halo">spawn qemu-system-&lt;arch&gt;; stdin/stdout piped, stderr &#8594; qemu.log</text>
+<line class="ln" x1="560" y1="352" x2="728" y2="352" marker-end="url(#oh-ah2)"/>
+<text x="644" y="346" text-anchor="middle" class="small halo">boot kernel, exec /init</text>
+<path class="ln" d="M730,368 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
+<text x="766" y="379" class="small halo">mounts, open port, "ready"</text>
+<line class="ln-host-msg" x1="225" y1="410" x2="728" y2="410" marker-end="url(#oh-ah-host)"/>
+<text x="476" y="404" text-anchor="middle" class="mono small b halo">Hello {version: [1,2]}</text>
+<line class="ln-guest-msg" x1="730" y1="438" x2="227" y2="438" marker-end="url(#oh-ah-guest)"/>
+<text x="476" y="432" text-anchor="middle" class="mono small b halo">Ready {version: [1,2]}</text>
+<text x="740" y="442" class="small m halo">major must match; host waits up to 120 s</text>
+<path class="ln" d="M225,478 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
+<text x="262" y="489" class="small halo">raw mode (-t on a terminal); stdin reader thread (-i)</text>
+<line class="ln-host-msg" x1="225" y1="516" x2="728" y2="516" marker-end="url(#oh-ah-host)"/>
+<text x="476" y="510" text-anchor="middle" class="mono small b halo">Run {argv, env, cwd, tty, rows, cols, user}</text>
+<line class="ln" x1="730" y1="542" x2="903" y2="542" marker-end="url(#oh-ah2)"/>
+<text x="817" y="536" text-anchor="middle" class="small halo">chroot; posix_spawn as the user</text>
+<line class="ln-guest-msg" x1="730" y1="568" x2="227" y2="568" marker-end="url(#oh-ah-guest)"/>
+<text x="476" y="562" text-anchor="middle" class="mono small b halo">Started {pid}</text>
+<text x="740" y="572" class="small m halo">within 60 s</text>
+<rect class="loop" x="40" y="584" width="900" height="122" rx="4"/>
+<rect class="loop-tab" x="40" y="584" width="150" height="20" rx="3"/>
+<text x="48" y="599" class="mono small">loop until exit</text>
+<line class="ln" x1="70" y1="620" x2="223" y2="620" marker-end="url(#oh-ah2)"/>
+<text x="147" y="614" text-anchor="middle" class="small halo">stdin bytes</text>
+<line class="ln-host-msg" x1="225" y1="646" x2="728" y2="646" marker-end="url(#oh-ah-host)"/>
+<text x="476" y="640" text-anchor="middle" class="mono small b halo">Stdin {data}  (base64, &#8804; 16 KiB raw)</text>
+<line class="ln" x1="730" y1="646" x2="903" y2="646" marker-end="url(#oh-ah2)"/>
+<text x="817" y="640" text-anchor="middle" class="small halo">pty / pipe</text>
+<line class="ln" x1="905" y1="672" x2="732" y2="672" marker-end="url(#oh-ah2)"/>
+<text x="817" y="666" text-anchor="middle" class="small halo">output</text>
+<line class="ln-guest-msg" x1="730" y1="672" x2="227" y2="672" marker-end="url(#oh-ah-guest)"/>
+<text x="476" y="666" text-anchor="middle" class="mono small b halo">Output {stream, data}</text>
+<line class="ln" x1="225" y1="696" x2="72" y2="696" marker-end="url(#oh-ah2)"/>
+<text x="147" y="690" text-anchor="middle" class="small halo">stdout / stderr</text>
+<line class="ln" x1="905" y1="726" x2="732" y2="726" marker-end="url(#oh-ah2)"/>
+<text x="817" y="720" text-anchor="middle" class="small halo">exit &#8594; SIGCHLD, reap</text>
+<line class="ln-guest-msg" x1="730" y1="726" x2="227" y2="726" marker-end="url(#oh-ah-guest)"/>
+<text x="476" y="720" text-anchor="middle" class="mono small b halo">Exited {code}</text>
+<line class="ln-host-msg" x1="225" y1="770" x2="728" y2="770" marker-end="url(#oh-ah-host)"/>
+<text x="476" y="764" text-anchor="middle" class="mono small b halo">Shutdown</text>
+<line class="ln-guest-msg" x1="730" y1="796" x2="227" y2="796" marker-end="url(#oh-ah-guest)"/>
+<text x="476" y="790" text-anchor="middle" class="mono small b halo">ShuttingDown</text>
+<text x="740" y="800" class="small m halo">within 30 s, else QEMU is killed</text>
+<path class="ln" d="M730,814 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
+<text x="766" y="825" class="small halo">sync; reboot(RB_POWER_OFF)</text>
+<line class="ln ln-dash" x1="730" y1="852" x2="562" y2="852" marker-end="url(#oh-ah2)"/>
+<text x="644" y="846" text-anchor="middle" class="small halo">power off; QEMU exits</text>
+<line class="ln" x1="225" y1="880" x2="72" y2="880" marker-end="url(#oh-ah2)"/>
+<text x="235" y="884" class="small halo">exit with the command's code (125 if oci-hermit itself fails)</text>
+</svg>
+</div>
+<figcaption>Green: host to guest. Blue: guest to host. Without <code>-i</code>, the host sends <code>StdinClosed</code> right after <code>Started</code>; with <code>-i</code> it sends it when your stdin reaches end of file. With a terminal (<code>-t</code>), all output arrives as stdout and the terminal stays open. The terminal size is sent once, in <code>Run</code>; resizing the window afterwards is not passed on yet. Set <code>OCI_HERMIT_TIMINGS=1</code> to print how long prepare, boot, command and stop took.</figcaption>
+</figure>
+
+<h2 id="isolation">Isolation<a class="headerlink" href="#isolation" title="Permanent link">&para;</a></h2>
+<p>The security boundary is the emulator process. Guest code never runs directly on your CPU: QEMU translates every
+instruction, and the guest can touch only the devices QEMU gives it. The layers, outermost first:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Today</th>
+<th>Planned</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OS sandbox around QEMU</td>
+<td><strong>None yet.</strong> QEMU runs as you, with your file access.</td>
+<td>seccomp and Landlock on Linux, App Sandbox on macOS, an AppContainer or low-integrity token on Windows (<a href="https://github.com/millsks/oci-hermit/issues/38">#38</a>).</td>
+</tr>
+<tr>
+<td>Process lifetime</td>
+<td>QEMU ends when oci-hermit does: <code>-run-with exit-with-parent=on</code> on Linux and macOS, a kill-on-close Job Object on Windows.</td>
+<td></td>
+</tr>
+<tr>
+<td>Software CPU</td>
+<td>TCG only. The bundle is built without KVM, HVF, WHPX or Xen, and any other QEMU is refused.</td>
+<td></td>
+</tr>
+<tr>
+<td>Device model</td>
+<td><code>-nodefaults</code>: one serial console and one virtio-serial port. No network card, disks, USB, display or sound.</td>
+<td>Read-only layer disks (<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>), one restricted network card (<a href="https://github.com/millsks/oci-hermit/issues/26">#26</a>), a file channel for bind mounts (<a href="https://github.com/millsks/oci-hermit/issues/30">#30</a>).</td>
+</tr>
+<tr>
+<td>Network</td>
+<td><strong>Sealed.</strong> No network device at all: no way out and no way in.</td>
+<td>libslirp with <code>restrict=on</code> (<a href="https://github.com/millsks/oci-hermit/issues/26">#26</a>); <code>-p</code> bound to 127.0.0.1 only, even when <code>0.0.0.0</code> is asked for (<a href="https://github.com/millsks/oci-hermit/issues/27">#27</a>); an egress test suite (<a href="https://github.com/millsks/oci-hermit/issues/28">#28</a>).</td>
+</tr>
+<tr>
+<td>Control channel</td>
+<td>Anonymous pipes, no socket or file. Lines are capped at 64 KiB, anything that is not a message is refused, and every wait has a timeout: the host treats the guest as untrusted.</td>
+<td></td>
+</tr>
+<tr>
+<td>Image input</td>
+<td>Every manifest, config and layer is checked against its sha256 digest when it is pulled, stored and read. Paths that climb out with <code>..</code> are refused, device nodes are skipped.</td>
+<td>Signature verification with cosign or notation (<a href="https://github.com/millsks/oci-hermit/issues/42">#42</a>).</td>
+</tr>
+<tr>
+<td>Inside the guest</td>
+<td><code>chroot</code> into the image's files, run as the image's <code>User</code> (or <code>-u</code>). No namespaces or cgroups: the VM is the boundary.</td>
+<td>crun with namespaces and cgroups (<a href="https://github.com/millsks/oci-hermit/issues/21">#21</a>).</td>
+</tr>
+<tr>
+<td>Host code</td>
+<td>Rust, with <code>unsafe</code> code denied in the host crates; <code>cargo deny</code> checks advisories and licences; the QEMU and kernel sources are pinned by sha256.</td>
+<td>Code-signed Windows and macOS releases (<a href="https://github.com/millsks/oci-hermit/issues/39">#39</a>).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="no-network-on-purpose">No network, on purpose<a class="headerlink" href="#no-network-on-purpose" title="Permanent link">&para;</a></h2>
+<p>The sandbox has no network device. A command that tries to reach anything fails:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>run<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20<span class="w"> </span>wget<span class="w"> </span>-q<span class="w"> </span>-T<span class="w"> </span><span class="m">5</span><span class="w"> </span>-O-<span class="w"> </span>http://example.com
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="go">wget: bad address 'example.com'</span>
+</code></pre></div>
+<p>Pulls happen in the host tool, so the guest never sees a registry, a credential or a route out. An image that
+downloads things when it starts fails here, which shows it is not self-contained. Published ports, bound to
+<code>127.0.0.1</code> only, are planned (<a href="https://github.com/millsks/oci-hermit/issues/27">#27</a>); outbound access is not planned at all.</p>
+<h2 id="the-image-store">The image store<a class="headerlink" href="#the-image-store" title="Permanent link">&para;</a></h2>
+<p>Pulled and loaded images live in one <a href="https://github.com/opencontainers/image-spec/blob/main/image-layout.md">OCI image layout</a>
+in your data folder (see <a href="../configuration/#where-things-are-kept">Configuration</a>). Blobs are shared between images and
+written only after their digest checks out. Each image is an entry in the layout's <code>index.json</code>, named by its full
+reference (<code>docker.io/library/alpine:latest</code>) and its platform; an image loaded without a name goes by its image ID.</p>
+<p><code>pull</code>, <code>load</code> and <code>run</code> share the store and can run side by side. <code>rmi</code> and <code>image prune</code> delete blobs, so they need
+the store to themselves and refuse to start while another oci-hermit is reading it.</p>
+<h2 id="the-control-protocol">The control protocol<a class="headerlink" href="#the-control-protocol" title="Permanent link">&para;</a></h2>
+<p>One JSON object per line, tagged by <code>type</code>. A different major version is refused; a newer minor version only adds
+messages or fields.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"hello"</span><span class="p">,</span><span class="nt">"version"</span><span class="p">:[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">]}</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"run"</span><span class="p">,</span><span class="nt">"argv"</span><span class="p">:[</span><span class="s2">"sh"</span><span class="p">],</span><span class="nt">"env"</span><span class="p">:[</span><span class="s2">"PATH=/usr/bin:/bin"</span><span class="p">,</span><span class="s2">"TERM=xterm-256color"</span><span class="p">],</span><span class="nt">"cwd"</span><span class="p">:</span><span class="s2">"/"</span><span class="p">,</span><span class="nt">"tty"</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">"rows"</span><span class="p">:</span><span class="mi">40</span><span class="p">,</span><span class="nt">"cols"</span><span class="p">:</span><span class="mi">120</span><span class="p">}</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"output"</span><span class="p">,</span><span class="nt">"stream"</span><span class="p">:</span><span class="s2">"stdout"</span><span class="p">,</span><span class="nt">"data"</span><span class="p">:</span><span class="s2">"aGkK"</span><span class="p">}</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"exited"</span><span class="p">,</span><span class="nt">"code"</span><span class="p">:</span><span class="mi">0</span><span class="p">}</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Direction</th>
+<th><code>type</code></th>
+<th>Since</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>host to agent</td>
+<td><code>hello</code></td>
+<td>1.0</td>
+<td>First message on the channel, with the host's protocol version.</td>
+</tr>
+<tr>
+<td>host to agent</td>
+<td><code>shutdown</code></td>
+<td>1.0</td>
+<td>Sync filesystems and power the guest off.</td>
+</tr>
+<tr>
+<td>host to agent</td>
+<td><code>run</code></td>
+<td>1.1</td>
+<td>Start one command: <code>argv</code>, <code>env</code>, <code>cwd</code>, <code>tty</code>, and the terminal's <code>rows</code> and <code>cols</code>. <code>user</code> (uid, gid, groups) since 1.2. One per session.</td>
+</tr>
+<tr>
+<td>host to agent</td>
+<td><code>stdin</code></td>
+<td>1.1</td>
+<td>Bytes for the command's stdin, base64, at most 16 KiB raw per message.</td>
+</tr>
+<tr>
+<td>host to agent</td>
+<td><code>stdin_closed</code></td>
+<td>1.1</td>
+<td>The host's stdin reached end of file.</td>
+</tr>
+<tr>
+<td>agent to host</td>
+<td><code>ready</code></td>
+<td>1.0</td>
+<td>Reply to a compatible <code>hello</code>.</td>
+</tr>
+<tr>
+<td>agent to host</td>
+<td><code>shutting_down</code></td>
+<td>1.0</td>
+<td>Reply to <code>shutdown</code>, before the power-off.</td>
+</tr>
+<tr>
+<td>agent to host</td>
+<td><code>error</code></td>
+<td>1.0</td>
+<td>A refused or failed message.</td>
+</tr>
+<tr>
+<td>agent to host</td>
+<td><code>started</code></td>
+<td>1.1</td>
+<td>The command started, with its PID.</td>
+</tr>
+<tr>
+<td>agent to host</td>
+<td><code>output</code></td>
+<td>1.1</td>
+<td>Output, base64, on <code>stdout</code> or <code>stderr</code>. With a terminal everything is <code>stdout</code>.</td>
+</tr>
+<tr>
+<td>agent to host</td>
+<td><code>exited</code></td>
+<td>1.1</td>
+<td>The exit status, or 128 plus the signal that killed the command.</td>
+</tr>
+</tbody>
+</table>
+<p>The host sends a <code>user</code> only to an agent that speaks 1.2 or later, because an older agent would ignore it and run the
+command as root. <code>oci-hermit version</code> prints the protocol version the host speaks.</p>
+<h2 id="the-qemu-command-line">The QEMU command line<a class="headerlink" href="#the-qemu-command-line" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-accel tcg</code></td>
+<td>Software CPU emulation only. Never KVM, HVF, WHPX or Hyper-V.</td>
+</tr>
+<tr>
+<td><code>-nodefaults -no-user-config -display none -no-reboot</code></td>
+<td>The smallest device set, no host config files, no display. A guest reboot or panic ends QEMU.</td>
+</tr>
+<tr>
+<td><code>-machine microvm -cpu Haswell-v4,…</code></td>
+<td>x86_64 guests. The agent's static glibc needs an x86-64-v3 CPU; <code>qemu64</code> would stop it with SIGILL.</td>
+</tr>
+<tr>
+<td><code>-machine virt -cpu max</code></td>
+<td>aarch64 guests.</td>
+</tr>
+<tr>
+<td><code>-m &lt;MiB&gt; -smp &lt;cpus&gt;</code></td>
+<td>Memory and CPUs: see <a href="../performance/#memory-and-cpus">Performance and limits</a>.</td>
+</tr>
+<tr>
+<td><code>-run-with exit-with-parent=on</code></td>
+<td>Linux and macOS only. On Windows a Job Object does the same job.</td>
+</tr>
+<tr>
+<td><code>-chardev file,… -serial chardev:console</code></td>
+<td>The guest console goes to <code>console.log</code>, for people; oci-hermit never parses it.</td>
+</tr>
+<tr>
+<td><code>-chardev stdio,…,signal=off</code> and a <code>virtserialport</code> named <code>org.oci-hermit.control</code></td>
+<td>The control channel on QEMU's stdin and stdout. <code>signal=off</code>, so a byte is never taken as Ctrl-C.</td>
+</tr>
+<tr>
+<td><code>-append "console=ttyS0 panic=-1 tsc_early_khz=1000000"</code> or <code>"console=ttyAMA0 panic=-1"</code></td>
+<td>The kernel command line. The x86_64 guest's clock runs at a fixed 1 GHz on every host, and the kernel is told so.</td>
+</tr>
+<tr>
+<td>no <code>-netdev</code>, no <code>-drive</code></td>
+<td>No network device and no disks.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="what-changes-later">What changes later<a class="headerlink" href="#what-changes-later" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Layer disks</strong> (<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>): today the whole image is copied into the initramfs, so the guest needs about twice the
+  image's size in RAM. Read-only EROFS disks per layer, cached by digest, with an overlayfs root, replace that.</li>
+<li><strong>crun</strong> (<a href="https://github.com/millsks/oci-hermit/issues/21">#21</a>) replaces <code>chroot</code> and adds namespaces and cgroups inside the guest.</li>
+<li><strong>Containers that outlive a command</strong> (<a href="https://github.com/millsks/oci-hermit/issues/20">#20</a>, <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>): <code>run -d</code>, <code>exec</code>, <code>logs</code>, <code>ps</code>, <code>stop</code>, <code>rm</code>.</li>
+<li><strong>Networking</strong> (<a href="https://github.com/millsks/oci-hermit/issues/26">#26</a> to <a href="https://github.com/millsks/oci-hermit/issues/29">#29</a>) and <strong>bind mounts</strong> (<a href="https://github.com/millsks/oci-hermit/issues/30">#30</a> to <a href="https://github.com/millsks/oci-hermit/issues/34">#34</a>), with the defaults described in
+  <a href="../docker-and-podman/">oci-hermit, Docker and Podman</a>.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+  
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+        
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../configuration/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Configuration">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Configuration
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../performance/" class="md-footer__link md-footer__link--next" aria-label="Next: Performance and limits">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Performance and limits
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Apache-2.0 licensed
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/millsks/oci-hermit" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "search.highlight", "search.suggest", "content.code.copy", "content.action.edit", "content.tabs.link"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>
