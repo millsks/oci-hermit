@@ -17,7 +17,7 @@ mod store;
 mod supervisor;
 mod users;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
@@ -160,12 +160,36 @@ fn format_timings(phases: &[(&str, Duration)], total: Duration) -> String {
     line
 }
 
+/// The name oci-hermit was started as, for its help text: `hrmt` (#44), else `oci-hermit`.
+fn invoked_name(argv0: Option<&std::ffi::OsStr>) -> &'static str {
+    let stem = argv0.and_then(|a| std::path::Path::new(a).file_stem());
+    if stem.is_some_and(|s| s.eq_ignore_ascii_case("hrmt")) {
+        "hrmt"
+    } else {
+        "oci-hermit"
+    }
+}
+
+/// This executable, through any symlink (a `hrmt` link put in `~/bin`, say), so `qemu/` and `guest/` are found
+/// beside the real file. Windows paths stay as they are: canonical ones there take the `\\?\` form, which QEMU's
+/// options do not expect, and the Windows package ships `hrmt.exe` as a copy, not a link.
+fn real_exe(exe: std::io::Result<PathBuf>) -> PathBuf {
+    let exe = exe.unwrap_or_default();
+    if cfg!(unix) {
+        exe.canonicalize().unwrap_or(exe)
+    } else {
+        exe
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = cli::Cli::parse();
+    let name = invoked_name(std::env::args_os().next().as_deref());
+    let matches = cli::Cli::command().name(name).bin_name(name).get_matches();
+    let cli = cli::Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let env = Env {
         qemu_dir: std::env::var_os(qemu::DIR_ENV),
         guest_dir: std::env::var_os(guest::DIR_ENV),
-        exe: std::env::current_exe().unwrap_or_default(),
+        exe: real_exe(std::env::current_exe()),
         run_base: std::env::temp_dir().join("oci-hermit"),
         timings: std::env::var_os(TIMINGS_ENV).is_some_and(|v| !v.is_empty() && v != "0"),
         data_dir: store::data_dir(std::env::var_os(store::DIR_ENV), |name| std::env::var_os(name)),
@@ -1009,7 +1033,8 @@ mod tests {
     use super::*;
 
     fn run_with(env: &Env, args: &[&str]) -> (u8, String, String) {
-        let cli = cli::Cli::try_parse_from(std::iter::once("oci-hermit").chain(args.iter().copied())).unwrap();
+        let cli = <cli::Cli as clap::Parser>::try_parse_from(std::iter::once("oci-hermit").chain(args.iter().copied()))
+            .unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = run(&cli.command, env, &mut out, &mut err);
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
@@ -1047,6 +1072,35 @@ mod tests {
             confirm: || false,
             ask: |_| Err(std::io::Error::other("no terminal in tests")),
         }
+    }
+
+    #[test]
+    fn the_help_uses_the_name_it_was_started_as() {
+        use std::ffi::OsStr;
+        assert_eq!(invoked_name(Some(OsStr::new("/opt/bin/hrmt"))), "hrmt");
+        assert_eq!(invoked_name(Some(OsStr::new("HRMT.EXE"))), "hrmt");
+        assert_eq!(invoked_name(Some(OsStr::new("/usr/bin/oci-hermit"))), "oci-hermit");
+        assert_eq!(invoked_name(Some(OsStr::new(""))), "oci-hermit");
+        assert_eq!(invoked_name(None), "oci-hermit");
+        let help = cli::Cli::command()
+            .name("hrmt")
+            .bin_name("hrmt")
+            .render_help()
+            .to_string();
+        assert!(help.contains("Usage: hrmt <COMMAND>"), "{help}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_executable_is_found_through_a_symlink() {
+        let dir = qemu::testing::scratch("main-real-exe");
+        std::fs::write(dir.join("oci-hermit"), "").unwrap();
+        let elsewhere = dir.join("bin");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(dir.join("oci-hermit"), elsewhere.join("hrmt")).unwrap();
+        let real = real_exe(Ok(elsewhere.join("hrmt")));
+        assert_eq!(real, dir.join("oci-hermit").canonicalize().unwrap());
+        assert_eq!(real_exe(Err(std::io::Error::other("none"))), PathBuf::new());
     }
 
     #[test]

@@ -1,0 +1,297 @@
+name: Release
+
+# Builds a release from a version tag (v0.1.0): the guest kernel and agent for both architectures, then one
+# ready-to-run package per host (packaging/package.py) with QEMU built from source, each unpacked and booted before it
+# is kept; the corresponding source for every GPL and LGPL part (packaging/sources.py); SHA256SUMS; and release notes
+# from git-cliff. Nothing comes from CI caches or artifacts, so a release never depends on them.
+#
+# Pull requests that change the release build run everything except publishing. A tag whose version is below 1.0.0
+# or has a pre-release suffix (-rc.1) is published as a pre-release. Pushing the tag is the maintainer's decision.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - cliff.toml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag=${GITHUB_REF_NAME#v}
+            if [ "$tag" != "$crate" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match the crate version $crate (Cargo.toml)"
+              exit 1
+            fi
+            version=$tag
+            publish=true
+          else
+            version="$crate-dev.${GITHUB_SHA::7}"
+            publish=false
+          fi
+          prerelease=false
+          if [[ "$version" == *-* || "$version" == 0.* ]]; then prerelease=true; fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "oci-hermit $version (pre-release: $prerelease, publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+
+  guest:
+    name: Guest (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          environments: kernel-build agent package
+          cache: true
+      - name: Build the kernel
+        run: pixi run -e kernel-build kernel-build "${{ matrix.arch }}" "guest/out/${{ matrix.arch }}"
+      - name: Build the agent
+        run: pixi run -e agent agent-build
+      - name: Assemble the guest with its licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch=${{ matrix.arch }}
+          dest="guest/release/$arch"
+          image=$(sed -n 's/^image=//p' "guest/out/$arch/BUNDLE.txt")
+          mkdir -p "$dest"
+          cp "guest/out/$arch/$image" "$dest/kernel"
+          cp "guest/out/$arch/config" "$dest/config"
+          cp "target/$arch-unknown-linux-gnu/release/hermit-agent" "$dest/hermit-agent"
+          cp -R "guest/out/$arch/licenses" "$dest/licenses"
+          pixi run -e package python -I packaging/licenses.py glibc "$dest" "$PWD/.pixi/envs/agent"
+          ls -lR "$dest"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-guest-${{ matrix.arch }}
+          path: guest/release
+          retention-days: 7
+          if-no-files-found: error
+
+  package:
+    name: Package (${{ matrix.host }})
+    needs: [version, guest]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { host: win-64, os: windows-latest }
+          - { host: osx-arm64, os: macos-latest }
+          - { host: osx-64, os: macos-15-intel }
+          - { host: linux-64, os: ubuntu-latest }
+          - { host: linux-aarch64, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          environments: ${{ runner.os == 'Windows' && 'default package' || 'default qemu-build package' }}
+          cache: true
+      - if: runner.os != 'Windows'
+        name: Build QEMU
+        run: pixi run -e qemu-build qemu-build
+      - if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            diffutils
+            patch
+            tar
+            xz
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-dtc
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-setuptools
+            mingw-w64-ucrt-x86_64-python-wheel
+      - if: runner.os == 'Windows'
+        name: Build QEMU (MSYS2)
+        shell: msys2 {0}
+        run: |
+          python -m pip install --break-system-packages "qemu.qmp==0.0.6"
+          bash qemu/build.sh qemu/out
+      - name: Fetch the guests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-guest-*
+          merge-multiple: true
+          path: guests
+      - name: Build oci-hermit
+        run: pixi run cargo build --release --locked -p oci-hermit
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=oci-hermit$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          pixi run -e package python -I packaging/package.py --host "${{ matrix.host }}" \
+            --version "${{ needs.version.outputs.version }}" --exe "target/release/$exe" --qemu qemu/out \
+            --guest guests --out dist
+          ls -l dist
+      # What a user does: unpack into an empty folder, then run it with no settings, under both names.
+      - name: Unpack and boot the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          check=$(mktemp -d)
+          name="oci-hermit-${{ needs.version.outputs.version }}-${{ matrix.host }}"
+          if [ "$RUNNER_OS" = Windows ]; then
+            unzip -q "dist/$name.zip" -d "$check"
+            exe=.exe
+          else
+            tar -xzf "dist/$name.tar.gz" -C "$check"
+            exe=
+          fi
+          dir="$check/oci-hermit"
+          ls -l "$dir"
+          unset OCI_HERMIT_QEMU_DIR OCI_HERMIT_GUEST_DIR
+          "$dir/oci-hermit$exe" version | grep -q "^oci-hermit ${{ needs.version.outputs.version }} "
+          "$dir/hrmt$exe" --help | grep -q "^Usage: hrmt "
+          "$dir/oci-hermit$exe" machine info
+          for arch in x86_64 aarch64; do "$dir/hrmt$exe" machine boot --arch "$arch" --timeout 600; done
+          for part in "  qemu 11" "  linux " "  sysroot_linux" "Rust crates in oci-hermit"; do
+            grep -q "^$part" "$dir/THIRD-PARTY-LICENSES" || { echo "::error::THIRD-PARTY-LICENSES lacks '$part'"; exit 1; }
+          done
+          test -s "$dir/LICENSE" && test -s "$dir/README.txt"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-package-${{ matrix.host }}
+          path: dist/oci-hermit-*
+          retention-days: 7
+          if-no-files-found: error
+
+  sources:
+    name: Corresponding source
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          environments: package
+          cache: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-package-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-guest-*
+          merge-multiple: true
+          path: guests
+      - name: Fetch every GPL and LGPL source the packages name
+        run: pixi run -e package python -I packaging/sources.py "${{ needs.version.outputs.version }}" dist guests sources
+      - name: Summary
+        shell: bash
+        run: |
+          tar -xOf sources/*-sources.tar SOURCES.md >> "$GITHUB_STEP_SUMMARY"
+          ls -l sources
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-sources
+          path: sources
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [version, package, sources]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the release and its assets
+      actions: write # start the docs deploy for this tag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # git-cliff reads the history since the previous tag
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          environments: package
+          cache: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+      - name: Checksums and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          rm -f ./*.sha256
+          sha256sum ./*.tar.gz ./*.zip ./*-sources.tar | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+          cd ..
+          pixi run -e package git-cliff --latest --strip header > notes.md
+          {
+            echo
+            echo "### Download"
+            echo
+            echo "One package per host, each with both guests, so any host runs amd64 and arm64 images:"
+            echo "\`win-64\` (.zip), \`osx-arm64\`, \`osx-64\`, \`linux-64\`, \`linux-aarch64\` (.tar.gz). Unpack it and run"
+            echo "\`oci-hermit\` (or \`hrmt\`) from the folder; see [Getting started](https://millsks.github.io/oci-hermit/getting-started/)."
+            echo "Binaries are not signed yet (#39): Windows SmartScreen and macOS Gatekeeper warn on first start."
+            echo
+            echo "\`oci-hermit-*-sources.tar\` is the corresponding source of the GPL and LGPL components the packages"
+            echo "bundle; \`THIRD-PARTY-LICENSES\` in each package lists every component and its license. \`SHA256SUMS\`"
+            echo "covers every file here."
+          } >> notes.md
+          cat notes.md
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          flags=()
+          [ "${{ needs.version.outputs.prerelease }}" = true ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" --verify-tag \
+            --title "oci-hermit ${{ needs.version.outputs.version }}" --notes-file notes.md \
+            assets/*.tar.gz assets/*.zip assets/*-sources.tar assets/*.sources.json assets/SHA256SUMS
+      # A release made with this workflow's token does not trigger other workflows, so the docs deploy for this tag is
+      # started here; docs.yml deploys the version a tag names.
+      - name: Publish the docs for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs.yml --ref main -f ref="$GITHUB_REF_NAME"

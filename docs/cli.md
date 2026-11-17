@@ -7,6 +7,10 @@ oci-hermit <COMMAND> [OPTIONS]
 Every command takes `-h` or `--help`. `oci-hermit --version` (or `-V`) prints the version. The commands follow Docker
 and Podman; the [deliberate differences](docker-and-podman.md) are on their own page.
 
+`hrmt` is the same program under a shorter name: every package has it beside `oci-hermit` (a symlink on Linux and
+macOS, a copy on Windows), and `hrmt --help` says `hrmt`. A `hrmt` link put elsewhere, such as `~/bin`, still finds
+the `qemu/` and `guest/` folders beside the real file.
+
 | Command | What it does |
 | --- | --- |
 | [`run`](#run) | Run a command from an image in a new sandbox |
@@ -430,4 +434,3 @@ Not in the command line yet, and planned:
 | `container prune` | #82 |
 | `healthcheck run` | #83 |
 | `port` | #84 |
-| `hrmt`, a short name for `oci-hermit` | #44 |

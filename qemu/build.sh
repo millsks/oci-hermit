@@ -5,6 +5,7 @@
 #   <out>/lib/            shared libraries it needs (Linux and macOS)
 #   <out>/bin/*.dll       DLLs it needs (Windows)
 #   <out>/share/qemu/     the firmware microvm boots with
+#   <out>/share/licenses/ QEMU's and each bundled library's license, and SOURCES.json (where their source is)
 #   <out>/BUNDLE.txt      what was built and from what
 #
 # The patches in qemu/patches/ (GPL-2.0-or-later, like QEMU) are applied to the release sources first.
@@ -208,6 +209,10 @@ bundle_libs() {
   esac
 }
 bundle_libs
+
+# The license of QEMU and of every library just bundled, and the source each was built from, for the release's
+# THIRD-PARTY-LICENSES and its source archives (packaging/licenses.py). Fails if a library's license is not known.
+python -I "$(cd "$(dirname "$0")/.." && pwd)/packaging/licenses.py" qemu "$out" "$src" "$patches_dir"
 
 {
   echo "qemu_version=$QEMU_VERSION"

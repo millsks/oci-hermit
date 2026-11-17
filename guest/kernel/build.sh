@@ -110,6 +110,30 @@ mkdir -p "$out"
 cp "$build/$image" "$out/"
 cp "$build/.config" "$out/config"
 name=$(basename "$image")
+
+# The kernel's license (COPYING points at LICENSES/preferred/GPL-2.0 and the syscall note) and where its source is,
+# for the release's THIRD-PARTY-LICENSES and source archives (see packaging/licenses.py for the format).
+mkdir -p "$out/licenses/linux/LICENSES/preferred" "$out/licenses/linux/LICENSES/exceptions"
+cp "$src/COPYING" "$out/licenses/linux/COPYING"
+cp "$src/LICENSES/preferred/GPL-2.0" "$out/licenses/linux/LICENSES/preferred/GPL-2.0"
+cp "$src/LICENSES/exceptions/Linux-syscall-note" "$out/licenses/linux/LICENSES/exceptions/Linux-syscall-note"
+cat > "$out/licenses/SOURCES.json" << EOF
+[
+  {
+    "name": "linux",
+    "version": "$KERNEL_VERSION",
+    "license": "GPL-2.0-only WITH Linux-syscall-note",
+    "from": "https://kernel.org, built with this kernel's config (config, beside the image)",
+    "sources": [
+      {
+        "url": "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/linux-${KERNEL_VERSION}.tar.xz",
+        "sha256": "$KERNEL_SHA256"
+      }
+    ],
+    "patches": []
+  }
+]
+EOF
 {
   echo "kernel_version=$KERNEL_VERSION"
   echo "kernel_sha256=$KERNEL_SHA256"
