@@ -107,7 +107,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 
 **Emulator (bundled QEMU, TCG mode).** A helper process launched by the host tool. oci-hermit builds it itself, TCG-only, and refuses any other QEMU ([qemu/README.md](../qemu/README.md)).
 
-- `microvm` machine type, virtio devices only: block disks, one network card, serial channels, console.
+- `microvm` machine type for x86_64 guests and `virt` for aarch64 ones, virtio devices only: block disks, one network card, serial channels, console.
 - Multi-threaded TCG so a sandbox can have several vCPUs.
 - Emulates x86-64 or arm64 guests on any host, so `--platform` works everywhere.
 
