@@ -16,7 +16,9 @@ limit=${4:-300}
 case "$arch" in
   x86_64)
     cmd=("$qemu/bin/qemu-system-x86_64" -L "$qemu/share/qemu" -M microvm)
-    console="console=ttyS0 earlyprintk=serial,ttyS0"
+    # The bundled QEMU's TSC runs at 1 GHz on every host; without being told, the kernel calibrates it against the
+    # PIT, which fails under TCG on a slow host and leaves microvm with no clock (#61), as the supervisor knows.
+    console="console=ttyS0 earlyprintk=serial,ttyS0 tsc_early_khz=1000000"
     ;;
   aarch64)
     cmd=("$qemu/bin/qemu-system-aarch64" -M virt -cpu max)

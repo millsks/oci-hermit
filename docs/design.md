@@ -165,7 +165,8 @@ Commands mirror Docker and Podman so existing habits carry over. `oci-hermit` is
 # Images (host side)
 oci-hermit pull ghcr.io/org/app:1.2
 oci-hermit load -i app.tar            # docker-archive or OCI layout
-oci-hermit images | rmi | inspect | image prune
+oci-hermit images | rmi | inspect | tag | save | image prune | image history | image exists
+oci-hermit system df
 
 # Containers
 oci-hermit run -it --rm alpine sh

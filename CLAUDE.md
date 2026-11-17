@@ -16,6 +16,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
 | `crates/oci-hermit/src/image.rs` | reads an OCI image layout (directory or `.tar`): manifest for the guest arch, config, layers; checks every blob against its sha256 digest |
 | `crates/oci-hermit/src/store.rs` | the image store: one OCI layout in the user's data folder (`$OCI_HERMIT_DATA_DIR`), images named by full reference and platform |
+| `crates/oci-hermit/src/images.rs` | `images`, `rmi`, `inspect`, `tag`, `save`, `image prune`/`history`/`exists`, `system df` over the store; `find` resolves names, references and ID prefixes for every command including `run` |
 | `crates/oci-hermit/src/load.rs` | `load -i`: OCI layouts (dir or `.tar`, every platform) and `docker save` archives (old and Docker 25+) into the store; unnamed images go by ID |
 | `crates/oci-hermit/src/registry.rs` | `pull` over oci-client (reqwest, rustls with ring): Podman/Docker auth files and credential helpers, `$OCI_HERMIT_INSECURE_REGISTRIES` for plain HTTP |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
@@ -74,6 +75,11 @@ Everything runs through pixi.
 - `run` is the M1 spike: the image's files go into the initramfs under `/rootfs` (so the guest needs about twice
   the image's size in RAM) and the agent chroots there with the command. EROFS layer disks (#16, #17) and crun (#21)
   replace both.
+- The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
+  store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs, and it fails fast with `Busy`
+  rather than wait. A pull writes blobs before naming them, so garbage collection without the exclusive lock would
+  delete a pull in progress. `run` keeps its shared store until the rootfs is read, then drops it. `index.json`
+  changes go through `Store::update` under `index.lock`.
 - Every blob is verified against its digest when pulled, stored and read (#14); a mismatch is an error, never a
   warning. reqwest is built without a crypto provider and `registry::pull` installs ring: aws-lc-rs needs CMake and
   NASM on some hosts. Pulls happen in the host tool only.

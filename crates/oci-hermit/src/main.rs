@@ -6,6 +6,7 @@
 mod cli;
 mod guest;
 mod image;
+mod images;
 mod initramfs;
 mod load;
 mod qemu;
@@ -48,6 +49,15 @@ struct Env {
     data_dir_from_env: bool,
     /// Auth files and plain-HTTP registries for pulls.
     registry: registry::Settings,
+    /// Reads a yes or no after a question has been printed, for `image prune`.
+    confirm: fn() -> bool,
+}
+
+/// A yes from stdin: `y` or `yes`, in any case.
+fn confirm_on_stdin() -> bool {
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).is_ok() && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// How long each phase of `run` took, in order.
@@ -100,6 +110,7 @@ fn main() -> ExitCode {
         data_dir: store::data_dir(std::env::var_os(store::DIR_ENV), |name| std::env::var_os(name)),
         data_dir_from_env: std::env::var_os(store::DIR_ENV).is_some_and(|d| !d.is_empty()),
         registry: registry::Settings::from_env(|name| std::env::var_os(name)),
+        confirm: confirm_on_stdin,
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
 }
@@ -111,7 +122,20 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
             let _ = writeln!(out, "{}", version_line());
             0
         }
-        cli::Command::Machine(cli::MachineCommand::Info) => machine_info(env, out, err),
+        cli::Command::Machine(cli::MachineCommand::Info) | cli::Command::Info => machine_info(env, out, err),
+        cli::Command::Images(_)
+        | cli::Command::Rmi(_)
+        | cli::Command::Inspect(_)
+        | cli::Command::Tag(_)
+        | cli::Command::Save(_)
+        | cli::Command::Image(_)
+        | cli::Command::System(_) => match image_command(command, env, out, err) {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         cli::Command::Machine(cli::MachineCommand::Boot(args)) => machine_boot(args, env, out, err),
         cli::Command::Run(args) => run_container(args, env, out, err),
         cli::Command::Load { input } => match open_store(env).map_err(Into::into).and_then(|store| {
@@ -331,6 +355,88 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     status
 }
 
+/// The image commands (`images`, `rmi`, `inspect`, `tag`, `save`, `image ...`, `system df`).
+fn image_command(
+    command: &cli::Command,
+    env: &Env,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<u8, Box<dyn std::error::Error>> {
+    use cli::{Command as C, ImageCommand as I};
+    let exclusive = || -> Result<store::Store, Box<dyn std::error::Error>> {
+        let dir = env.data_dir.as_ref().ok_or_else(no_data_dir)?;
+        store::Store::open_exclusive(dir)
+    };
+    match command {
+        C::Images(args) | C::Image(I::Ls(args)) => {
+            let options = images::ListOptions {
+                reference: args.reference.as_deref(),
+                quiet: args.quiet,
+                digests: args.digests,
+                no_trunc: args.no_trunc,
+            };
+            images::list(&open_store(env)?, &options, images::now(), out)?;
+        }
+        C::Rmi(args) | C::Image(I::Rm(args)) => {
+            if !images::remove(&exclusive()?, &args.images, args.force, out, err)? {
+                return Ok(1);
+            }
+        }
+        C::Inspect(args) | C::Image(I::Inspect(args)) => {
+            let (objects, missing) = images::inspect(&open_store(env)?, &args.images)?;
+            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&objects)?);
+            for name in &missing {
+                let _ = writeln!(err, "oci-hermit: no such image: {name}");
+            }
+            if !missing.is_empty() {
+                return Ok(1);
+            }
+        }
+        C::Tag(args) | C::Image(I::Tag(args)) => images::tag(&open_store(env)?, &args.source, &args.target)?,
+        C::Save(args) | C::Image(I::Save(args)) => images::save(
+            &open_store(env)?,
+            &args.images,
+            args.platform.as_deref(),
+            std::path::Path::new(&args.output),
+        )?,
+        C::Image(I::Prune { all, force }) => {
+            if !force {
+                let what = if *all {
+                    "all images"
+                } else {
+                    "all images loaded without a name"
+                };
+                let _ = write!(
+                    out,
+                    "WARNING! This will remove {what}.\nAre you sure you want to continue? [y/N] "
+                );
+                if !(env.confirm)() {
+                    let _ = writeln!(out);
+                    return Ok(0);
+                }
+            }
+            images::prune(&exclusive()?, *all, out)?;
+        }
+        C::Image(I::History { no_trunc, quiet, image }) => {
+            images::history(&open_store(env)?, image, *no_trunc, *quiet, images::now(), out)?
+        }
+        C::Image(I::Exists { image }) => {
+            if !images::exists(&open_store(env)?, image)? {
+                return Ok(1);
+            }
+        }
+        C::System(cli::SystemCommand::Df) => {
+            let store = match &env.data_dir {
+                Some(dir) if dir.join("images").is_dir() => Some(store::Store::open(dir)?),
+                _ => None,
+            };
+            images::disk_usage(store.as_ref(), out)?;
+        }
+        _ => unreachable!("only image commands come here"),
+    }
+    Ok(0)
+}
+
 /// `machine boot`: boot a sandbox until its agent is ready, then stop it.
 fn machine_boot(args: &cli::BootArgs, env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     let Some(arch) = args.arch.or_else(qemu::GuestArch::host) else {
@@ -405,13 +511,15 @@ fn guest_arch(platform: Option<&str>) -> Result<qemu::GuestArch, String> {
     }
 }
 
+fn no_data_dir() -> String {
+    format!(
+        "cannot tell where to keep images: no home folder; set {}",
+        store::DIR_ENV
+    )
+}
+
 fn open_store(env: &Env) -> Result<store::Store, String> {
-    let dir = env.data_dir.as_ref().ok_or_else(|| {
-        format!(
-            "cannot tell where to keep images: no home folder; set {}",
-            store::DIR_ENV
-        )
-    })?;
+    let dir = env.data_dir.as_ref().ok_or_else(no_data_dir)?;
     store::Store::open(dir).map_err(|e| format!("the image store in {}: {e}", dir.display()))
 }
 
@@ -437,13 +545,14 @@ fn pull_image(
 
 /// The image `run` names, for `requested` or, without `--platform`, for the host's architecture or else the other
 /// one (as Docker runs an image built for another platform under emulation): a local layout or archive, else a name
-/// or ID in the store, else pulled. Returns the image and the guest architecture it needs.
+/// or ID in the store, else pulled. Returns the image, the guest architecture it needs, and the store it came from:
+/// holding that keeps `rmi` from deleting its blobs before they are read.
 fn open_image(
     name: &str,
     requested: Option<qemu::GuestArch>,
     env: &Env,
     err: &mut impl Write,
-) -> Result<(image::Image, qemu::GuestArch), Box<dyn std::error::Error>> {
+) -> Result<(image::Image, qemu::GuestArch, Option<store::Store>), Box<dyn std::error::Error>> {
     let choices = match requested {
         Some(arch) => vec![arch],
         None => {
@@ -467,7 +576,7 @@ fn open_image(
             match image::Image::open(&path, arch) {
                 Ok(image) => {
                     fall_back(arch, err);
-                    return Ok((image, arch));
+                    return Ok((image, arch, None));
                 }
                 Err(image::ImageError::NoPlatform { .. }) if i + 1 < choices.len() => {}
                 Err(e) => return Err(e.into()),
@@ -475,25 +584,30 @@ fn open_image(
         }
     }
     let store = open_store(env)?;
-    // The name exactly as stored (an image ID from `load`, say), then as Docker spells it out.
-    let reference = registry::normalize(name);
-    let mut names = vec![name.to_string()];
-    names.extend(reference.as_ref().ok().map(oci_client::Reference::whole));
-    for &arch in &choices {
-        for stored in &names {
-            if store.has(stored, "linux", image::oci_arch(arch)) {
+    // A stored name, the name as Docker spells it out, or an image ID or a prefix of one.
+    let stored: Vec<images::Stored> = store
+        .entries()?
+        .iter()
+        .filter_map(|e| images::read(&store, e).ok())
+        .collect();
+    if let Ok((found, _)) = images::find(&stored, name) {
+        for &arch in &choices {
+            let wanted = image::oci_arch(arch);
+            if let Some(i) = found.iter().find(|i| i.entry.os == "linux" && i.entry.arch == wanted) {
                 fall_back(arch, err);
-                return Ok((image::Image::open_named(store.path(), Some(stored), arch)?, arch));
+                let image = image::Image::open_named(store.path(), Some(&i.entry.name), arch)?;
+                return Ok((image, arch, Some(store)));
             }
         }
     }
-    let reference = reference?;
+    let reference = registry::normalize(name)?;
     let _ = writeln!(err, "Unable to find image '{name}' locally");
     for (i, &arch) in choices.iter().enumerate() {
         match registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, err) {
             Ok(pulled) => {
                 fall_back(arch, err);
-                return Ok((image::Image::open_named(store.path(), Some(&pulled.name), arch)?, arch));
+                let image = image::Image::open_named(store.path(), Some(&pulled.name), arch)?;
+                return Ok((image, arch, Some(store)));
             }
             Err(registry::PullError::NoPlatform(_)) if i + 1 < choices.len() => {}
             Err(e) => return Err(e.into()),
@@ -596,10 +710,11 @@ fn run_in_sandbox(
     };
     // The bundle first: without it nothing runs, so there is no point pulling an image.
     let bundle = qemu::locate(&qemu::candidates(env.qemu_dir.clone(), &env.exe))?;
-    let (image, arch) = open_image(&args.image, requested, env, err)?;
+    let (image, arch, store) = open_image(&args.image, requested, env, err)?;
     qemu::verify(&bundle, arch)?;
     let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
     let rootfs = image.rootfs()?;
+    drop(store);
     let user_spec = args.user.as_deref().or(image.config.user.as_deref()).unwrap_or("");
     let identity = users::resolve(user_spec, &rootfs)?;
     let argv = image.config.argv(&args.command);
@@ -731,6 +846,7 @@ mod tests {
             data_dir: Some(dir.join("data")),
             data_dir_from_env: true,
             registry: registry::Settings::default(),
+            confirm: || false,
         }
     }
 
@@ -746,6 +862,7 @@ mod tests {
             data_dir: Some(bundle.join("data")),
             data_dir_from_env: true,
             registry: registry::Settings::default(),
+            confirm: || false,
         }
     }
 
@@ -782,6 +899,8 @@ mod tests {
             "{out}"
         );
         assert!(err.contains("no bundled QEMU found"));
+        // `info` is the same report, under Podman's name.
+        assert_eq!(run_with(&no_qemu("main-none-3"), &["info"]), (code, out, err));
     }
 
     #[cfg(unix)]
@@ -840,7 +959,7 @@ mod tests {
         let x86 = guest.join("x86_64");
         assert!(
             out.contains(&format!(
-                "  x86_64:     {} (kernel 0.0 kB, agent 0.0 kB, from OCI_HERMIT_GUEST_DIR)",
+                "  x86_64:     {} (kernel 6 B, agent 5 B, from OCI_HERMIT_GUEST_DIR)",
                 x86.display()
             )),
             "{out}"
@@ -851,7 +970,7 @@ mod tests {
             out.contains("  images:     2 images under 1 name (one per name and platform)"),
             "{out}"
         );
-        assert!(out.contains("  size:       0.0 kB"), "{out}");
+        assert!(out.contains("  size:       2 B"), "{out}");
         assert!(
             out.contains(&format!(
                 "    1. [not set]   $REGISTRY_AUTH_FILE\n    2. [not found] {}\n    3. [found]     $HERE = {}\n",
@@ -862,6 +981,92 @@ mod tests {
         );
         assert!(out.contains("  plain http: localhost:5000 (from OCI_HERMIT_INSECURE_REGISTRIES)"));
         assert!(out.contains(&format!("  run dir:    {}", env.run_base.display())));
+    }
+
+    #[test]
+    fn image_commands_work_on_the_store() {
+        let env = no_qemu("main-images");
+        let store = store::Store::open(env.data_dir.as_ref().unwrap()).unwrap();
+        images::testing::add(&store, "example.com/app:1", "amd64", images::testing::CONFIG);
+        drop(store);
+
+        let (code, out, err) = run_with(&env, &["images"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("example.com/app   1"), "{out}");
+        let (code, out, _) = run_with(&env, &["image", "ls", "-q"]);
+        assert_eq!((code, out.lines().count()), (0, 1));
+
+        assert_eq!(run_with(&env, &["tag", "example.com/app:1", "example.com/app:2"]).0, 0);
+        assert_eq!(run_with(&env, &["image", "exists", "example.com/app:2"]).0, 0);
+        assert_eq!(run_with(&env, &["image", "exists", "example.com/app:3"]).0, 1);
+
+        let (code, out, err) = run_with(&env, &["inspect", "example.com/app:2", "nope"]);
+        assert_eq!(code, 1);
+        assert!(out.starts_with("[\n  {\n    \"Id\": \"sha256:"), "{out}");
+        assert!(err.contains("no such image: nope"));
+
+        let (code, out, _) = run_with(&env, &["image", "history", "example.com/app:1"]);
+        assert_eq!(code, 0);
+        assert!(out.starts_with("IMAGE"));
+
+        let saved = env.data_dir.as_ref().unwrap().join("app.tar");
+        let saved = saved.to_str().unwrap();
+        assert_eq!(run_with(&env, &["save", "-o", saved, "example.com/app:1"]).0, 0);
+        let (code, _, err) = run_with(&env, &["image", "save", "-o", saved, "nope"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no such image: nope"));
+
+        let (code, out, _) = run_with(&env, &["system", "df"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("Images       1"), "{out}");
+
+        // Prune asks first; the test's answer is no.
+        let (code, out, _) = run_with(&env, &["image", "prune", "-a"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("This will remove all images."), "{out}");
+        assert_eq!(run_with(&env, &["image", "exists", "example.com/app:1"]).0, 0);
+
+        let (code, out, _) = run_with(&env, &["rmi", "example.com/app:2", "nope"]);
+        assert_eq!(code, 1);
+        assert!(out.contains("Untagged: example.com/app:2"));
+        let (code, out, _) = run_with(&env, &["image", "prune", "-a", "-f"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("untagged: example.com/app:1"), "{out}");
+        assert!(out.contains("Total reclaimed space"));
+
+        // While another oci-hermit has the store open, nothing is deleted.
+        let held = store::Store::open(env.data_dir.as_ref().unwrap()).unwrap();
+        let (code, _, err) = run_with(&env, &["image", "rm", "x"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("in use by another oci-hermit"), "{err}");
+        drop(held);
+    }
+
+    #[test]
+    fn image_commands_need_somewhere_to_keep_images() {
+        let env = Env {
+            data_dir: None,
+            ..no_qemu("main-images-none")
+        };
+        let (code, out, _) = run_with(&env, &["system", "df"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("Images       0"), "{out}");
+        for args in [&["images"][..], &["rmi", "x"], &["image", "prune", "-f"]] {
+            let (code, _, err) = run_with(&env, args);
+            assert_eq!(code, 1, "{args:?}");
+            assert!(err.contains("no home folder"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn prune_goes_ahead_when_confirmed() {
+        let env = Env {
+            confirm: || true,
+            ..no_qemu("main-images-yes")
+        };
+        let (code, out, _) = run_with(&env, &["image", "prune"]);
+        assert_eq!(code, 0);
+        assert!(out.ends_with("Total reclaimed space: 0 B\n"), "{out}");
     }
 
     #[cfg(unix)]
