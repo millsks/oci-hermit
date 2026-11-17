@@ -16,11 +16,13 @@ $ oci-hermit pull --platform linux/amd64 public.ecr.aws/docker/library/alpine:3.
 Status: pulled public.ecr.aws/docker/library/alpine:3.20 for linux/amd64
 ```
 
-Then save it. `save` writes every platform stored under the name, unless `--platform` picks one:
+Optionally give it the name you want it to have on the other side, then save it. `save` writes every platform
+stored under the name, unless `--platform` picks one:
 
 ```bash
-oci-hermit save -o alpine.tar public.ecr.aws/docker/library/alpine:3.20
-oci-hermit save --platform linux/amd64 -o alpine-amd64.tar public.ecr.aws/docker/library/alpine:3.20
+oci-hermit tag public.ecr.aws/docker/library/alpine:3.20 mine/alpine:test
+oci-hermit save -o alpine.tar mine/alpine:test
+oci-hermit save --platform linux/amd64 -o alpine-amd64.tar mine/alpine:test
 ```
 
 Several names can go in one archive: `oci-hermit save -o bundle.tar app:1.2 db:16`.
@@ -58,9 +60,8 @@ $ oci-hermit run mine/alpine:test cat /etc/alpine-release
 3.20.10
 ```
 
-The image keeps its name, so `run` finds it without going to the registry. That example used an image tagged
-`mine/alpine:test` before saving; names without a registry are Docker Hub names, as in Docker, so
-`mine/alpine:test` is `docker.io/mine/alpine:test`.
+Both platforms arrived, and the image keeps its name, so `run` finds it without going to the registry. A name
+without a registry is a Docker Hub name, as in Docker, so `mine/alpine:test` is `docker.io/mine/alpine:test`.
 
 !!! tip "Carry every platform you will run"
 
