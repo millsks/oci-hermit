@@ -385,7 +385,7 @@ Print the version and the control protocol version the host speaks.
 
 ```console
 $ oci-hermit version
-oci-hermit 0.0.0 (control protocol 1.2)
+oci-hermit 0.1.0 (control protocol 1.2)
 ```
 
 ## Exit codes
