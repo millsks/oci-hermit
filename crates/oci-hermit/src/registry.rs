@@ -442,7 +442,9 @@ fn check_arch(reference: &Reference, arch: &str, config: &[u8]) -> Result<(), Pu
 pub(crate) fn size(bytes: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     let mb = bytes as f64 / 1_000_000.0;
-    if mb >= 1.0 {
+    if bytes < 1000 {
+        format!("{bytes} B")
+    } else if mb >= 1.0 {
         format!("{mb:.1} MB")
     } else {
         format!("{:.1} kB", mb * 1000.0)
@@ -925,5 +927,7 @@ mod tests {
         assert!(normalize("Not A Reference").is_err());
         assert_eq!(size(1_500_000), "1.5 MB");
         assert_eq!(size(1_500), "1.5 kB");
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(999), "999 B");
     }
 }

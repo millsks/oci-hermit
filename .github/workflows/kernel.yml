@@ -318,7 +318,44 @@ jobs:
             echo "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      # #15: what `docker save` writes, loaded offline and run by name. Only the Ubuntu runners have Docker.
+      # #18: the image commands on the pulled image: tag, save, remove, load back, run by short ID.
+      - name: Manage the pulled image
+        shell: bash
+        env:
+          OCI_HERMIT_DATA_DIR: ${{ runner.temp }}/hermit-data
+        run: |
+          set -euo pipefail
+          hermit=target/release/oci-hermit
+          platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
+          image=public.ecr.aws/docker/library/debian:bookworm-slim
+          "$hermit" tag "$image" hermit-test/debian:1
+          listed=$("$hermit" images)
+          echo "$listed"
+          grep -q "^docker.io/hermit-test/debian .* $platform " <<< "$listed"
+          "$hermit" image exists hermit-test/debian:1
+          if "$hermit" image exists hermit-test/debian:2; then echo "::error::image exists said yes"; exit 1; fi
+          id=$("$hermit" images -q hermit-test/debian:1)
+          "$hermit" inspect "$id" | grep -q '"RepoTags"'
+          "$hermit" image history "$image" | head -3
+          "$hermit" save -o "$RUNNER_TEMP/debian-saved.tar" hermit-test/debian:1
+          "$hermit" rmi -f "$id"
+          if "$hermit" image exists "$id"; then echo "::error::rmi left $id"; exit 1; fi
+          "$hermit" system df
+          "$hermit" load -i "$RUNNER_TEMP/debian-saved.tar"
+          [ "$("$hermit" run --platform "$platform" "${id:0:6}" cat /etc/debian_version | tr -d '\r' | cut -d. -f1)" = 12 ]
+          {
+            echo
+            echo "### Image commands"
+            echo
+            echo '```console'
+            echo "$ oci-hermit images"
+            echo "$listed"
+            echo "$ oci-hermit save -o debian-saved.tar hermit-test/debian:1; oci-hermit rmi -f $id; oci-hermit load -i debian-saved.tar"
+            echo "$ oci-hermit run ${id:0:6} cat /etc/debian_version"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # #15: what `docker save` writes, loaded offline and run by name; and (#18) what `oci-hermit save` writes,
+      # loaded by Docker and Podman. Only the Ubuntu runners have both.
       - name: Load a docker save archive
         if: matrix.host == 'linux-64'
         shell: bash
@@ -340,6 +377,14 @@ jobs:
           out=$(target/release/oci-hermit run --platform "$platform" "$image" sh -c '. /etc/os-release; echo "$PRETTY_NAME"')
           echo "$out"
           grep -q '^Debian GNU/Linux 12' <<< "$out"
+
+          # #18, the other way: what `oci-hermit save` writes, read by Docker and Podman.
+          target/release/oci-hermit save -o "$RUNNER_TEMP/hermit-saved.tar" "$image"
+          docker rmi "$image"
+          docker load -i "$RUNNER_TEMP/hermit-saved.tar"
+          docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image" | grep -qx "$platform"
+          podman load -i "$RUNNER_TEMP/hermit-saved.tar"
+          podman image exists "$image"
           {
             echo
             echo "### Loaded from docker save"
@@ -350,6 +395,8 @@ jobs:
             echo "$loaded"
             echo "$ oci-hermit run --platform $platform $image sh -c '. /etc/os-release; echo \"\$PRETTY_NAME\"'"
             echo "$out"
+            echo "$ oci-hermit save -o hermit-saved.tar $image"
+            echo "$ docker load -i hermit-saved.tar; podman load -i hermit-saved.tar   # both succeed"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Measure the time to a shell

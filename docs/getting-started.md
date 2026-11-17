@@ -117,6 +117,32 @@ ready in 1 to 6 seconds (see [Measured start times](design.md#measured-start-tim
 `run` refuses the flags that are not implemented yet (`-d`, `--name`, `-p`, `-v`, `--pod`) instead of ignoring them.
 The [roadmap](../ROADMAP.md) says when they come.
 
+## Managing images
+
+The image commands work as in Podman and Docker. They only touch the image store, so they need no sandbox:
+
+```bash
+oci-hermit images                                 # or `image ls`; -q for IDs, --digests, --no-trunc
+oci-hermit tag alpine mine/alpine:test            # another name for the same image
+oci-hermit inspect alpine                         # config, layers and names as JSON
+oci-hermit image history alpine                   # the steps that built it
+oci-hermit image exists alpine && echo stored     # exit 0 if stored, 1 if not
+oci-hermit save -o alpine.tar alpine              # every platform stored; --platform for one
+oci-hermit rmi mine/alpine:test                   # removes the name; blobs go when nothing uses them
+oci-hermit image prune                            # images loaded without a name; -a for every image
+oci-hermit system df                              # how much space the store uses
+```
+
+- **Names and IDs:** images go by their full name (`docker.io/library/alpine:latest`; `alpine` means the same) or by
+  their image ID, the first few characters of which are enough. `run` takes the same names and IDs.
+- **Platforms:** an image pulled for both platforms shows up once per platform. `rmi` and `tag` act on every
+  platform under the name.
+- **Moving images:** `save` writes the format Docker 25 and later write: an OCI image layout with a `manifest.json`
+  beside it. `oci-hermit load`, `docker load`, `podman load` and skopeo all read it, so it carries images to another
+  machine with no registry in between.
+- **One at a time:** `rmi` and `image prune` refuse to run while another `pull`, `load` or `run` is reading the store,
+  so they never delete an image that is in use. Try again when it has finished.
+
 ## Where it keeps things
 
 | What | Windows | macOS | Linux |

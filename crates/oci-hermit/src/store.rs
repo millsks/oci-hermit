@@ -31,13 +31,87 @@ pub fn data_dir(override_dir: Option<OsString>, var: impl Fn(&str) -> Option<OsS
 }
 
 /// The image store in a data directory.
+///
+/// An open store holds a shared lock on `images/lock`, so commands that add to it or read from it (`pull`, `load`,
+/// `run`) can run side by side; [`Store::open_exclusive`] takes it alone, for commands that delete blobs.
 pub struct Store {
     dir: PathBuf,
+    _lock: std::fs::File,
 }
 
+/// One entry in `index.json`: a name for one platform's manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// The full reference, or the image ID for an image loaded without a name.
+    pub name: String,
+    pub os: String,
+    pub arch: String,
+    pub media_type: String,
+    /// The manifest's digest.
+    pub digest: String,
+    pub size: u64,
+}
+
+impl Entry {
+    fn from_json(m: &Value) -> Option<Entry> {
+        let text = |v: &Value| v.as_str().map(String::from);
+        Some(Entry {
+            name: text(&m["annotations"][REF_NAME])?,
+            os: text(&m["platform"]["os"]).unwrap_or_default(),
+            arch: text(&m["platform"]["architecture"]).unwrap_or_default(),
+            media_type: text(&m["mediaType"]).unwrap_or_default(),
+            digest: text(&m["digest"])?,
+            size: m["size"].as_u64().unwrap_or(0),
+        })
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "mediaType": self.media_type,
+            "digest": self.digest,
+            "size": self.size,
+            "platform": { "os": self.os, "architecture": self.arch },
+            "annotations": { REF_NAME: self.name },
+        })
+    }
+}
+
+/// Another oci-hermit is using the store, so blobs cannot be deleted now.
+#[derive(Debug)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the image store is in use by another oci-hermit (a pull, load or run); try again when it has finished"
+        )
+    }
+}
+
+impl std::error::Error for Busy {}
+
 impl Store {
-    /// The store under `data_dir`, created if it does not exist yet.
+    /// The store under `data_dir`, created if it does not exist yet, shared with other readers and writers.
     pub fn open(data_dir: &Path) -> std::io::Result<Store> {
+        let dir = Store::create(data_dir)?;
+        let lock = lock_file(&dir)?;
+        lock.lock_shared()?;
+        Ok(Store { dir, _lock: lock })
+    }
+
+    /// The store under `data_dir`, for this command alone; [`Busy`] if another oci-hermit has it open.
+    pub fn open_exclusive(data_dir: &Path) -> Result<Store, Box<dyn std::error::Error>> {
+        let dir = Store::create(data_dir)?;
+        let lock = lock_file(&dir)?;
+        match lock.try_lock() {
+            Ok(()) => Ok(Store { dir, _lock: lock }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(Box::new(Busy)),
+            Err(std::fs::TryLockError::Error(e)) => Err(Box::new(e)),
+        }
+    }
+
+    fn create(data_dir: &Path) -> std::io::Result<PathBuf> {
         let dir = data_dir.join("images");
         std::fs::create_dir_all(dir.join("blobs").join("sha256"))?;
         let layout = dir.join("oci-layout");
@@ -47,7 +121,7 @@ impl Store {
         if !dir.join("index.json").exists() {
             write_atomically(&dir.join("index.json"), br#"{"schemaVersion":2,"manifests":[]}"#)?;
         }
-        Ok(Store { dir })
+        Ok(dir)
     }
 
     /// The layout directory, for [`image::Image::open_named`].
@@ -97,37 +171,110 @@ impl Store {
         digest: &str,
         size: u64,
     ) -> Result<(), ImageError> {
+        let entry = Entry {
+            name: name.into(),
+            os: os.into(),
+            arch: arch.into(),
+            media_type: media_type.into(),
+            digest: digest.into(),
+            size,
+        };
+        self.update(|entries| {
+            entries.retain(|e| !(e.name == entry.name && e.os == entry.os && e.arch == entry.arch));
+            entries.push(entry);
+        })
+    }
+
+    /// Every entry in the store's index, in the order they were added.
+    pub fn entries(&self) -> Result<Vec<Entry>, ImageError> {
+        let index = self.index()?;
+        Ok(index["manifests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Entry::from_json)
+            .collect())
+    }
+
+    /// Removes the entries `remove` picks and returns them.
+    pub fn untag(&self, remove: impl Fn(&Entry) -> bool) -> Result<Vec<Entry>, ImageError> {
+        let mut removed = Vec::new();
+        self.update(|entries| {
+            let (gone, kept): (Vec<_>, Vec<_>) = entries.drain(..).partition(|e| remove(e));
+            *entries = kept;
+            removed = gone;
+        })?;
+        Ok(removed)
+    }
+
+    /// Changes the index's entries under `index.lock`, so two commands updating it at once both take effect.
+    fn update(&self, change: impl FnOnce(&mut Vec<Entry>)) -> Result<(), ImageError> {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("index.lock"))?;
+        lock.lock()?;
         let mut index = self.index()?;
-        let manifests = index["manifests"]
-            .as_array_mut()
-            .ok_or_else(|| ImageError::Invalid("store index.json has no manifests".into()))?;
-        manifests.retain(|m| {
-            !(m["annotations"][REF_NAME] == name && m["platform"]["os"] == os && m["platform"]["architecture"] == arch)
-        });
-        manifests.push(json!({
-            "mediaType": media_type,
-            "digest": digest,
-            "size": size,
-            "platform": { "os": os, "architecture": arch },
-            "annotations": { REF_NAME: name },
-        }));
+        let mut entries = self.entries()?;
+        change(&mut entries);
+        index["manifests"] = Value::Array(entries.iter().map(Entry::to_json).collect());
         let text = serde_json::to_vec_pretty(&index).map_err(|e| ImageError::Io(e.to_string()))?;
         write_atomically(&self.dir.join("index.json"), &text)?;
         Ok(())
     }
 
+    /// The blobs an entry needs: its manifest, then the config and layers it lists.
+    pub fn blobs_of(&self, entry: &Entry) -> Result<Vec<(String, u64)>, ImageError> {
+        let manifest: Value = serde_json::from_slice(&self.blob(&entry.digest)?)
+            .map_err(|e| ImageError::Invalid(format!("manifest {}: {e}", entry.digest)))?;
+        let mut blobs = vec![(entry.digest.clone(), entry.size)];
+        let descriptors =
+            std::iter::once(&manifest["config"]).chain(manifest["layers"].as_array().into_iter().flatten());
+        for d in descriptors {
+            if let Some(digest) = d["digest"].as_str() {
+                blobs.push((digest.to_string(), d["size"].as_u64().unwrap_or(0)));
+            }
+        }
+        Ok(blobs)
+    }
+
+    /// Deletes every blob no entry needs, returning their digests and total size. Needs [`Store::open_exclusive`],
+    /// so no pull or load is halfway through adding blobs it has not named yet.
+    pub fn collect_garbage(&self) -> Result<(Vec<String>, u64), ImageError> {
+        let mut wanted = std::collections::HashSet::new();
+        for entry in self.entries()? {
+            for (digest, _) in self.blobs_of(&entry)? {
+                wanted.insert(digest);
+            }
+        }
+        let mut deleted = Vec::new();
+        let mut freed = 0;
+        for file in std::fs::read_dir(self.dir.join("blobs").join("sha256"))? {
+            let file = file?;
+            let name = file.file_name().to_string_lossy().into_owned();
+            // Only finished blobs: a write in progress is `<hex>.<pid>.tmp`.
+            if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            let digest = format!("sha256:{name}");
+            if !wanted.contains(&digest) {
+                freed += file.metadata()?.len();
+                std::fs::remove_file(file.path())?;
+                deleted.push(digest);
+            }
+        }
+        deleted.sort();
+        Ok((deleted, freed))
+    }
+
     /// Whether the store has image `name` for `os/arch`.
+    #[cfg(test)]
     pub fn has(&self, name: &str, os: &str, arch: &str) -> bool {
-        self.index()
-            .ok()
-            .and_then(|index| index["manifests"].as_array().cloned())
-            .is_some_and(|manifests| {
-                manifests.iter().any(|m| {
-                    m["annotations"][REF_NAME] == name
-                        && m["platform"]["os"] == os
-                        && m["platform"]["architecture"] == arch
-                })
-            })
+        self.entries()
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.name == name && e.os == os && e.arch == arch)
     }
 }
 
@@ -167,6 +314,14 @@ pub fn usage(data_dir: &Path) -> Option<Usage> {
         names: names.len(),
         bytes,
     })
+}
+
+fn lock_file(dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("lock"))
 }
 
 /// Writes `bytes` to a temporary file beside `path`, then renames it into place, so a reader never sees half a file.
@@ -283,6 +438,59 @@ mod tests {
             .map(|e| e.unwrap().metadata().unwrap().len())
             .sum();
         assert_eq!(usage.bytes, blobs);
+    }
+
+    #[test]
+    fn deleting_waits_for_no_one_else_to_have_the_store_open() {
+        let data = scratch("store-lock");
+        let shared = Store::open(&data).unwrap();
+        let busy = Store::open_exclusive(&data).err().unwrap();
+        assert!(busy.to_string().contains("in use by another oci-hermit"), "{busy}");
+        // Readers and writers share it.
+        let second = Store::open(&data).unwrap();
+        drop((shared, second));
+        let alone = Store::open_exclusive(&data).unwrap();
+        assert!(Store::open_exclusive(&data).is_err());
+        drop(alone);
+        assert!(Store::open_exclusive(&data).is_ok());
+    }
+
+    #[test]
+    fn garbage_is_what_no_entry_needs() {
+        let data = scratch("store-gc");
+        let store = Store::open(&data).unwrap();
+        let source = scratch("store-gc-source");
+        let (digest, bytes) = manifest(&source, "amd64", &layer(), r#"{"architecture":"ARCH"}"#);
+        for entry in std::fs::read_dir(source.join("blobs/sha256")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = format!("sha256:{}", path.file_name().unwrap().to_string_lossy());
+            store.put_blob(&name, &std::fs::read(&path).unwrap()).unwrap();
+        }
+        let media = "application/vnd.oci.image.manifest.v1+json";
+        store
+            .tag("a:1", "linux", "amd64", media, &digest, bytes.len() as u64)
+            .unwrap();
+        store
+            .tag("b:1", "linux", "amd64", media, &digest, bytes.len() as u64)
+            .unwrap();
+        let stray = image::digest_of(b"left by an interrupted pull");
+        store.put_blob(&stray, b"left by an interrupted pull").unwrap();
+        let blobs = store.path().join("blobs/sha256");
+        std::fs::write(blobs.join("abc.123.tmp"), b"a write in progress").unwrap();
+
+        let (deleted, freed) = store.collect_garbage().unwrap();
+        assert_eq!(deleted, std::slice::from_ref(&stray));
+        assert_eq!(freed, 27);
+        assert!(blobs.join("abc.123.tmp").exists());
+        assert_eq!(store.blobs_of(&store.entries().unwrap()[0]).unwrap().len(), 3);
+
+        // Untagging one name keeps the blobs for the other.
+        let removed = store.untag(|e| e.name == "a:1").unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(store.collect_garbage().unwrap().0.is_empty());
+        store.untag(|_| true).unwrap();
+        assert_eq!(store.collect_garbage().unwrap().0.len(), 3);
+        assert!(store.entries().unwrap().is_empty());
     }
 
     #[test]

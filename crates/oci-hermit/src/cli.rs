@@ -33,14 +33,23 @@ pub enum Command {
         input: String,
     },
     /// List images
-    Images,
+    Images(ImagesArgs),
     /// Remove one or more images
-    Rmi {
-        #[arg(required = true)]
-        images: Vec<String>,
-    },
-    /// Show details of an image, container or pod
-    Inspect { target: String },
+    Rmi(RmiArgs),
+    /// Show details of images as JSON
+    Inspect(InspectArgs),
+    /// Give an image another name
+    Tag(TagArgs),
+    /// Save images to an archive that `load` (and Docker and Podman) read
+    Save(SaveArgs),
+    /// Manage images
+    #[command(subcommand)]
+    Image(ImageCommand),
+    /// Show what oci-hermit uses and where it keeps things (as `machine info`)
+    Info,
+    /// Manage oci-hermit's data
+    #[command(subcommand)]
+    System(SystemCommand),
     /// Run a command in a new container
     Run(RunArgs),
     /// Run a command in a running container
@@ -88,9 +97,14 @@ impl Command {
         match self {
             Command::Pull { .. } => "pull",
             Command::Load { .. } => "load",
-            Command::Images => "images",
-            Command::Rmi { .. } => "rmi",
-            Command::Inspect { .. } => "inspect",
+            Command::Images(_) => "images",
+            Command::Rmi(_) => "rmi",
+            Command::Inspect(_) => "inspect",
+            Command::Tag(_) => "tag",
+            Command::Save(_) => "save",
+            Command::Image(_) => "image",
+            Command::Info => "info",
+            Command::System(_) => "system",
             Command::Run(_) => "run",
             Command::Exec(_) => "exec",
             Command::Logs { .. } => "logs",
@@ -104,6 +118,102 @@ impl Command {
             Command::Version => "version",
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct ImagesArgs {
+    /// Only images from this repository, or with this name
+    pub reference: Option<String>,
+    /// Only show image IDs
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// Show each image's manifest digest
+    #[arg(long)]
+    pub digests: bool,
+    /// Show full image IDs
+    #[arg(long)]
+    pub no_trunc: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RmiArgs {
+    /// Remove every name of an image given by ID
+    #[arg(short, long)]
+    pub force: bool,
+    /// Names or IDs
+    #[arg(required = true)]
+    pub images: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct InspectArgs {
+    /// Names or IDs
+    #[arg(required = true)]
+    pub images: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TagArgs {
+    /// Name or ID of a stored image
+    pub source: String,
+    /// The new name
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SaveArgs {
+    /// Write to this file
+    #[arg(short, long, required = true)]
+    pub output: String,
+    /// Only this platform, e.g. linux/arm64 (default: every platform stored)
+    #[arg(long)]
+    pub platform: Option<String>,
+    /// Names or IDs
+    #[arg(required = true)]
+    pub images: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImageCommand {
+    /// List images
+    #[command(alias = "list")]
+    Ls(ImagesArgs),
+    /// Remove one or more images
+    #[command(alias = "remove")]
+    Rm(RmiArgs),
+    /// Show details of images as JSON
+    Inspect(InspectArgs),
+    /// Remove images loaded without a name, or every image with -a
+    Prune {
+        /// Remove every image, not only unnamed ones
+        #[arg(short, long)]
+        all: bool,
+        /// Do not ask for confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Show the steps that built an image
+    History {
+        /// Do not shorten IDs and commands
+        #[arg(long)]
+        no_trunc: bool,
+        /// Only show image IDs
+        #[arg(short, long)]
+        quiet: bool,
+        image: String,
+    },
+    /// Exit 0 if an image is stored, 1 if not
+    Exists { image: String },
+    /// Give an image another name
+    Tag(TagArgs),
+    /// Save images to an archive
+    Save(SaveArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SystemCommand {
+    /// Show how much space images use
+    Df,
 }
 
 #[derive(Debug, Args)]
@@ -264,6 +374,11 @@ mod tests {
             (&["images"], "images"),
             (&["rmi", "alpine"], "rmi"),
             (&["inspect", "web"], "inspect"),
+            (&["tag", "alpine", "mine"], "tag"),
+            (&["save", "-o", "a.tar", "alpine"], "save"),
+            (&["image", "ls"], "image"),
+            (&["info"], "info"),
+            (&["system", "df"], "system"),
             (&["run", "alpine"], "run"),
             (&["exec", "web", "sh"], "exec"),
             (&["logs", "-f", "web"], "logs"),
