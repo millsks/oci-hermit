@@ -299,14 +299,14 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
 
     lines.push(String::new());
     lines.push("registries (pulls happen on the host, never in the sandbox):".into());
-    if env.registry.auth_files.is_empty() {
-        lines.push(row("auth files", "none to search: no home folder".into()));
-    } else {
-        lines.push("  auth files: searched in this order; the first with a login for the registry is used".into());
-        for (i, file) in env.registry.auth_files.iter().enumerate() {
-            let state = if file.is_file() { "[found]" } else { "[not found]" };
-            lines.push(format!("    {}. {state:<12}{}", i + 1, file.display()));
-        }
+    lines.push("  auth files: searched in this order; the first with a login for the registry is used".into());
+    for (i, location) in env.registry.auth_locations.iter().enumerate() {
+        let (state, shown) = match &location.path {
+            Some(path) if path.is_file() => ("[found]", path.display().to_string()),
+            Some(path) => ("[not found]", path.display().to_string()),
+            None => ("[not set]", location.name.to_string()),
+        };
+        lines.push(format!("    {}. {state:<12}{shown}", i + 1));
     }
     lines.push(row(
         "plain http",
@@ -773,7 +773,6 @@ mod tests {
             out.contains("  images:     none yet; created by the first pull or load"),
             "{out}"
         );
-        assert!(out.contains("  auth files: none to search: no home folder"), "{out}");
         assert!(err.contains("no bundled QEMU found"));
     }
 
@@ -802,7 +801,20 @@ mod tests {
         let auth = bundle.join("auth.json");
         std::fs::write(&auth, "{}").unwrap();
         let mut env = with_bundle(&bundle, Some(&guest));
-        env.registry.auth_files = vec![bundle.join("missing.json"), auth.clone()];
+        env.registry.auth_locations = vec![
+            registry::AuthLocation {
+                name: "$REGISTRY_AUTH_FILE",
+                path: None,
+            },
+            registry::AuthLocation {
+                name: "elsewhere",
+                path: Some(bundle.join("missing.json")),
+            },
+            registry::AuthLocation {
+                name: "here",
+                path: Some(auth.clone()),
+            },
+        ];
         env.registry.insecure = vec!["localhost:5000".into()];
         env.data_dir_from_env = false;
 
@@ -834,7 +846,7 @@ mod tests {
         assert!(out.contains("  size:       0.0 kB"), "{out}");
         assert!(
             out.contains(&format!(
-                "    1. [not found] {}\n    2. [found]     {}\n",
+                "    1. [not set]   $REGISTRY_AUTH_FILE\n    2. [not found] {}\n    3. [found]     {}\n",
                 bundle.join("missing.json").display(),
                 auth.display()
             )),
