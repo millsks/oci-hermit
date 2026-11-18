@@ -57,6 +57,17 @@ jobs:
         run: pixi run test
       - name: Smoke test CLI
         run: pixi run cargo run -q -p oci-hermit -- version
+      # The layer disks (#16) against erofs-utils, the reference EROFS tools: fsck.erofs checks the image, and the
+      # tree it extracts must match what the builder meant to write. Root, because whiteouts extract as devices.
+      - name: Check layer disks with fsck.erofs
+        if: runner.os == 'Linux'
+        env:
+          OCI_HERMIT_EROFS_SAMPLES: ${{ runner.temp }}/erofs-samples
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q erofs-utils
+          pixi run cargo test -q -p oci-hermit writes_a_sample_for_fsck_erofs
+          sudo sh crates/oci-hermit/testdata/fsck-erofs.sh "$OCI_HERMIT_EROFS_SAMPLES"
 
   coverage:
     name: Coverage gate
