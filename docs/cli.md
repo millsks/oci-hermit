@@ -115,6 +115,7 @@ oci-hermit pull [OPTIONS] <IMAGE>
 | --- | --- |
 | `IMAGE` | An image reference, e.g. `debian:bookworm-slim` or `ghcr.io/org/app:1.2`. A digest (`name@sha256:…`) works too. |
 | `--platform <PLATFORM>` | The platform to pull. Default: the host's. |
+| `--cert-dir <DIR>` | Use the CA certificates (`*.crt`) and client certificate (`*.cert` with `*.key`) in `DIR` for this registry, instead of its `certs.d` folder. |
 
 ```console
 $ oci-hermit pull public.ecr.aws/docker/library/alpine:3.20
@@ -126,7 +127,9 @@ Status: pulled public.ecr.aws/docker/library/alpine:3.20 for linux/arm64
 
 Logins come from [`login`](#login) and from the Podman and Docker auth files and credential helpers (see
 [Pull from a private registry](field-manual/private-registry.md)); with none, the pull is anonymous. Throttling and
-server errors are retried four times. Exits 0 on success, 1 on failure.
+server errors are retried four times. A registry's own CA and client certificate come from its `certs.d` folder
+(see [a registry with its own CA](field-manual/private-registry.md#a-registry-behind-a-company-certificate-authority)).
+Exits 0 on success, 1 on failure.
 
 ## login
 
@@ -145,6 +148,7 @@ oci-hermit login [OPTIONS] [REGISTRY]
 | `--password-stdin` | Read the password from stdin. Needs `--username`. |
 | `--authfile <AUTHFILE>` | Store the login in this file. Default: `$REGISTRY_AUTH_FILE`, else `$XDG_RUNTIME_DIR/containers/auth.json`, else `~/.config/containers/auth.json`. |
 | `--get-login` | Print the user name logged in to `REGISTRY`, and nothing else. |
+| `--cert-dir <DIR>` | Use the CA certificates and client certificate in `DIR` for this registry, as for `pull`. |
 
 ```console
 $ echo "$GHCR_TOKEN" | oci-hermit login -u your-user --password-stdin ghcr.io

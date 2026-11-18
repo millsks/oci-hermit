@@ -57,6 +57,10 @@ pub struct Settings {
     pub insecure: Vec<String>,
     /// How long to wait before each retry of a request the registry turned away for now (rate limits, 5xx).
     pub retry_delays: Vec<Duration>,
+    /// The `certs.d` folders searched for a registry's CAs and client certificate, in order.
+    pub cert_locations: Vec<crate::certs::CertLocation>,
+    /// `--cert-dir`: one registry's certificates, used instead of the `certs.d` folders.
+    pub cert_dir: Option<PathBuf>,
 }
 
 /// The waits between retries of a throttled or failing request: 1, 2, 4 and 8 seconds.
@@ -115,7 +119,14 @@ impl Settings {
             auth_locations,
             insecure,
             retry_delays: default_retry_delays(),
+            cert_locations: crate::certs::locations(&var),
+            cert_dir: None,
         }
+    }
+
+    /// The CAs and client certificate for `registry`, if it has any.
+    pub(crate) fn certs_for(&self, registry: &str) -> Result<Option<crate::certs::RegistryCerts>, String> {
+        crate::certs::find(&self.cert_locations, self.cert_dir.as_deref(), registry)
     }
 
     /// `http` for a registry listed in `$OCI_HERMIT_INSECURE_REGISTRIES`, `https` for every other.
@@ -128,15 +139,40 @@ impl Settings {
     }
 }
 
-/// The HTTP client every registry request goes through: rustls with the system's trust store.
-pub(crate) fn http_client() -> Result<reqwest::Client, String> {
+/// The HTTP client for one registry: rustls with the system's trust store, plus that registry's own CAs and client
+/// certificate from `certs.d`. A client is never shared between registries, so their CAs never apply elsewhere.
+pub(crate) fn http_client(certs: Option<&crate::certs::RegistryCerts>) -> Result<reqwest::Client, String> {
     install_crypto();
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(120))
-        .user_agent(concat!("oci-hermit/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| describe(&e))
+        .user_agent(concat!("oci-hermit/", env!("CARGO_PKG_VERSION")));
+    if let Some(certs) = certs {
+        builder = certs.apply(builder)?;
+    }
+    builder.build().map_err(|e| describe(&e))
+}
+
+/// What to do about a TLS failure with `registry`: where its CA or client certificate goes.
+pub(crate) fn tls_hint(described: &str, registry: &str, certs: Option<&crate::certs::RegistryCerts>) -> String {
+    if !tls_failure(described) {
+        return String::new();
+    }
+    let folder = certs.map_or_else(
+        || format!("~/.config/containers/certs.d/{registry}"),
+        |c| c.dir.display().to_string(),
+    );
+    if described.contains("CertificateRequired") || (described.contains("HandshakeFailure") && certs.is_none()) {
+        format!(
+            " (the registry may want a client certificate: put it in {folder}/ as client.cert with client.key; \
+             `hrmt machine info` lists the folders searched)"
+        )
+    } else {
+        format!(
+            " (if {registry} uses its own CA, put that CA in {folder}/ as ca.crt; `hrmt machine info` lists the \
+             folders searched)"
+        )
+    }
 }
 
 /// A reqwest error with its causes, which is where TLS and connection problems are spelled out.
@@ -327,6 +363,7 @@ fn answer_text(status: reqwest::StatusCode, body: &[u8]) -> String {
 /// One repository on one registry, with the authorization its server asked for.
 struct Session<'a> {
     client: reqwest::Client,
+    certs: Option<crate::certs::RegistryCerts>,
     /// `https://<api host>/v2/<repository>`.
     base: String,
     registry: String,
@@ -352,7 +389,11 @@ impl Session<'_> {
             }
             let failure = match request.send().await {
                 Err(e) if retryable(&e) => describe(&e),
-                Err(e) => return Err(describe(&e)),
+                Err(e) => {
+                    let described = describe(&e);
+                    let hint = tls_hint(&described, &self.registry, self.certs.as_ref());
+                    return Err(format!("{described}{hint}"));
+                }
                 Ok(answer) => {
                     let status = answer.status();
                     // A 401 asks for authorization; a token can also expire during a long pull, so ask once more.
@@ -577,8 +618,10 @@ pub fn pull(
         .build()
         .map_err(|e| PullError::Registry(format!("starting the network runtime: {e}")))?;
     let auth = credentials(reference.registry(), settings, run_helper);
+    let certs = settings.certs_for(reference.registry()).map_err(PullError::Registry)?;
     let mut session = Session {
-        client: http_client().map_err(PullError::Registry)?,
+        client: http_client(certs.as_ref()).map_err(PullError::Registry)?,
+        certs,
         base: format!(
             "{}://{}/v2/{}",
             settings.scheme(reference.registry()),
@@ -694,7 +737,7 @@ pub(crate) fn size(bytes: u64) -> String {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! A small registry for tests: the distribution API's GETs over plain HTTP on 127.0.0.1.
+    //! A small registry for tests: the distribution API's GETs over plain HTTP or TLS on 127.0.0.1.
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -727,101 +770,146 @@ pub(crate) mod testing {
 
     /// [`serve`] with any [`Gate`].
     pub(crate) fn serve_gated(routes: HashMap<String, Response>, gate: Gate, throttle: usize) -> String {
-        let throttled = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        serve_on(routes, gate, throttle, None)
+    }
+
+    /// [`serve_gated`] over TLS with `tls` (its certificate, and whether it wants a client certificate) when given.
+    pub(crate) fn serve_on(
+        routes: HashMap<String, Response>,
+        gate: Gate,
+        throttle: usize,
+        tls: Option<std::sync::Arc<rustls::ServerConfig>>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let routes = std::sync::Arc::new(routes);
-        let served = address.clone();
+        let server = std::sync::Arc::new(Server {
+            routes,
+            gate,
+            throttle,
+            throttled: std::sync::Mutex::new(0),
+            address: address.clone(),
+            scheme: if tls.is_some() { "https" } else { "http" },
+        });
         std::thread::spawn(move || {
-            let address = served;
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let routes = routes.clone();
-                let gate = gate.clone();
-                let address = address.clone();
-                let throttled = throttled.clone();
-                std::thread::spawn(move || {
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    loop {
-                        let mut request = String::new();
-                        if reader.read_line(&mut request).unwrap_or(0) == 0 {
+                let Ok(stream) = stream else { continue };
+                let server = server.clone();
+                let tls = tls.clone();
+                std::thread::spawn(move || match tls {
+                    Some(config) => {
+                        let Ok(connection) = rustls::ServerConnection::new(config) else {
                             return;
-                        }
-                        let mut authorization = None;
-                        loop {
-                            let mut header = String::new();
-                            if reader.read_line(&mut header).unwrap_or(0) == 0 {
-                                return;
-                            }
-                            let header = header.trim_end();
-                            if header.is_empty() {
-                                break;
-                            }
-                            if let Some((name, value)) = header.split_once(':')
-                                && name.eq_ignore_ascii_case("authorization")
-                            {
-                                authorization = Some(value.trim().to_string());
-                            }
-                        }
-                        let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
-                        let sent = authorization.as_deref();
-                        let token_request = path.starts_with("/token?");
-                        let allowed = match &gate {
-                            Gate::Open => true,
-                            Gate::Basic(secret) => sent == Some(&format!("Basic {secret}")),
-                            Gate::Bearer(Some(secret)) if token_request => sent == Some(&format!("Basic {secret}")),
-                            Gate::Bearer(None) if token_request => true,
-                            Gate::Bearer(_) => sent == Some(&format!("Bearer {TOKEN}")),
                         };
-                        let token_body = format!(r#"{{"token":"{TOKEN}"}}"#);
-                        let throttle_now = path != "/v2/" && !token_request && {
-                            let mut count = throttled.lock().unwrap();
-                            *count += 1;
-                            *count <= throttle
-                        };
-                        let (status, content_type, body): (&str, &str, &[u8]) = match routes.get(&path) {
-                            _ if throttle_now => (
-                                "429 Too Many Requests",
-                                "application/json",
-                                br#"{"errors":[{"code":"TOOMANYREQUESTS","message":"Rate exceeded"}]}"#,
-                            ),
-                            _ if !allowed => ("401 Unauthorized", "text/plain", b"unauthorized"),
-                            // Only a token for pulling `test/app` is handed out.
-                            _ if token_request && path.contains("scope=repository%3Atest%2Fapp%3Apull") => {
-                                ("200 OK", "application/json", token_body.as_bytes())
-                            }
-                            _ if token_request => ("403 Forbidden", "text/plain", b"wrong scope"),
-                            Some(r) => ("200 OK", &r.content_type, &r.body),
-                            None if path == "/v2/" => ("200 OK", "application/json", b"{}"),
-                            None => (
-                                "404 Not Found",
-                                "application/json",
-                                br#"{"errors":[{"code":"NAME_UNKNOWN","message":"not here"}]}"#,
-                            ),
-                        };
-                        let challenge = match &gate {
-                            _ if allowed => String::new(),
-                            Gate::Bearer(_) if !token_request => format!(
-                                "WWW-Authenticate: Bearer realm=\"http://{address}/token\",service=\"test\"\r\n"
-                            ),
-                            _ => "WWW-Authenticate: Basic realm=\"test\"\r\n".to_string(),
-                        };
-                        let head = format!(
-                            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{challenge}\r\n",
-                            body.len()
-                        );
-                        if stream
-                            .write_all(head.as_bytes())
-                            .and_then(|()| stream.write_all(body))
-                            .is_err()
-                        {
-                            return;
-                        }
+                        server.answer(rustls::StreamOwned::new(connection, stream));
                     }
+                    None => server.answer(stream),
                 });
             }
         });
         address
+    }
+
+    struct Server {
+        routes: HashMap<String, Response>,
+        gate: Gate,
+        throttle: usize,
+        throttled: std::sync::Mutex<usize>,
+        address: String,
+        scheme: &'static str,
+    }
+
+    impl Server {
+        /// Answers the requests on one connection until it closes.
+        fn answer(&self, stream: impl std::io::Read + Write) {
+            let Server {
+                routes,
+                gate,
+                throttle,
+                throttled,
+                address,
+                scheme,
+            } = self;
+            let throttle = *throttle;
+            let mut reader = BufReader::new(stream);
+            loop {
+                let mut request = String::new();
+                if reader.read_line(&mut request).unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut authorization = None;
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let header = header.trim_end();
+                    if header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("authorization")
+                    {
+                        authorization = Some(value.trim().to_string());
+                    }
+                }
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let sent = authorization.as_deref();
+                let token_request = path.starts_with("/token?");
+                let allowed = match &gate {
+                    Gate::Open => true,
+                    Gate::Basic(secret) => sent == Some(&format!("Basic {secret}")),
+                    Gate::Bearer(Some(secret)) if token_request => sent == Some(&format!("Basic {secret}")),
+                    Gate::Bearer(None) if token_request => true,
+                    Gate::Bearer(_) => sent == Some(&format!("Bearer {TOKEN}")),
+                };
+                let token_body = format!(r#"{{"token":"{TOKEN}"}}"#);
+                let throttle_now = path != "/v2/" && !token_request && {
+                    let mut count = throttled.lock().unwrap();
+                    *count += 1;
+                    *count <= throttle
+                };
+                let (status, content_type, body): (&str, &str, &[u8]) = match routes.get(&path) {
+                    _ if throttle_now => (
+                        "429 Too Many Requests",
+                        "application/json",
+                        br#"{"errors":[{"code":"TOOMANYREQUESTS","message":"Rate exceeded"}]}"#,
+                    ),
+                    _ if !allowed => ("401 Unauthorized", "text/plain", b"unauthorized"),
+                    // Only a token for pulling `test/app` is handed out.
+                    _ if token_request && path.contains("scope=repository%3Atest%2Fapp%3Apull") => {
+                        ("200 OK", "application/json", token_body.as_bytes())
+                    }
+                    _ if token_request => ("403 Forbidden", "text/plain", b"wrong scope"),
+                    Some(r) => ("200 OK", &r.content_type, &r.body),
+                    None if path == "/v2/" => ("200 OK", "application/json", b"{}"),
+                    None => (
+                        "404 Not Found",
+                        "application/json",
+                        br#"{"errors":[{"code":"NAME_UNKNOWN","message":"not here"}]}"#,
+                    ),
+                };
+                let challenge = match &gate {
+                    _ if allowed => String::new(),
+                    Gate::Bearer(_) if !token_request => {
+                        format!("WWW-Authenticate: Bearer realm=\"{scheme}://{address}/token\",service=\"test\"\r\n")
+                    }
+                    _ => "WWW-Authenticate: Basic realm=\"test\"\r\n".to_string(),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{challenge}\r\n",
+                    body.len()
+                );
+                let stream = reader.get_mut();
+                if stream
+                    .write_all(head.as_bytes())
+                    .and_then(|()| stream.write_all(body))
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
     }
 
     /// A registry holding `test/app:1` as an index of amd64 and arm64 images whose `Cmd` is `from-the-registry`;
@@ -1178,6 +1266,199 @@ mod tests {
                 .contains("pulling the manifest of 127.0.0.1:9/test/app:1"),
             "{err}"
         );
+    }
+
+    /// A CA, and a registry certificate for 127.0.0.1 and a client certificate it signed, as PEM.
+    struct Pki {
+        ca: String,
+        server: (String, String),
+        client: (String, String),
+    }
+
+    fn pki() -> Pki {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose,
+        };
+        // Valid from yesterday for a month: platform verifiers refuse certificates valid for years.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let epoch = rcgen::date_time_ymd(1970, 1, 1);
+        let dated = |mut params: CertificateParams| {
+            params.not_before = epoch + (now - Duration::from_secs(86_400));
+            params.not_after = epoch + (now + Duration::from_secs(30 * 86_400));
+            params
+        };
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = dated(CertificateParams::new(Vec::<String>::new()).unwrap());
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "oci-hermit test CA");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca_params, ca_key);
+        let leaf = |name: &str, purpose: ExtendedKeyUsagePurpose| {
+            let key = KeyPair::generate().unwrap();
+            let mut params = dated(CertificateParams::new(vec![name.to_string()]).unwrap());
+            params.distinguished_name.push(DnType::CommonName, name);
+            params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            params.extended_key_usages = vec![purpose];
+            let cert = params.signed_by(&key, &issuer).unwrap();
+            (cert.pem(), key.serialize_pem())
+        };
+        Pki {
+            ca: ca.pem(),
+            server: leaf("127.0.0.1", ExtendedKeyUsagePurpose::ServerAuth),
+            client: leaf("oci-hermit test client", ExtendedKeyUsagePurpose::ClientAuth),
+        }
+    }
+
+    /// A TLS registry with `test/app:1`, its certificate signed by `pki`'s CA; with `mutual`, it wants a client
+    /// certificate signed by that CA.
+    fn tls_registry(name: &str, pki: &Pki, mutual: bool, gate: testing::Gate) -> String {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap();
+        let builder = if mutual {
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(pki.ca.as_bytes()).unwrap())
+                .unwrap();
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(roots.into(), provider)
+                .build()
+                .unwrap();
+            builder.with_client_cert_verifier(verifier)
+        } else {
+            builder.with_no_client_auth()
+        };
+        let config = builder
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(pki.server.0.as_bytes()).unwrap()],
+                PrivateKeyDer::from_pem_slice(pki.server.1.as_bytes()).unwrap(),
+            )
+            .unwrap();
+        testing::serve_on(
+            testing::routes_of(name, false, &["amd64"], true),
+            gate,
+            0,
+            Some(std::sync::Arc::new(config)),
+        )
+    }
+
+    /// Settings that look for certificates only under `certs_d`, and do not retry.
+    fn tls_settings(certs_d: &std::path::Path, auth_files: Vec<PathBuf>) -> Settings {
+        Settings {
+            auth_files,
+            cert_locations: vec![crate::certs::CertLocation {
+                name: "test",
+                path: Some(certs_d.to_path_buf()),
+            }],
+            ..Settings::default()
+        }
+    }
+
+    fn folder_for(certs_d: &std::path::Path, address: &str) -> PathBuf {
+        let dir = certs_d.join(crate::certs::folder_names(address).pop().unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_registry_with_its_own_ca_is_trusted_from_certs_d_and_only_there() {
+        let pki = pki();
+        let address = tls_registry("registry-tls-ca", &pki, false, testing::Gate::Open);
+        let other = tls_registry("registry-tls-other", &pki, false, testing::Gate::Open);
+        let certs_d = scratch("registry-tls-ca-certs");
+        let store = Store::open(&scratch("registry-tls-ca-store")).unwrap();
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+
+        // Without the CA the system does not trust the registry, and the error says where the CA goes.
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &tls_settings(&certs_d, vec![]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("uses its own CA"), "{err}");
+
+        std::fs::write(folder_for(&certs_d, &address).join("ca.crt"), &pki.ca).unwrap();
+        pull(
+            &reference,
+            "amd64",
+            &store,
+            &tls_settings(&certs_d, vec![]),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        // The CA is this registry's alone: another registry with a certificate from the same CA is not trusted.
+        let elsewhere = normalize(&format!("{other}/test/app:1")).unwrap();
+        let err = pull(
+            &elsewhere,
+            "amd64",
+            &store,
+            &tls_settings(&certs_d, vec![]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("certificate"), "{err}");
+
+        // --cert-dir names the folder directly.
+        let given = scratch("registry-tls-cert-dir");
+        std::fs::write(given.join("ca.crt"), &pki.ca).unwrap();
+        let with_dir = Settings {
+            cert_dir: Some(given),
+            ..tls_settings(&scratch("registry-tls-empty"), vec![])
+        };
+        let store = Store::open(&scratch("registry-tls-cert-dir-store")).unwrap();
+        pull(&elsewhere, "amd64", &store, &with_dir, &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    fn a_registry_that_wants_a_client_certificate_gets_the_one_in_certs_d() {
+        let pki = pki();
+        let secret = hermit_proto::b64::encode(b"me:hunter2");
+        let address = tls_registry("registry-mtls", &pki, true, testing::Gate::Basic(secret.clone()));
+        let certs_d = scratch("registry-mtls-certs");
+        let folder = folder_for(&certs_d, &address);
+        std::fs::write(folder.join("ca.crt"), &pki.ca).unwrap();
+        let store = Store::open(&scratch("registry-mtls-store")).unwrap();
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        let auth = scratch("registry-mtls-auth").join("auth.json");
+        std::fs::write(&auth, format!(r#"{{"auths":{{"{address}":{{"auth":"{secret}"}}}}}}"#)).unwrap();
+
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &tls_settings(&certs_d, vec![auth.clone()]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("client certificate"), "{err}");
+        assert!(crate::login::verify(&address, "me", "hunter2", &tls_settings(&certs_d, vec![])).is_err());
+
+        std::fs::write(folder.join("client.cert"), &pki.client.0).unwrap();
+        std::fs::write(folder.join("client.key"), &pki.client.1).unwrap();
+        pull(
+            &reference,
+            "amd64",
+            &store,
+            &tls_settings(&certs_d, vec![auth]),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        crate::login::verify(&address, "me", "hunter2", &tls_settings(&certs_d, vec![])).unwrap();
     }
 
     #[test]

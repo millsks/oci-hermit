@@ -29,3 +29,6 @@ win32job.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

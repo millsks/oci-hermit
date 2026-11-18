@@ -23,6 +23,10 @@ pub enum Command {
         /// Image platform, e.g. linux/amd64 or linux/arm64 (default: the host's)
         #[arg(long)]
         platform: Option<String>,
+        /// Folder with the registry's CA certificates (*.crt) and client certificate (*.cert, *.key), instead of
+        /// the certs.d folders
+        #[arg(long, value_name = "DIR")]
+        cert_dir: Option<std::path::PathBuf>,
         /// Image reference, e.g. debian:bookworm-slim or ghcr.io/org/app:1.2
         image: String,
     },
@@ -143,6 +147,10 @@ pub struct LoginArgs {
     /// Print the user name logged in to the registry, and nothing else
     #[arg(long)]
     pub get_login: bool,
+    /// Folder with the registry's CA certificates (*.crt) and client certificate (*.cert, *.key), instead of the
+    /// certs.d folders
+    #[arg(long, value_name = "DIR")]
+    pub cert_dir: Option<std::path::PathBuf>,
     /// Registry host, e.g. ghcr.io or registry.example.com:5000 (default: docker.io)
     pub registry: Option<String>,
 }

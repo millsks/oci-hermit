@@ -3,6 +3,7 @@
 //! The command surface mirrors Docker and Podman. Most commands are stubs for now; each one is implemented in a
 //! later milestone (see ROADMAP.md).
 
+mod certs;
 mod cli;
 mod guest;
 mod image;
@@ -248,7 +249,11 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
-        cli::Command::Pull { platform, image } => match pull_image(image, platform.as_deref(), env, out) {
+        cli::Command::Pull {
+            platform,
+            image,
+            cert_dir,
+        } => match pull_image(image, platform.as_deref(), cert_dir.as_deref(), env, out, err) {
             Ok(()) => 0,
             Err(e) => {
                 let _ = writeln!(err, "oci-hermit: {e}");
@@ -456,6 +461,36 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
             format!("{} (from {})", env.registry.insecure.join(", "), registry::INSECURE_ENV)
         },
     ));
+    lines.push(
+        "  certificates (certs.d): searched in this order; the first with a folder for the registry is used".into(),
+    );
+    for (i, location) in env.registry.cert_locations.iter().enumerate() {
+        let (state, shown) = match &location.path {
+            Some(path) => (
+                if path.is_dir() { "[found]" } else { "[not found]" },
+                path.display().to_string(),
+            ),
+            None => ("[not set]", location.name.to_string()),
+        };
+        lines.push(format!("    {}. {state:<12}{shown}", i + 1));
+        let Some(path) = location.path.as_ref().filter(|p| p.is_dir()) else {
+            continue;
+        };
+        let mut folders: Vec<PathBuf> = std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default();
+        folders.sort();
+        for folder in folders {
+            let name = folder.file_name().unwrap_or_default().to_string_lossy();
+            let held = certs::read_dir(&folder).map_or_else(|e| format!("unusable: {e}"), |c| c.summary());
+            lines.push(format!("{:19}{name}: {held}", ""));
+        }
+    }
 
     for line in lines {
         let _ = writeln!(out, "{}", line.trim_end());
@@ -518,7 +553,12 @@ fn login_command(
     if user.is_empty() || password.is_empty() {
         return Err("a user name and a password are both needed".into());
     }
-    login::verify(&registry, &user, &password, &env.registry)?;
+    let settings = registry::Settings {
+        cert_dir: args.cert_dir.clone(),
+        ..env.registry.clone()
+    };
+    warn_about_certs(&settings, &registry, err);
+    login::verify(&registry, &user, &password, &settings)?;
     login::store(&file, &registry, &user, &password)?;
     let _ = writeln!(out, "Login Succeeded!");
     Ok(0)
@@ -733,13 +773,20 @@ fn open_store(env: &Env) -> Result<store::Store, String> {
 fn pull_image(
     image: &str,
     platform: Option<&str>,
+    cert_dir: Option<&std::path::Path>,
     env: &Env,
     out: &mut impl Write,
+    err: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let arch = guest_arch(platform)?;
     let reference = registry::normalize(image)?;
     let store = open_store(env)?;
-    let pulled = registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, out)?;
+    let settings = registry::Settings {
+        cert_dir: cert_dir.map(std::path::Path::to_path_buf),
+        ..env.registry.clone()
+    };
+    warn_about_certs(&settings, reference.registry(), err);
+    let pulled = registry::pull(&reference, image::oci_arch(arch), &store, &settings, out)?;
     let _ = writeln!(
         out,
         "Status: pulled {} for linux/{}",
@@ -747,6 +794,16 @@ fn pull_image(
         image::oci_arch(arch)
     );
     Ok(())
+}
+
+/// Warns about a registry's certificates (a private key other users can read). Problems that stop the pull are
+/// reported by the pull itself.
+fn warn_about_certs(settings: &registry::Settings, registry: &str, err: &mut impl Write) {
+    if let Ok(Some(certs)) = settings.certs_for(registry) {
+        for warning in certs.warnings() {
+            let _ = writeln!(err, "{warning}");
+        }
+    }
 }
 
 /// The image `run` names, for `requested` or, without `--platform`, for the host's architecture or else the other
@@ -808,6 +865,7 @@ fn open_image(
     }
     let reference = registry::normalize(name)?;
     let _ = writeln!(err, "Unable to find image '{name}' locally");
+    warn_about_certs(&env.registry, reference.registry(), err);
     for (i, &arch) in choices.iter().enumerate() {
         match registry::pull(&reference, image::oci_arch(arch), &store, &env.registry, err) {
             Ok(pulled) => {
@@ -1181,6 +1239,30 @@ mod tests {
             },
         ];
         env.registry.insecure = vec!["localhost:5000".into()];
+        let certs_d = bundle.join("certs.d");
+        for (folder, files) in [
+            ("reg.example:5000", &["ca.crt", "client.cert", "client.key"][..]),
+            ("broken.example", &["lonely.cert"][..]),
+        ] {
+            std::fs::create_dir_all(certs_d.join(folder)).unwrap();
+            for file in files {
+                std::fs::write(certs_d.join(folder).join(file), "x").unwrap();
+            }
+        }
+        env.registry.cert_locations = vec![
+            certs::CertLocation {
+                name: "$NOWHERE/certs.d",
+                path: None,
+            },
+            certs::CertLocation {
+                name: "here",
+                path: Some(certs_d.clone()),
+            },
+            certs::CertLocation {
+                name: "missing",
+                path: Some(bundle.join("no-certs.d")),
+            },
+        ];
         env.data_dir_from_env = false;
 
         // A store with one image for two platforms.
@@ -1218,7 +1300,58 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("  plain http: localhost:5000 (from OCI_HERMIT_INSECURE_REGISTRIES)"));
+        let lonely = certs_d.join("broken.example/lonely.cert");
+        assert!(
+            out.contains(&format!(
+                "    1. [not set]   $NOWHERE/certs.d\n    2. [found]     {}\n{:19}broken.example: unusable: {} has no \
+                 matching {}; a client certificate needs its key\n{:19}reg.example:5000: 1 CA, a client certificate\n\
+                 \x20   3. [not found] {}\n",
+                certs_d.display(),
+                "",
+                lonely.display(),
+                lonely.with_extension("key").display(),
+                "",
+                bundle.join("no-certs.d").display()
+            )),
+            "{out}"
+        );
         assert!(out.contains(&format!("  run dir:    {}", env.run_base.display())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_and_login_take_a_cert_dir_and_warn_about_open_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = no_qemu("main-cert-dir");
+        let given = qemu::testing::scratch("main-cert-dir-certs");
+        std::fs::write(given.join("client.cert"), "junk").unwrap();
+        std::fs::write(given.join("client.key"), "junk").unwrap();
+        std::fs::set_permissions(given.join("client.key"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let dir = given.display().to_string();
+        let (code, _, err) = run_with(&env, &["pull", "--cert-dir", &dir, "reg.example/app:1"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("can be read by other users"), "{err}");
+        assert!(err.contains("not a PEM certificate and its private key"), "{err}");
+        let (code, _, err) = run_with(
+            &env,
+            &[
+                "login",
+                "--cert-dir",
+                &dir,
+                "--authfile",
+                &given.join("auth.json").display().to_string(),
+                "-u",
+                "me",
+                "-p",
+                "pw",
+                "reg.example",
+            ],
+        );
+        assert_eq!(code, 1);
+        assert!(err.contains("not a PEM certificate and its private key"), "{err}");
+        let (code, _, err) = run_with(&env, &["pull", "--cert-dir", "/no/such/dir", "reg.example/app:1"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("/no/such/dir"), "{err}");
     }
 
     #[test]
