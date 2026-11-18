@@ -602,7 +602,9 @@ jobs:
           # Windows gets the folder itself.
           if [ "$RUNNER_OS" = Windows ]; then
             mkdir -p "$temp/artifact"
-            mv "$dir" "$temp/artifact/"
+            # A copy, not a move: just after QEMU exits, Windows can still hold a file in the folder for a moment
+            # (Defender scans it, the job object closes), and renaming a folder with an open file fails.
+            cp -R "$dir" "$temp/artifact/"
             printf 'path=%s\\artifact\n' "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
           else
             echo "path=$temp/package/oci-hermit-${{ matrix.host }}.tar.gz" >> "$GITHUB_OUTPUT"
