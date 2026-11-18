@@ -118,9 +118,13 @@ asking IT for an exclusion, is the fix; there is nothing to change in oci-hermit
 
 | Message | What to do |
 | --- | --- |
-| `logging in to pull …: error sending request for url (https://…/v2/)` | The registry cannot be reached: check the name, the network, the proxy, and that the registry's certificate is trusted by the system (open the URL in a browser on the same machine). |
-| `pulling the manifest of …: Not authorized` | No login was found for that registry, or it was refused. Check the auth files in `machine info` and log in again. See [Pull from a private registry](field-manual/private-registry.md). |
-| `pulling the manifest of …: … does not exist …` | Wrong repository or tag, or your login cannot see it. |
+| `pulling the manifest of …: error sending request for url (https://…)` | The registry cannot be reached: check the name, the network and the proxy. |
+| `… invalid peer certificate …` | The system does not trust the registry's certificate. If the registry uses your company's own CA, put that CA in the registry's `certs.d` folder: see [a registry with its own CA](field-manual/private-registry.md#a-registry-behind-a-company-certificate-authority). |
+| `… (the registry may want a client certificate: …)` | The registry asks for a client certificate (mutual TLS). Put it and its key in the registry's `certs.d` folder: see [client certificates](field-manual/private-registry.md#a-registry-that-wants-a-client-certificate). |
+| `… has no matching ….key` | A client certificate in a `certs.d` folder is missing its key (or the other way round). Copy both. |
+| `pulling the manifest of …: 401 … (no login for … was found …)` | No login was found for that registry. Check the auth files in `machine info` and log in. See [Pull from a private registry](field-manual/private-registry.md). |
+| `… the token server … answered 401` or `403 DENIED` | The login was refused, or it cannot see this repository. |
+| `pulling the manifest of …: 404 MANIFEST_UNKNOWN` or `NAME_UNKNOWN` | Wrong repository or tag, or your login cannot see it. |
 | `toomanyrequests` or `rate exceeded` | The registry is throttling you; Docker Hub limits anonymous pulls. oci-hermit already retried four times. Log in, wait, or use a mirror such as `public.ecr.aws/docker/library/…` for official images. |
 | `… does not match its digest: the image is corrupt or has been altered` | A blob did not hash to its digest, so nothing was stored. Try again; if it repeats, something between you and the registry is changing the data. |
 

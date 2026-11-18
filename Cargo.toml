@@ -26,6 +26,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 sha2 = "0.11"
+# Tests only: a CA, a registry certificate and a client certificate for the TLS test registry (#86).
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # Windows only: QEMU runs in a Job Object that kills it when oci-hermit exits (QEMU has no exit-with-parent there).
 win32job = "2.1"
 # Guest agent only (Linux): safe wrappers for mount, sync, reboot, signal masks and waitpid.

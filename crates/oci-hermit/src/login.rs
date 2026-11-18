@@ -66,7 +66,8 @@ pub fn verify(registry_host: &str, user: &str, password: &str, settings: &Settin
         .enable_all()
         .build()
         .map_err(|e| unreachable(e.to_string()))?;
-    let client = registry::http_client().map_err(unreachable)?;
+    let certs = settings.certs_for(registry_host).map_err(unreachable)?;
+    let client = registry::http_client(certs.as_ref()).map_err(unreachable)?;
     let scheme = settings.scheme(registry_host);
     // Docker Hub's API lives on another host than its name.
     let host = if registry_host == "docker.io" {
@@ -80,7 +81,11 @@ pub fn verify(registry_host: &str, user: &str, password: &str, settings: &Settin
             .basic_auth(user, Some(password))
             .send()
             .await
-            .map_err(|e| unreachable(registry::describe(&e)))?;
+            .map_err(|e| {
+                let described = registry::describe(&e);
+                let hint = registry::tls_hint(&described, registry_host, certs.as_ref());
+                unreachable(format!("{described}{hint}"))
+            })?;
         match answer.status().as_u16() {
             200..=299 => return Ok(()),
             401 => {}

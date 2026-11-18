@@ -47,6 +47,7 @@ Set a variable for one command or for the session:
 | Image store | `%LOCALAPPDATA%\oci-hermit\images` | `~/Library/Application Support/oci-hermit/images` | `$XDG_DATA_HOME/oci-hermit/images`, or `~/.local/share/oci-hermit/images` |
 | Each sandbox's initramfs and logs | `%TMP%\oci-hermit\sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*`, or `/tmp/oci-hermit/sandbox-*` |
 | QEMU, kernel and agent | the `qemu/` and `guest/` folders beside `oci-hermit` | the same | the same |
+| A registry's own CAs and client certificate | `~\.config\containers\certs.d\<host><port>\`, or Docker's | `~/.config/containers/certs.d/<host:port>/`, or `/etc/containers/certs.d`, or Docker's | the same as macOS |
 
 oci-hermit never writes beside itself, so its folder can be read-only. It does not delete old `sandbox-*` folders:
 each holds the initramfs (about the image's size) and the logs of one `run` or `machine boot`. Delete them when you

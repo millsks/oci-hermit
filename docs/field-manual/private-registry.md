@@ -190,12 +190,60 @@ seconds. `run` pulls a missing image the same way, so `oci-hermit run ghcr.io/yo
 
 oci-hermit checks registry certificates against the operating system's trust store: the Windows certificate store,
 the macOS keychain, or the system certificates on Linux. A company root certificate that IT has installed on the
-machine is therefore trusted with nothing more to do. If a pull fails with a certificate error, check the same URL
-in a browser on the same machine: if the browser does not trust it either, the certificate is missing from the
-system store, and IT needs to install it.
+machine is therefore trusted with nothing more to do.
 
-Per-registry certificate files (`certs.d`, as Podman and Docker use them) and client certificates are planned in
-#86.
+When it is not installed, and you cannot install it machine-wide without admin rights, give it to oci-hermit for
+that registry alone. Put the CA certificate (PEM, the text that starts `-----BEGIN CERTIFICATE-----`) in a folder
+named after the registry, host and port as you write them in image names, with a `.crt` extension:
+
+=== "macOS and Linux"
+
+    ```bash
+    mkdir -p ~/.config/containers/certs.d/registry.corp.example:5000
+    cp corp-root-ca.pem ~/.config/containers/certs.d/registry.corp.example:5000/ca.crt
+    oci-hermit pull registry.corp.example:5000/team/app:1.4
+    ```
+
+=== "Windows"
+
+    A folder name cannot hold a `:` on Windows, so drop it, as Docker does: `registry.corp.example:5000` is
+    `registry.corp.example5000`.
+
+    ```powershell
+    $dir = "$HOME\.config\containers\certs.d\registry.corp.example5000"
+    New-Item -ItemType Directory -Force $dir
+    Copy-Item corp-root-ca.pem "$dir\ca.crt"
+    oci-hermit pull registry.corp.example:5000/team/app:1.4
+    ```
+
+This is the `certs.d` layout Podman and Docker use, so a folder you already set up for them works too. oci-hermit
+looks for the registry's folder in these, in order, and uses the first it finds:
+
+1. `$XDG_CONFIG_HOME/containers/certs.d`, or `~/.config/containers/certs.d` (Podman, yours)
+2. `/etc/containers/certs.d` (Podman, the whole machine; macOS and Linux)
+3. `~/.docker/certs.d` (Docker)
+4. `/etc/docker/certs.d` on macOS and Linux, `%ProgramData%\docker\certs.d` on Windows (Docker, the whole machine)
+
+`pull --cert-dir DIR` and `login --cert-dir DIR` use the files in `DIR` instead. A registry's CAs are trusted for
+that registry only, on top of the system's, never for any other host. `machine info` lists the folders and what each
+holds for which registry.
+
+## A registry that wants a client certificate
+
+Some registries ask for a client certificate (mutual TLS) as well as, or instead of, a login. Put the certificate
+and its private key, both PEM, in the registry's folder beside its CA, as a `.cert` and a `.key` with the same
+name:
+
+```
+~/.config/containers/certs.d/registry.corp.example:5000/
+  ca.crt          the registry's CA (if the system does not trust it already)
+  client.cert     your certificate
+  client.key      its private key
+```
+
+A `.cert` without its `.key` (or the other way round) is an error, so a half-copied setup is reported instead of
+failing later. On macOS and Linux, keep the key readable by you only (`chmod 600 client.key`): oci-hermit warns when
+other users can read it. It never prints a key.
 
 ## A registry over plain HTTP
 
@@ -222,9 +270,12 @@ Only the registries named there are reached over HTTP; every other one still nee
 
 | Message | What it means |
 | --- | --- |
-| `logging in to pull …: error sending request for url (https://…/v2/)` | The registry cannot be reached: a typo in the name, no network, a proxy, or a certificate the system does not trust. |
-| `pulling the manifest of …: Not authorized` | No login for this registry was found, or it was refused. Check `machine info` and the host name the login is filed under. |
-| `pulling the manifest of …: … does not exist` | The repository or tag is wrong, or your login cannot see it. |
+| `pulling the manifest of …: error sending request for url (https://…)` | The registry cannot be reached: a typo in the name, no network, or a proxy. |
+| `… invalid peer certificate … (if … uses its own CA, put that CA in …)` | The registry's certificate is from a CA the system does not trust. Add it as [above](#a-registry-behind-a-company-certificate-authority). |
+| `… (the registry may want a client certificate: …)` | The registry asked for a client certificate and got none, or one it does not accept. See [client certificates](#a-registry-that-wants-a-client-certificate). |
+| `pulling the manifest of …: 401 … (no login for … was found …)` | No login for this registry was found. Check `machine info` and the host name the login is filed under. |
+| `… the token server … answered 401` or `403 DENIED` | The login was refused, or it cannot see this repository. |
+| `pulling the manifest of …: 404 MANIFEST_UNKNOWN` or `NAME_UNKNOWN` | The repository or tag is wrong, or your login cannot see it. |
 | `… does not match its digest: the image is corrupt or has been altered` | A blob did not hash to its digest, so the image was not stored. Try again; if it repeats, something between you and the registry is changing the data. |
 
 More in [Troubleshooting](../troubleshooting.md#registry-errors).
