@@ -59,47 +59,15 @@ impl std::fmt::Display for LoginError {
 
 impl std::error::Error for LoginError {}
 
-/// The `key="value"` pairs of a `WWW-Authenticate: Bearer ...` header.
-fn bearer_challenge(header: &str) -> Option<Vec<(String, String)>> {
-    let rest = header
-        .trim()
-        .strip_prefix("Bearer ")
-        .or_else(|| header.trim().strip_prefix("bearer "))?;
-    let mut pairs = Vec::new();
-    let mut rest = rest.trim();
-    while !rest.is_empty() {
-        let (key, after) = rest.split_once('=')?;
-        let after = after.trim_start();
-        let (value, tail) = match after.strip_prefix('"') {
-            Some(quoted) => {
-                let end = quoted.find('"')?;
-                (&quoted[..end], &quoted[end + 1..])
-            }
-            None => after.split_once(',').unwrap_or((after, "")),
-        };
-        pairs.push((key.trim().to_ascii_lowercase(), value.to_string()));
-        rest = tail.trim_start().trim_start_matches(',').trim_start();
-    }
-    Some(pairs)
-}
-
 /// Checks `user` and `password` with the registry, as `docker login` does.
 pub fn verify(registry_host: &str, user: &str, password: &str, settings: &Settings) -> Result<(), LoginError> {
     let unreachable = |e: String| LoginError::Registry(format!("asking {registry_host} to log in: {e}"));
-    registry::install_crypto();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| unreachable(e.to_string()))?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| unreachable(e.to_string()))?;
-    let scheme = if settings.insecure.iter().any(|r| r == registry_host) {
-        "http"
-    } else {
-        "https"
-    };
+    let client = registry::http_client().map_err(unreachable)?;
+    let scheme = settings.scheme(registry_host);
     // Docker Hub's API lives on another host than its name.
     let host = if registry_host == "docker.io" {
         "registry-1.docker.io"
@@ -112,7 +80,7 @@ pub fn verify(registry_host: &str, user: &str, password: &str, settings: &Settin
             .basic_auth(user, Some(password))
             .send()
             .await
-            .map_err(|e| unreachable(e.to_string()))?;
+            .map_err(|e| unreachable(registry::describe(&e)))?;
         match answer.status().as_u16() {
             200..=299 => return Ok(()),
             401 => {}
@@ -124,7 +92,7 @@ pub fn verify(registry_host: &str, user: &str, password: &str, settings: &Settin
             .and_then(|h| h.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let Some(challenge) = bearer_challenge(&header) else {
+        let Some(challenge) = registry::bearer_challenge(&header) else {
             // A Basic challenge after we sent Basic credentials: they are wrong.
             return Err(LoginError::Rejected(registry_host.to_string()));
         };
@@ -139,7 +107,7 @@ pub fn verify(registry_host: &str, user: &str, password: &str, settings: &Settin
             .basic_auth(user, Some(password))
             .send()
             .await
-            .map_err(|e| unreachable(e.to_string()))?;
+            .map_err(|e| unreachable(registry::describe(&e)))?;
         match token.status().as_u16() {
             200..=299 => Ok(()),
             401 | 403 => Err(LoginError::Rejected(registry_host.to_string())),
@@ -328,6 +296,7 @@ mod tests {
     use super::testing::registry;
     use super::*;
     use crate::qemu::testing::scratch;
+    use crate::registry::bearer_challenge;
 
     fn secret(user: &str, password: &str) -> String {
         hermit_proto::b64::encode(format!("{user}:{password}").as_bytes())
@@ -455,7 +424,7 @@ mod tests {
         let none = |_: &str, _: &str| None;
         assert_eq!(
             registry::credentials("ghcr.io", &settings, none),
-            oci_client::secrets::RegistryAuth::Basic("alice".into(), "pa:ss".into())
+            registry::Auth::Basic("alice".into(), "pa:ss".into())
         );
 
         // Other keys in the file are kept.

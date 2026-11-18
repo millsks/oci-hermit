@@ -18,7 +18,8 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/store.rs` | the image store: one OCI layout in the user's data folder (`$OCI_HERMIT_DATA_DIR`), images named by full reference and platform |
 | `crates/oci-hermit/src/images.rs` | `images`, `rmi`, `inspect`, `tag`, `save`, `image prune`/`history`/`exists`, `system df` over the store; `find` resolves names, references and ID prefixes for every command including `run` |
 | `crates/oci-hermit/src/load.rs` | `load -i`: OCI layouts (dir or `.tar`, every platform) and `docker save` archives (old and Docker 25+) into the store; unnamed images go by ID |
-| `crates/oci-hermit/src/registry.rs` | `pull` over oci-client (reqwest, rustls with ring): Podman/Docker auth files and credential helpers, `$OCI_HERMIT_INSECURE_REGISTRIES` for plain HTTP |
+| `crates/oci-hermit/src/registry.rs` | `pull`: our own distribution-API client on reqwest (rustls with ring): Basic and Bearer (token server) auth, retries, Podman/Docker auth files and credential helpers, `$OCI_HERMIT_INSECURE_REGISTRIES` for plain HTTP |
+| `crates/oci-hermit/src/reference.rs` | image references as Docker reads them (`debian` is `docker.io/library/debian:latest`) |
 | `crates/oci-hermit/src/login.rs` | `login`/`logout`: checks credentials with the registry (reqwest: `/v2/` with Basic, or its token server for a Bearer challenge), then writes Podman's `auth.json` (0600); never prints secrets |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
