@@ -1687,7 +1687,10 @@ right-click the <code>.zip</code> and choose <strong>Extract All</strong>; on ma
 <p>In PowerShell:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nv">$tag</span> <span class="p">=</span> <span class="n">gh</span> <span class="n">release</span> <span class="n">list</span> <span class="n">-R</span> <span class="n">millsks</span><span class="p">/</span><span class="n">oci-hermit</span> <span class="n">-L</span> <span class="n">1</span> <span class="p">-</span><span class="n">-json</span> <span class="n">tagName</span> <span class="n">-q</span> <span class="s1">'.[0].tagName'</span>
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">gh</span> <span class="n">release</span> <span class="n">download</span> <span class="nv">$tag</span> <span class="n">-R</span> <span class="n">millsks</span><span class="p">/</span><span class="n">oci-hermit</span> <span class="n">-p</span> <span class="s1">'*-win-64.zip'</span> <span class="n">-p</span> <span class="n">SHA256SUMS</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="nb">Expand-Archive</span> <span class="n">oci-hermit</span><span class="p">-*</span><span class="n">-win</span><span class="p">-</span><span class="n">64</span><span class="p">.</span><span class="n">zip</span> <span class="n">-DestinationPath</span> <span class="p">.</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="nv">$zip</span> <span class="p">=</span> <span class="nb">Get-Item</span> <span class="n">oci-hermit</span><span class="p">-*</span><span class="n">-win</span><span class="p">-</span><span class="n">64</span><span class="p">.</span><span class="n">zip</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="nv">$want</span> <span class="p">=</span> <span class="p">(</span><span class="nb">Select-String</span> <span class="n">-Path</span> <span class="n">SHA256SUMS</span> <span class="n">-Pattern</span> <span class="nv">$zip</span><span class="p">.</span><span class="n">Name</span> <span class="n">-SimpleMatch</span><span class="p">).</span><span class="n">Line</span><span class="p">.</span><span class="n">Split</span><span class="p">(</span><span class="s1">' '</span><span class="p">)[</span><span class="n">0</span><span class="p">]</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">if</span> <span class="p">((</span><span class="nb">Get-FileHash</span> <span class="nv">$zip</span> <span class="n">-Algorithm</span> <span class="n">SHA256</span><span class="p">).</span><span class="n">Hash</span> <span class="o">-eq</span> <span class="nv">$want</span><span class="p">)</span> <span class="p">{</span> <span class="s1">'OK'</span> <span class="p">}</span> <span class="k">else</span> <span class="p">{</span> <span class="s1">'MISMATCH'</span> <span class="p">}</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="nb">Expand-Archive</span> <span class="nv">$zip</span> <span class="n">-DestinationPath</span> <span class="p">.</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
@@ -1709,7 +1712,14 @@ right-click the <code>.zip</code> and choose <strong>Extract All</strong>; on ma
 </div>
 </div>
 <p><code>gh release list</code> takes the newest release, pre-releases included; <code>gh release download</code> alone would skip those.
-<code>SHA256SUMS</code> lets you check the download, as the macOS and Linux tabs do.</p>
+Each tab checks the download against <code>SHA256SUMS</code> before unpacking it; anything but <code>OK</code> means a damaged or
+different file.</p>
+<p><strong>If the download never finishes.</strong> On some managed networks a browser download from the releases page stalls, going
+back and forth between 0 and 1 byte and resuming without end. GitHub serves the files from a second host,
+<code>release-assets.githubusercontent.com</code>, through short-lived links, and a proxy or scanner that holds the file back
+until it has seen all of it can outlast the link. Download it on another machine and copy it across (a USB stick or
+a file share is fine), then check it with <code>SHA256SUMS</code> as above. The folder needs nothing from the internet to run.
+To see what the network is doing, <code>curl.exe -L -v -o oci-hermit.zip &lt;link to the file&gt;</code> prints each step.</p>
 <p>You now have an <code>oci-hermit</code> folder. The commands below run from the folder that contains it.</p>
 <h2 id="2-check-it">2. Check it<a class="headerlink" href="#2-check-it" title="Permanent link">&para;</a></h2>
 <div class="tabbed-set tabbed-alternate" data-tabs="2:3"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><input id="__tabbed_2_3" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">Windows</label><label for="__tabbed_2_2">macOS</label><label for="__tabbed_2_3">Linux</label></div>
@@ -1736,13 +1746,13 @@ right-click the <code>.zip</code> and choose <strong>Extract All</strong>; on ma
 </div>
 <p><code>version</code> prints the version and the control protocol the host speaks:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>version
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="go">oci-hermit 0.0.0 (control protocol 1.2)</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="go">oci-hermit 0.1.0 (control protocol 1.2)</span>
 </code></pre></div>
 <p><code>machine info</code> lists both emulators with <code>accel tcg</code>, both guests, the defaults <code>run</code> uses, where images are stored
 and how many there are, and which registry logins it found. Each path says whether it came from a setting or was
 found beside <code>oci-hermit</code>. On a Mac with Apple silicon it looks like this (paths shortened):</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="go">oci-hermit 0.0.0 (control protocol 1.2)</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="go">oci-hermit 0.1.0 (control protocol 1.2)</span>
 <a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="go">host: macos/aarch64, so images default to linux/arm64</span>
 <a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>
 <a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="go">emulator (QEMU, software CPU only):</span>
