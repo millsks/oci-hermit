@@ -474,7 +474,6 @@ struct Placed {
 }
 
 /// Writes the EROFS image of the uncompressed layer tarball `layer` to `out`, which should be empty.
-#[cfg_attr(not(test), expect(dead_code, reason = "run attaches the disks in #17"))]
 pub fn build(layer: impl Read, out: impl Write + Seek) -> Result<Built, BuildError> {
     let mut builder = Builder {
         out,
@@ -700,135 +699,216 @@ fn finish<W: Write + Seek>(mut builder: Builder<W>) -> Result<Built, BuildError>
     })
 }
 
-#[cfg(test)]
-pub(crate) mod reader {
-    //! Reads back what [`super::build`] wrote, checking what the kernel checks, so tests can compare trees.
-    use super::*;
+/// An image's layer disks, top layer first, read as overlayfs would merge them, for `run` to resolve the image's
+/// user without unpacking it (#17).
+pub struct Layers(pub Vec<reader::Disk<std::fs::File>>);
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct Inode {
-        pub(crate) mode: u16,
-        pub(crate) uid: u32,
-        pub(crate) gid: u32,
-        pub(crate) mtime: u64,
-        pub(crate) size: u64,
-        pub(crate) nlink: u32,
-        pub(crate) rdev: u32,
-        pub(crate) xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
-        layout: u16,
-        start: u64,
-        inline_at: usize,
+impl crate::users::Files for Layers {
+    fn entry(&self, path: &str) -> Option<crate::users::Entry> {
+        // /etc/passwd and /etc/group are small; a huge one is not read.
+        match reader::find(&self.0, path, 16 << 20).ok()?? {
+            reader::Found::File(data) => Some(crate::users::Entry::File(data)),
+            reader::Found::Symlink(target) => Some(crate::users::Entry::Symlink(
+                String::from_utf8_lossy(&target).into_owned(),
+            )),
+            reader::Found::Other => Some(crate::users::Entry::Other),
+        }
     }
+}
 
-    pub(crate) struct Image {
-        bytes: Vec<u8>,
-        meta: usize,
-        pub(crate) root: u64,
-        pub(crate) inos: u64,
+/// Reading a layer disk back: `run` looks up `/etc/passwd` and `/etc/group` in the image's disks (#17), and the
+/// tests check what [`build`] wrote. It reads only what [`build`] writes; anything else is an error, never a panic.
+pub mod reader {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn bad(what: impl Into<String>) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, format!("not a layer disk: {}", what.into()))
     }
 
     fn u16_at(b: &[u8], at: usize) -> u16 {
-        u16::from_le_bytes(b[at..at + 2].try_into().unwrap())
+        u16::from_le_bytes([b[at], b[at + 1]])
     }
     fn u32_at(b: &[u8], at: usize) -> u32 {
-        u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
     }
     fn u64_at(b: &[u8], at: usize) -> u64 {
-        u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+        u64::from(u32_at(b, at)) | (u64::from(u32_at(b, at + 4)) << 32)
     }
 
-    impl Image {
-        pub(crate) fn open(bytes: Vec<u8>) -> Image {
-            let sb = SUPER_OFFSET as usize;
-            assert_eq!(u32_at(&bytes, sb), MAGIC, "magic");
-            assert_eq!(bytes[sb + 12], BLOCK_BITS);
-            assert_eq!(bytes[sb + 90], 0, "dirblkbits");
-            assert_eq!(u32_at(&bytes, sb + 80), 0, "no incompatible features");
-            let blocks = u32_at(&bytes, sb + 36) as usize;
-            assert_eq!(bytes.len(), blocks * BLOCK as usize, "the image is its block count");
-            Image {
-                meta: u32_at(&bytes, sb + 40) as usize * BLOCK as usize,
-                root: u64::from(u16_at(&bytes, sb + 14)),
-                inos: u64_at(&bytes, sb + 16),
-                bytes,
-            }
+    /// One inode as stored.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Inode {
+        pub mode: u16,
+        pub uid: u32,
+        pub gid: u32,
+        pub mtime: u64,
+        pub size: u64,
+        pub nlink: u32,
+        pub rdev: u32,
+        /// `(name index, name after the prefix, value)`.
+        pub xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
+        pub(crate) layout: u16,
+        start: u64,
+        /// Where the inline data begins.
+        pub(crate) inline_at: u64,
+    }
+
+    impl Inode {
+        pub fn is_dir(&self) -> bool {
+            self.mode & 0o170000 == S_IFDIR
+        }
+        pub fn is_file(&self) -> bool {
+            self.mode & 0o170000 == S_IFREG
+        }
+        pub fn is_symlink(&self) -> bool {
+            self.mode & 0o170000 == S_IFLNK
+        }
+        /// An overlayfs whiteout: a character device 0:0.
+        pub fn is_whiteout(&self) -> bool {
+            self.mode & 0o170000 == S_IFCHR && self.rdev == 0
+        }
+        /// A directory that hides what lower layers have in it.
+        pub fn is_opaque(&self) -> bool {
+            self.xattrs
+                .iter()
+                .any(|(index, name, value)| *index == XATTR_TRUSTED && name == b"overlay.opaque" && value == b"y")
+        }
+    }
+
+    /// An open layer disk.
+    pub struct Disk<R> {
+        source: RefCell<R>,
+        meta: u64,
+        pub root: u64,
+        pub inos: u64,
+        pub blocks: u64,
+    }
+
+    impl Disk<std::fs::File> {
+        pub fn open_path(path: &std::path::Path) -> io::Result<Disk<std::fs::File>> {
+            Disk::open(std::fs::File::open(path)?)
+        }
+    }
+
+    impl<R: Read + Seek> Disk<R> {
+        fn read_at(&self, at: u64, len: usize) -> io::Result<Vec<u8>> {
+            let mut source = self.source.borrow_mut();
+            source.seek(SeekFrom::Start(at))?;
+            let mut buf = vec![0; len];
+            source
+                .read_exact(&mut buf)
+                .map_err(|_| bad(format!("{len} bytes at {at} are past its end")))?;
+            Ok(buf)
         }
 
-        pub(crate) fn inode(&self, nid: u64) -> Inode {
-            let at = self.meta + nid as usize * 32;
-            let b = &self.bytes;
-            let format = u16_at(b, at);
-            assert_eq!(format & 1, VERSION_EXTENDED, "extended inode at nid {nid}");
+        pub fn open(source: R) -> io::Result<Disk<R>> {
+            let mut disk = Disk {
+                source: RefCell::new(source),
+                meta: 0,
+                root: 0,
+                inos: 0,
+                blocks: 0,
+            };
+            let sb = disk.read_at(SUPER_OFFSET, 128)?;
+            if u32_at(&sb, 0) != MAGIC {
+                return Err(bad("no EROFS magic"));
+            }
+            if sb[12] != BLOCK_BITS || sb[90] != 0 || u32_at(&sb, 80) != 0 {
+                return Err(bad("a block size or feature this reader does not know"));
+            }
+            disk.root = u64::from(u16_at(&sb, 14));
+            disk.inos = u64_at(&sb, 16);
+            disk.blocks = u64::from(u32_at(&sb, 36));
+            disk.meta = u64::from(u32_at(&sb, 40)) * BLOCK;
+            Ok(disk)
+        }
+
+        pub fn inode(&self, nid: u64) -> io::Result<Inode> {
+            let at = nid
+                .checked_mul(32)
+                .and_then(|o| o.checked_add(self.meta))
+                .ok_or_else(|| bad("an inode number out of range"))?;
+            let b = self.read_at(at, INODE_SIZE)?;
+            let format = u16_at(&b, 0);
             let layout = (format >> 1) & 7;
-            assert!(layout == LAYOUT_FLAT_PLAIN || layout == LAYOUT_FLAT_INLINE);
-            let icount = usize::from(u16_at(b, at + 2));
+            if format & 1 != VERSION_EXTENDED || !(layout == LAYOUT_FLAT_PLAIN || layout == LAYOUT_FLAT_INLINE) {
+                return Err(bad(format!("inode {nid} has a layout this reader does not know")));
+            }
+            let icount = usize::from(u16_at(&b, 2));
             let xattr_size = if icount == 0 { 0 } else { 12 + 4 * (icount - 1) };
+            let body = self.read_at(at + INODE_SIZE as u64, xattr_size)?;
             let mut xattrs = Vec::new();
-            let mut x = at + INODE_SIZE + 12;
-            while x < at + INODE_SIZE + xattr_size {
-                let name_len = usize::from(b[x]);
-                let index = b[x + 1];
-                let value_len = usize::from(u16_at(b, x + 2));
-                let name = b[x + 4..x + 4 + name_len].to_vec();
-                let value = b[x + 4 + name_len..x + 4 + name_len + value_len].to_vec();
-                xattrs.push((index, name, value));
+            let mut x = 12;
+            while x + 4 <= body.len() {
+                let name_len = usize::from(body[x]);
+                let value_len = usize::from(u16_at(&body, x + 2));
+                let end = x + 4 + name_len + value_len;
+                if end > body.len() {
+                    return Err(bad(format!("inode {nid} has a broken xattr")));
+                }
+                xattrs.push((
+                    body[x + 1],
+                    body[x + 4..x + 4 + name_len].to_vec(),
+                    body[x + 4 + name_len..end].to_vec(),
+                ));
                 x += (4 + name_len + value_len).div_ceil(4) * 4;
             }
-            let size = u64_at(b, at + 8);
-            let i_u = u32_at(b, at + 16);
-            let inode = Inode {
-                mode: u16_at(b, at + 4),
-                uid: u32_at(b, at + 24),
-                gid: u32_at(b, at + 28),
-                mtime: u64_at(b, at + 32),
-                size,
-                nlink: u32_at(b, at + 44),
+            let i_u = u32_at(&b, 16);
+            Ok(Inode {
+                mode: u16_at(&b, 4),
+                uid: u32_at(&b, 24),
+                gid: u32_at(&b, 28),
+                mtime: u64_at(&b, 32),
+                size: u64_at(&b, 8),
+                nlink: u32_at(&b, 44),
                 rdev: i_u,
                 xattrs,
                 layout,
-                start: u64::from(i_u) | (u64::from(u16_at(b, at + 6)) << 32),
-                inline_at: at + INODE_SIZE + xattr_size,
-            };
-            if layout == LAYOUT_FLAT_INLINE {
-                // The kernel reads the tail from the inode's block: it must not cross into the next one.
-                let tail = (size % BLOCK) as usize;
-                let tail = if tail == 0 && size > 0 { BLOCK as usize } else { tail };
-                assert!(
-                    inode.inline_at % BLOCK as usize + tail <= BLOCK as usize || tail == 0,
-                    "inline tail of nid {nid} crosses a block"
-                );
-            }
-            assert!(at % (BLOCK as usize) + INODE_SIZE <= BLOCK as usize || layout == LAYOUT_FLAT_PLAIN);
-            inode
+                start: u64::from(i_u) | (u64::from(u16_at(&b, 6)) << 32),
+                inline_at: at + INODE_SIZE as u64 + xattr_size as u64,
+            })
         }
 
-        /// The data of a regular file, directory or symlink, mapped as `erofs_map_blocks` maps it.
-        pub(crate) fn data(&self, inode: &Inode) -> Vec<u8> {
-            let size = inode.size as usize;
+        /// The data of a regular file, directory or symlink, mapped as the kernel maps it. Refuses more than
+        /// `limit` bytes, so a lookup never reads a whole large file by accident.
+        pub fn data(&self, inode: &Inode, limit: u64) -> io::Result<Vec<u8>> {
+            if inode.size > limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::FileTooLarge,
+                    format!("{} bytes", inode.size),
+                ));
+            }
+            let size = usize::try_from(inode.size).map_err(|_| bad("a size out of range"))?;
             let blocks = size.div_ceil(BLOCK as usize);
             let in_blocks = if inode.layout == LAYOUT_FLAT_INLINE {
                 blocks.saturating_sub(1)
             } else {
                 blocks
             };
-            let from = inode.start as usize * BLOCK as usize;
-            let mut data = self.bytes[from..from + std::cmp::min(size, in_blocks * BLOCK as usize)].to_vec();
+            let mut data = self.read_at(inode.start * BLOCK, std::cmp::min(size, in_blocks * BLOCK as usize))?;
             if inode.layout == LAYOUT_FLAT_INLINE {
-                let rest = size - data.len();
-                data.extend(&self.bytes[inode.inline_at..inode.inline_at + rest]);
+                data.extend(self.read_at(inode.inline_at, size - data.len())?);
             }
-            data
+            Ok(data)
         }
 
-        /// A directory's entries as the kernel's readdir reads them.
-        pub(crate) fn entries(&self, nid: u64) -> Vec<(Vec<u8>, u64, u8)> {
-            let inode = self.inode(nid);
-            assert_eq!(inode.mode & 0o170000, S_IFDIR);
-            let data = self.data(&inode);
+        /// A directory's entries: name, inode number and file type, `.` and `..` included.
+        pub fn entries(&self, nid: u64) -> io::Result<Vec<(Vec<u8>, u64, u8)>> {
+            let inode = self.inode(nid)?;
+            if !inode.is_dir() {
+                return Err(bad(format!("inode {nid} is not a directory")));
+            }
+            let data = self.data(&inode, 64 << 20)?;
             let mut found = Vec::new();
             for block in data.chunks(BLOCK as usize) {
+                if block.len() < DIRENT_SIZE {
+                    return Err(bad("a directory block too short for an entry"));
+                }
                 let nameoff0 = usize::from(u16_at(block, 8));
-                assert!(nameoff0 >= DIRENT_SIZE && nameoff0 < BLOCK as usize && nameoff0 % DIRENT_SIZE == 0);
+                if nameoff0 < DIRENT_SIZE || nameoff0 > block.len() || !nameoff0.is_multiple_of(DIRENT_SIZE) {
+                    return Err(bad(format!("directory {nid} has a broken block")));
+                }
                 let count = nameoff0 / DIRENT_SIZE;
                 for i in 0..count {
                     let d = i * DIRENT_SIZE;
@@ -836,12 +916,130 @@ pub(crate) mod reader {
                     let end = if i + 1 < count {
                         usize::from(u16_at(block, d + DIRENT_SIZE + 8))
                     } else {
-                        off + block[off..].iter().position(|&c| c == 0).unwrap_or(block.len() - off)
+                        off + block[off.min(block.len())..]
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(block.len() - off.min(block.len()))
                     };
-                    assert!(end - off <= NAME_MAX && end <= block.len());
+                    if off > end || end > block.len() || end - off > NAME_MAX {
+                        return Err(bad(format!("directory {nid} has a broken entry")));
+                    }
                     found.push((block[off..end].to_vec(), u64_at(block, d), block[d + 10]));
                 }
             }
+            Ok(found)
+        }
+
+        /// The inode `parts` names from the root, if every component exists here. Directories only along the way.
+        #[cfg(test)]
+        pub fn lookup(&self, parts: &[&[u8]]) -> io::Result<Option<(u64, Inode)>> {
+            let mut nid = self.root;
+            let mut inode = self.inode(nid)?;
+            for part in parts {
+                if !inode.is_dir() {
+                    return Ok(None);
+                }
+                let Some((_, child, _)) = self.entries(nid)?.into_iter().find(|(name, _, _)| name == part) else {
+                    return Ok(None);
+                };
+                nid = child;
+                inode = self.inode(nid)?;
+            }
+            Ok(Some((nid, inode)))
+        }
+    }
+
+    /// What a path names in a stack of layer disks, as overlayfs would see it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Found {
+        File(Vec<u8>),
+        Symlink(Vec<u8>),
+        Other,
+    }
+
+    /// Looks `path` (relative, `/`-separated, no `..`) up in `disks`, top layer first, as overlayfs merges them: a
+    /// whiteout hides the path, a non-directory hides lower layers' directories of the same name, and an opaque
+    /// directory hides what lower layers have under it. Files larger than `limit` are an error.
+    pub fn find<R: Read + Seek>(disks: &[Disk<R>], path: &str, limit: u64) -> io::Result<Option<Found>> {
+        let parts: Vec<&[u8]> = path.split('/').filter(|p| !p.is_empty()).map(str::as_bytes).collect();
+        for disk in disks {
+            // Walk this layer, noting an opaque directory or a non-directory that ends the search below it.
+            let mut nid = disk.root;
+            let mut inode = disk.inode(nid)?;
+            let mut stop_here = false;
+            let mut missing = false;
+            for (i, part) in parts.iter().enumerate() {
+                if inode.is_opaque() && i > 0 {
+                    stop_here = true;
+                }
+                let Some((_, child, _)) = disk.entries(nid)?.into_iter().find(|(name, _, _)| name == part) else {
+                    missing = true;
+                    break;
+                };
+                nid = child;
+                inode = disk.inode(nid)?;
+                if inode.is_whiteout() {
+                    return Ok(None);
+                }
+                if i + 1 < parts.len() && !inode.is_dir() {
+                    // A file where a directory should be hides lower layers' directories.
+                    return Ok(None);
+                }
+            }
+            if !missing {
+                if inode.is_opaque() && parts.is_empty() {
+                    return Ok(Some(Found::Other));
+                }
+                return Ok(Some(if inode.is_file() {
+                    Found::File(disk.data(&inode, limit)?)
+                } else if inode.is_symlink() {
+                    Found::Symlink(disk.data(&inode, BLOCK)?)
+                } else {
+                    Found::Other
+                }));
+            }
+            if stop_here || inode.is_opaque() {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reader::{Disk, Inode};
+
+    /// A disk in memory, with the checks the kernel makes while reading it.
+    pub(crate) struct Image(Disk<io::Cursor<Vec<u8>>>);
+
+    impl Image {
+        pub(crate) fn open(bytes: Vec<u8>) -> Image {
+            let len = bytes.len();
+            let disk = Disk::open(io::Cursor::new(bytes)).unwrap();
+            assert_eq!(disk.blocks * BLOCK, len as u64, "the image is its block count");
+            Image(disk)
+        }
+
+        fn inode(&self, nid: u64) -> Inode {
+            let inode = self.0.inode(nid).unwrap();
+            if inode.layout == LAYOUT_FLAT_INLINE {
+                // The kernel reads the tail from the inode's block: it must not cross into the next one.
+                let tail = inode.size % BLOCK;
+                assert!(
+                    inode.inline_at % BLOCK + tail <= BLOCK,
+                    "inline tail of nid {nid} crosses a block"
+                );
+            }
+            inode
+        }
+
+        pub(crate) fn data(&self, inode: &Inode) -> Vec<u8> {
+            self.0.data(inode, u64::MAX).unwrap()
+        }
+
+        pub(crate) fn entries(&self, nid: u64) -> Vec<(Vec<u8>, u64, u8)> {
+            let found = self.0.entries(nid).unwrap();
             let names: Vec<_> = found.iter().map(|e| e.0.clone()).collect();
             let mut sorted = names.clone();
             sorted.sort();
@@ -852,10 +1050,10 @@ pub(crate) mod reader {
         /// Every path (`/` for the root) with its inode, following directories.
         pub(crate) fn walk(&self) -> BTreeMap<String, (u64, Inode)> {
             let mut all = BTreeMap::new();
-            let mut todo = vec![(String::new(), self.root)];
+            let mut todo = vec![(String::new(), self.0.root)];
             while let Some((path, nid)) = todo.pop() {
                 let inode = self.inode(nid);
-                if inode.mode & 0o170000 == S_IFDIR {
+                if inode.is_dir() {
                     for (name, child, _) in self.entries(nid) {
                         if name == b"." || name == b".." {
                             continue;
@@ -868,11 +1066,6 @@ pub(crate) mod reader {
             all
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::reader::Image;
     use super::*;
 
     /// A tarball written entry by entry, with PAX xattrs where asked.
@@ -999,9 +1192,9 @@ mod tests {
             assert_eq!((inode.mtime, inode.nlink), (1_700_000_000, 1));
         }
         assert_eq!(all["/data"].1.mode, S_IFDIR | 0o750);
-        assert_eq!(built.inodes, image.inos);
+        assert_eq!(built.inodes, image.0.inos);
         assert_eq!(built.inodes, sizes.len() as u64 + 2);
-        assert_eq!(image.root, 0, "the root is the first inode");
+        assert_eq!(image.0.root, 0, "the root is the first inode");
     }
 
     #[test]
@@ -1031,9 +1224,9 @@ mod tests {
         // Directory link counts: 2, plus one per subdirectory.
         assert_eq!(all["/"].1.nlink, 2 + 3);
         assert_eq!(all["/usr"].1.nlink, 3);
-        let root_entries = image.entries(image.root);
+        let root_entries = image.entries(image.0.root);
         assert_eq!(&root_entries[0].0, b".");
-        assert_eq!((&root_entries[1].0, root_entries[1].1), (&b"..".to_vec(), image.root));
+        assert_eq!((&root_entries[1].0, root_entries[1].1), (&b"..".to_vec(), image.0.root));
     }
 
     #[test]
@@ -1184,6 +1377,71 @@ mod tests {
             std::fs::write(dir.join("sample.expected"), &listing).unwrap();
         }
         assert!(listing.contains("/bin/tool f 640 1000 1001 9000 "), "{listing}");
+    }
+
+    #[test]
+    fn lookups_through_a_stack_of_disks_follow_overlayfs() {
+        use crate::users::Files;
+        let dir = crate::qemu::testing::scratch("erofs-stack");
+        let disk = |name: &str, tar: Vec<u8>| {
+            let path = dir.join(name);
+            build(&tar[..], std::fs::File::create(&path).unwrap()).unwrap();
+            reader::Disk::open_path(&path).unwrap()
+        };
+        let bottom = disk(
+            "bottom.erofs",
+            Tar::new()
+                .file("etc/passwd", b"root:x:0:0::/root:/bin/sh\nold:x:5:5::/old:/bin/sh\n")
+                .file("etc/group", b"root:x:0:\n")
+                .file("etc/hosts", b"127.0.0.1 localhost\n")
+                .file("opt/x/a", b"a")
+                .file("d/f", b"f")
+                .bytes(),
+        );
+        let top = disk(
+            "top.erofs",
+            Tar::new()
+                .file(
+                    "etc/passwd",
+                    b"root:x:0:0::/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n",
+                )
+                .file("etc/.wh.group", b"")
+                .dir("opt/x")
+                .file("opt/x/.wh..wh..opq", b"")
+                .file("opt/x/b", b"b")
+                .file("d", b"now a file")
+                .link("etc/mtab", tar::EntryType::Symlink, "/proc/mounts")
+                .bytes(),
+        );
+        let layers = Layers(vec![top, bottom]);
+        let file = |path: &str| match layers.entry(path) {
+            Some(crate::users::Entry::File(data)) => Some(data),
+            _ => None,
+        };
+        assert!(
+            String::from_utf8(file("etc/passwd").unwrap())
+                .unwrap()
+                .contains("app:x:1000")
+        );
+        assert!(layers.entry("etc/group").is_none(), "whited out");
+        assert_eq!(
+            file("etc/hosts").unwrap(),
+            b"127.0.0.1 localhost\n",
+            "from the lower layer"
+        );
+        assert!(layers.entry("opt/x/a").is_none(), "hidden by the opaque directory");
+        assert_eq!(file("opt/x/b").unwrap(), b"b");
+        assert!(layers.entry("d/f").is_none(), "a file hides the directory below it");
+        assert!(matches!(layers.entry("etc/mtab"), Some(crate::users::Entry::Symlink(t)) if t == "/proc/mounts"));
+        assert!(matches!(layers.entry("etc"), Some(crate::users::Entry::Other)));
+        assert!(layers.entry("nowhere").is_none());
+        let app = crate::users::resolve("app", &layers).unwrap();
+        assert_eq!((app.uid, app.gid, app.home.as_str()), (1000, 1000, "/home/app"));
+        assert!(
+            crate::users::resolve("old", &layers).is_err(),
+            "the top layer's passwd replaced it"
+        );
+        assert!(reader::Disk::open(io::Cursor::new(vec![0u8; 8192])).is_err());
     }
 
     #[test]

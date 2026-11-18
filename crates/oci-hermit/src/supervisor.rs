@@ -44,6 +44,18 @@ pub struct Launch<'a> {
     pub initrd: &'a Path,
     pub console_log: &'a Path,
     pub spec: MachineSpec,
+    /// The image's layer disks, bottom first (#17): attached read-only, as `layer0`, `layer1` and so on.
+    pub disks: &'a [PathBuf],
+}
+
+/// The most layer disks one sandbox takes. x86_64's microvm has 24 virtio transports and arm64's virt 32; the
+/// control port takes one, and the rest leave room for devices to come. An image with more layers runs from the
+/// initramfs instead.
+pub const MAX_DISKS: usize = 20;
+
+/// The serial number the agent finds disk `index` by.
+pub fn disk_serial(index: usize) -> String {
+    format!("layer{index}")
 }
 
 /// Why a sandbox could not be started, did not come up, or did not stop.
@@ -136,6 +148,16 @@ pub fn qemu_command(launch: &Launch<'_>) -> Result<(PathBuf, Vec<OsString>), Sup
     let port = format!("virtserialport,chardev=control,name={}", hermit_proto::CONTROL_PORT);
     push(&["-chardev", "stdio,id=control,signal=off"]);
     push(&["-device", "virtio-serial-device", "-device", &port]);
+    // Layer disks, read-only twice over: QEMU refuses writes, and EROFS has none to make.
+    for (i, disk) in launch.disks.iter().take(MAX_DISKS).enumerate() {
+        let serial = disk_serial(i);
+        let drive = format!(
+            "file={},if=none,id={serial},format=raw,readonly=on",
+            option_value(disk)?
+        );
+        push(&["-drive", &drive]);
+        push(&["-device", &format!("virtio-blk-device,drive={serial},serial={serial}")]);
+    }
     push(&["-append", kernel_cmdline(arch)]);
     args.extend([
         OsString::from("-L"),
@@ -170,6 +192,8 @@ pub struct Command {
     pub size: Option<(u16, u16)>,
     /// Who to run the command as; root when `None`.
     pub user: Option<hermit_proto::User>,
+    /// The serial numbers of the image's layer disks, bottom first; empty when the image is in the initramfs.
+    pub layers: Vec<String>,
 }
 
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
@@ -360,6 +384,7 @@ impl Sandbox {
             rows: command.size.map(|s| s.0),
             cols: command.size.map(|s| s.1),
             user: command.user.clone(),
+            layers: command.layers.clone(),
         })?;
         let deadline = Instant::now() + start_timeout;
         match self.receive(deadline, start_timeout)? {
@@ -506,6 +531,7 @@ mod tests {
                 memory_mib: 256,
                 cpus: 2,
             },
+            disks: &[],
         };
         let (binary, args) = qemu_command(&launch).unwrap();
         (binary, args.into_iter().map(|a| a.into_string().unwrap()).collect())
@@ -545,6 +571,52 @@ mod tests {
         // The only devices are the control channel's (`wires_the_control_port_to_qemus_stdio`).
         let devices = args.iter().filter(|a| *a == "-device").count();
         assert_eq!(devices, 2);
+    }
+
+    #[test]
+    fn attaches_layer_disks_read_only_and_no_more_than_fit() {
+        let disks: Vec<PathBuf> = (0..MAX_DISKS + 3)
+            .map(|i| PathBuf::from(format!("/c/a,b/{i}.erofs")))
+            .collect();
+        let launch = Launch {
+            bundle: Path::new("/b"),
+            kernel: Path::new("/g/kernel"),
+            initrd: Path::new("/r/initrd.cpio"),
+            console_log: Path::new("/r/console.log"),
+            spec: MachineSpec {
+                arch: GuestArch::X86_64,
+                memory_mib: 512,
+                cpus: 1,
+            },
+            disks: &disks[..2],
+        };
+        let args: Vec<String> = qemu_command(&launch)
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        let drives: Vec<&String> = args
+            .iter()
+            .zip(&args[1..])
+            .filter(|(f, _)| *f == "-drive")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            drives,
+            [
+                "file=/c/a,,b/0.erofs,if=none,id=layer0,format=raw,readonly=on",
+                "file=/c/a,,b/1.erofs,if=none,id=layer1,format=raw,readonly=on"
+            ]
+        );
+        assert!(args.contains(&"virtio-blk-device,drive=layer1,serial=layer1".to_string()));
+        let all = Launch {
+            disks: &disks,
+            ..launch
+        };
+        let count = qemu_command(&all).unwrap().1.iter().filter(|a| *a == "-drive").count();
+        assert_eq!(count, MAX_DISKS);
+        assert_eq!(disk_serial(3), "layer3");
     }
 
     #[test]

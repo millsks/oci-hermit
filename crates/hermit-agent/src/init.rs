@@ -148,6 +148,9 @@ pub trait System {
     fn next_event(&mut self) -> io::Result<Event>;
     /// Send one encoded line to the host.
     fn send_control(&mut self, line: &str) -> io::Result<()>;
+    /// Mount the image's layer disks (by serial number, bottom first) read-only and stack them with overlayfs on
+    /// the image root, under a throwaway writable layer in memory (1.3).
+    fn mount_root(&mut self, layers: &[String]) -> io::Result<()>;
     /// Start the command in the image's root filesystem, and return its process ID.
     fn start(&mut self, spec: &RunSpec) -> io::Result<i32>;
     /// Pass bytes to the running command's stdin.
@@ -162,6 +165,39 @@ pub trait System {
     fn sync(&mut self);
     /// Power the machine off. Returns only on failure.
     fn power_off(&mut self) -> io::Error;
+}
+
+/// Where layer `i` is mounted, read-only.
+pub fn layer_dir(i: usize) -> String {
+    format!("/layers/{i}")
+}
+
+/// The tmpfs that holds the writable layer: `upper/` and overlayfs's `work/`.
+pub const OVERLAY_DIR: &str = "/overlay";
+
+/// The overlayfs options for `count` layers: the top layer first in `lowerdir`, as overlayfs wants them, and the
+/// writable layer on the tmpfs.
+pub fn overlay_options(count: usize) -> String {
+    let lower: Vec<String> = (0..count).rev().map(layer_dir).collect();
+    format!(
+        "lowerdir={},upperdir={OVERLAY_DIR}/upper,workdir={OVERLAY_DIR}/work",
+        lower.join(":")
+    )
+}
+
+/// The device of each layer (`/dev/vdb`), found by its serial number in `disks` (`(name, serial)` from
+/// `/sys/block`). A layer without its disk is an error: running without it would run a different image.
+pub fn layer_devices(layers: &[String], disks: &[(String, String)]) -> io::Result<Vec<String>> {
+    layers
+        .iter()
+        .map(|serial| {
+            disks
+                .iter()
+                .find(|(_, s)| s == serial)
+                .map(|(name, _)| format!("/dev/{name}"))
+                .ok_or_else(|| io::Error::new(ErrorKind::NotFound, format!("no disk with serial {serial}")))
+        })
+        .collect()
 }
 
 /// Log one line to the console. A console write error has nowhere else to go, so it is dropped.
@@ -333,12 +369,29 @@ fn answer(
             rows,
             cols,
             user,
+            layers,
         } => {
             if *ran {
                 error("a command already ran in this sandbox")
             } else if argv.is_empty() {
                 error("no command to run")
+            } else if let Err(e) = if layers.is_empty() {
+                Ok(())
             } else {
+                sys.mount_root(&layers)
+            } {
+                log(
+                    out,
+                    format_args!("mounting the image's {} layers failed: {e}", layers.len()),
+                );
+                error(format!("mounting the image's layers: {e}"))
+            } else {
+                if !layers.is_empty() {
+                    log(
+                        out,
+                        format_args!("mounted {} layers with overlayfs on the image root", layers.len()),
+                    );
+                }
                 let spec = RunSpec {
                     argv,
                     env,
@@ -426,6 +479,8 @@ mod tests {
         sent: Vec<String>,
         start_error: bool,
         started: Vec<RunSpec>,
+        mounted_root: Vec<Vec<String>>,
+        mount_root_error: bool,
         stdin: Vec<u8>,
         stdin_closed: bool,
         leftover: Vec<(Stream, Vec<u8>)>,
@@ -474,6 +529,14 @@ mod tests {
             self.sent.push(line.to_string());
             Ok(())
         }
+        fn mount_root(&mut self, layers: &[String]) -> io::Result<()> {
+            self.calls.push("mount_root".into());
+            self.mounted_root.push(layers.to_vec());
+            if self.mount_root_error {
+                return Err(io::Error::new(ErrorKind::NotFound, "no disk with serial layer1"));
+            }
+            Ok(())
+        }
         fn start(&mut self, spec: &RunSpec) -> io::Result<i32> {
             if self.start_error {
                 return Err(io::Error::new(
@@ -481,6 +544,7 @@ mod tests {
                     "executable file not found in $PATH",
                 ));
             }
+            self.calls.push("start".into());
             self.started.push(spec.clone());
             Ok(42)
         }
@@ -546,7 +610,7 @@ mod tests {
         assert_eq!(mounts.len(), EARLY_MOUNTS.len());
         assert_eq!(sys.calls[0], "block");
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.2)"));
+        assert!(log.contains("ready (control protocol 1.3)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -647,7 +711,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.2)"));
+        assert!(log.contains("ready (control protocol 1.3)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -677,6 +741,7 @@ mod tests {
             rows: Some(40),
             cols: Some(120),
             user: None,
+            layers: Vec::new(),
         })
     }
 
@@ -705,6 +770,7 @@ mod tests {
                     rows: None,
                     cols: None,
                     user: Some(user.clone()),
+                    layers: Vec::new(),
                 }),
                 Ok(Event::Signal(Signal::Child)),
                 line(&HostMessage::Shutdown),
@@ -716,6 +782,70 @@ mod tests {
         assert_eq!(sys.started.len(), 1);
         assert_eq!(sys.started[0].user, Some(user));
         assert!(log.contains("as pid 42, uid 1000"), "{log}");
+    }
+
+    #[test]
+    fn stacks_the_layer_disks_before_the_command_starts() {
+        let run = |layers: Vec<String>| {
+            line(&HostMessage::Run {
+                argv: vec!["id".into()],
+                env: Vec::new(),
+                cwd: "/".into(),
+                tty: false,
+                rows: None,
+                cols: None,
+                user: None,
+                layers,
+            })
+        };
+        let layers = vec!["layer0".to_string(), "layer1".to_string()];
+        let mut sys = Fake {
+            events: VecDeque::from([run(layers.clone()), line(&HostMessage::Shutdown)]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(sys.mounted_root, std::slice::from_ref(&layers));
+        let mounted = sys.calls.iter().position(|c| c == "mount_root").unwrap();
+        let started = sys.calls.iter().position(|c| c.starts_with("start")).unwrap();
+        assert!(mounted < started, "{:?}", sys.calls);
+        assert!(log.contains("mounted 2 layers with overlayfs"), "{log}");
+
+        // A disk that cannot be mounted stops the command; the agent goes on serving.
+        let mut sys = Fake {
+            events: VecDeque::from([run(layers), line(&HostMessage::Shutdown)]),
+            mount_root_error: true,
+            ..Fake::default()
+        };
+        run_fake(&mut sys);
+        assert!(sys.started.is_empty());
+        assert!(matches!(
+            &replies(&sys)[0],
+            GuestMessage::Error { message } if message.contains("mounting the image's layers: no disk with serial layer1")
+        ));
+
+        // Without layers the image is in the initramfs, and nothing is mounted for it.
+        let mut sys = Fake {
+            events: VecDeque::from([run(Vec::new()), line(&HostMessage::Shutdown)]),
+            ..Fake::default()
+        };
+        run_fake(&mut sys);
+        assert!(sys.mounted_root.is_empty() && sys.started.len() == 1);
+    }
+
+    #[test]
+    fn finds_layer_disks_by_serial_and_stacks_the_top_first() {
+        let disks = vec![
+            ("vda".to_string(), "layer1".to_string()),
+            ("vdb".to_string(), "layer0".to_string()),
+        ];
+        let layers = vec!["layer0".to_string(), "layer1".to_string()];
+        assert_eq!(layer_devices(&layers, &disks).unwrap(), ["/dev/vdb", "/dev/vda"]);
+        let missing = layer_devices(&["layer2".to_string()], &disks).unwrap_err();
+        assert!(missing.to_string().contains("layer2"));
+        assert_eq!(
+            overlay_options(3),
+            "lowerdir=/layers/2:/layers/1:/layers/0,upperdir=/overlay/upper,workdir=/overlay/work"
+        );
     }
 
     #[test]

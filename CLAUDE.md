@@ -77,9 +77,13 @@ Everything runs through pixi.
 - The control channel is QEMU's stdin and stdout (`-chardev stdio`), so QEMU must never print to stdout: its
   diagnostics go to stderr (`qemu.log`). Treat everything from the guest as untrusted: cap line length, reject what
   is not a message, time out instead of blocking.
-- `run` is the M1 spike: the image's files go into the initramfs under `/rootfs` (so the guest needs about twice
-  the image's size in RAM) and the agent chroots there with the command. EROFS layer disks (#16, #17) and crun (#21)
-  replace both.
+- `run` attaches a stored image's layers as read-only virtio disks (EROFS, built once per layer by `Store::layer_disk`,
+  at most `supervisor::MAX_DISKS`), and the agent (protocol 1.3) stacks them with overlayfs under a tmpfs upper layer
+  on `/rootfs` (#17). The user is resolved by reading `/etc/passwd` and `/etc/group` from the disks (`erofs::Layers`),
+  never by unpacking the image. An image opened from a path, or with more layers than disks fit, still goes into
+  the initramfs under `/rootfs` (about twice its size in RAM). `run` holds its shared store until QEMU has the disks
+  open (after the handshake), so `rmi` cannot delete a disk being attached. The agent chroots into `/rootfs`; crun
+  (#21) replaces that.
 - The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
   store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs. It waits up to 2 s, then fails with
   `Busy`: on Unix a child process holds an inherited lock between `fork` and `exec`, so a zero wait is flaky. A pull writes blobs before naming them, so garbage collection without the exclusive lock would

@@ -111,6 +111,21 @@ fn context(what: &str) -> impl Fn(Errno) -> io::Error + '_ {
     move |e| io::Error::new(io::Error::from(e).kind(), format!("{what}: {e}"))
 }
 
+/// The virtio disks and their serial numbers, as `(name, serial)` from `/sys/block/vd*/serial`.
+fn list_disks() -> io::Result<Vec<(String, String)>> {
+    let mut disks = Vec::new();
+    for entry in std::fs::read_dir("/sys/block")? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("vd") {
+            continue;
+        }
+        if let Ok(serial) = std::fs::read_to_string(format!("/sys/block/{name}/serial")) {
+            disks.push((name, serial.trim().to_string()));
+        }
+    }
+    Ok(disks)
+}
+
 /// `argv0` looked up in the `PATH` from `env`, inside the current root.
 fn resolve(argv0: &str, env: &[String]) -> io::Result<PathBuf> {
     if argv0.contains('/') {
@@ -311,6 +326,57 @@ impl System for Linux {
             }
             self.read_outputs(&outputs_ready);
         }
+    }
+
+    fn mount_root(&mut self, layers: &[String]) -> io::Result<()> {
+        // The disks were probed before PID 1 started; a late one gets a few seconds.
+        let mut disks = list_disks()?;
+        for _ in 0..50 {
+            if layers.iter().all(|l| disks.iter().any(|(_, serial)| serial == l)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            disks = list_disks()?;
+        }
+        let devices = init::layer_devices(layers, &disks)?;
+        let fs_error = |what: String| move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
+        for (i, device) in devices.iter().enumerate() {
+            let target = init::layer_dir(i);
+            std::fs::create_dir_all(&target).map_err(fs_error(format!("creating {target}")))?;
+            nix::mount::mount(
+                Some(device.as_str()),
+                target.as_str(),
+                Some("erofs"),
+                MsFlags::MS_RDONLY,
+                None::<&str>,
+            )
+            .map_err(context(&format!("mounting layer {i} ({device}) on {target}")))?;
+        }
+        let overlay = init::OVERLAY_DIR;
+        std::fs::create_dir_all(overlay).map_err(fs_error(format!("creating {overlay}")))?;
+        nix::mount::mount(
+            Some("tmpfs"),
+            overlay,
+            Some("tmpfs"),
+            MsFlags::empty(),
+            Some("mode=0755"),
+        )
+        .map_err(context("mounting the writable layer"))?;
+        for dir in ["upper", "work"] {
+            let path = format!("{overlay}/{dir}");
+            std::fs::create_dir_all(&path).map_err(fs_error(format!("creating {path}")))?;
+        }
+        std::fs::create_dir_all(ROOTFS).map_err(fs_error(format!("creating {ROOTFS}")))?;
+        let options = init::overlay_options(devices.len());
+        nix::mount::mount(
+            Some("overlay"),
+            ROOTFS,
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(options.as_str()),
+        )
+        .map_err(context("stacking the layers with overlayfs"))?;
+        Ok(())
     }
 
     fn start(&mut self, spec: &RunSpec) -> io::Result<i32> {

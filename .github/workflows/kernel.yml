@@ -324,6 +324,49 @@ jobs:
             echo "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # #17: a stored image runs from its layer disks, stacked with overlayfs under a throwaway writable layer.
+      # Writes land in that layer only: the disks do not change, and the next run sees the image as it was.
+      - name: Writes stay in the sandbox
+        shell: bash
+        env:
+          OCI_HERMIT_DATA_DIR: ${{ runner.temp }}/hermit-data
+        run: |
+          set -euo pipefail
+          hermit=target/release/oci-hermit
+          platform=$([ "${{ matrix.arch }}" = x86_64 ] && echo linux/amd64 || echo linux/arm64)
+          image=mirror.gcr.io/library/debian:bookworm-slim
+          disks="$OCI_HERMIT_DATA_DIR/images/erofs/1"
+          before=$(cd "$disks" && sha256sum ./*.erofs)
+          echo "$before"
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          out=$("$hermit" run --platform "$platform" "$image" sh -c \
+            'echo changed > /etc/debian_version; rm /usr/bin/tac; cat /etc/debian_version;
+             test -e /usr/bin/tac && echo tac-there || echo tac-gone; grep " / " /proc/mounts' | tr -d '\r')
+          echo "$out"
+          grep -q '^changed$' <<< "$out"
+          grep -q '^tac-gone$' <<< "$out"
+          grep -q '^overlay / overlay ' <<< "$out" || { echo "::error::the root is not overlayfs"; exit 1; }
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          again=$("$hermit" run --platform "$platform" "$image" sh -c \
+            'cat /etc/debian_version; test -e /usr/bin/tac && echo tac-there' | tr -d '\r')
+          echo "$again"
+          grep -q '^12\.' <<< "$again" || { echo "::error::the next run saw the change"; exit 1; }
+          grep -q '^tac-there$' <<< "$again"
+          after=$(cd "$disks" && sha256sum ./*.erofs)
+          [ "$before" = "$after" ] || { echo "::error::a layer disk changed"; exit 1; }
+          who=$("$hermit" run -u nobody --platform "$platform" "$image" sh -c 'id -un' | tr -d '\r')
+          [ "$who" = nobody ] || { echo "::error::-u nobody on layer disks ran as '$who'"; exit 1; }
+          {
+            echo
+            echo "### Layer disks"
+            echo
+            echo '```console'
+            echo "$ oci-hermit run $image sh -c 'echo changed > /etc/debian_version; rm /usr/bin/tac; ...'"
+            echo "$out"
+            echo "$ oci-hermit run $image sh -c 'cat /etc/debian_version; ...'"
+            echo "$again"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       # #18: the image commands on the pulled image: tag, save, remove, load back, run by short ID.
       - name: Manage the pulled image
         shell: bash

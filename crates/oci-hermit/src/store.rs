@@ -310,7 +310,6 @@ impl Store {
     /// The EROFS disk of layer `digest` (#16): built from the stored blob the first time it is asked for, and kept
     /// under `erofs/<format>/<hex>.erofs` so every image with that layer reuses it. Written to a temporary name and
     /// renamed, so a half-written disk is never used.
-    #[cfg_attr(not(test), expect(dead_code, reason = "run attaches the disks in #17"))]
     pub fn layer_disk(&self, digest: &str, media_type: &str) -> Result<PathBuf, ImageError> {
         // Checks the digest is a well-formed sha256 one, so the name below is plain hex.
         image::blob_path(digest)?;
@@ -443,9 +442,9 @@ mod tests {
             .layer_disk(layer_digest, "application/vnd.oci.image.layer.v1.tar+gzip")
             .unwrap();
         assert!(disk.ends_with(format!("erofs/{}/{}.erofs", crate::erofs::FORMAT, &layer_digest[7..])));
-        let image = crate::erofs::reader::Image::open(std::fs::read(&disk).unwrap());
+        let image = crate::erofs::reader::Disk::open_path(&disk).unwrap();
         assert!(
-            image.walk().contains_key("/bin/sh"),
+            image.lookup(&[b"bin", b"sh"]).unwrap().is_some(),
             "the layer's files are on the disk"
         );
         // A second ask reuses the disk.
