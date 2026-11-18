@@ -2,6 +2,40 @@
 
 Each release's downloads are on its [GitHub release page](https://github.com/millsks/oci-hermit/releases).
 
+## 0.2.0 (2026-11-18)
+
+The host and guest now speak control protocol 1.3, and `oci-hermit` refuses an older guest agent. Replace the whole
+`oci-hermit` folder; do not copy the new `oci-hermit` or `hrmt` over a 0.1.0 install. The image store from 0.1.0
+keeps working; layer disks are built into it the first time each image runs.
+
+### Features
+
+- `run` runs a pulled or loaded image from its layer disks, stacked with overlayfs under a writable layer that is
+  thrown away when the run ends, so an image of any size runs in 512 MiB instead of twice its size in memory. An
+  image run straight from a path, or one with more than 20 layers, still goes into memory (#98, #17)
+- Each image layer is built once into a read-only EROFS disk and kept in the store; `rmi` and `image prune` remove
+  the disks with their layers, and `system df` counts them (#97, #16)
+- `manifest inspect` shows an image's platforms and digests without pulling it (#95, #76)
+- Per-registry CA certificates and client certificates for `pull`, `login` and `manifest inspect`, from Podman's
+  and Docker's `certs.d` folders or `--cert-dir`, without admin rights; `machine info` lists the folders it reads
+  (#94, #86)
+
+### Bug fixes
+
+- The release's source archive falls back to verified mirrors when a download host fails (#92)
+- The Windows CI package step no longer fails with "Permission denied" (#96)
+
+### Documentation
+
+- Getting started shows how to check the Windows download and what to do when a browser download never finishes
+  (#92)
+- The private registry field manual covers registries with their own CA or client certificates (#94)
+
+### Refactoring
+
+- `pull` uses oci-hermit's own registry client on reqwest instead of oci-client, which drops the unmaintained
+  `chrono` dependency and its advisory exception (#93, #91)
+
 ## 0.1.0 (2026-11-17)
 
 The first pre-release.
