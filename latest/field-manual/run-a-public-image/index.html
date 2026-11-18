@@ -1589,7 +1589,7 @@ group:</p>
 <p>Names are looked up in the image's own <code>/etc/passwd</code> and <code>/etc/group</code>, so a name the image does not have is an error.
 <code>-u 1000:1000</code> works without either file.</p>
 <h2 id="6-give-it-more-room">6. Give it more room<a class="headerlink" href="#6-give-it-more-room" title="Permanent link">&para;</a></h2>
-<p>Each <code>run</code> gets one emulated CPU and enough memory to hold the image twice over (at least 512 MiB). For a heavier
+<p>Each <code>run</code> gets one emulated CPU and 512 MiB of memory: the image's layers are read-only disks, so its size does not matter. For a heavier
 command, ask for more:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>run<span class="w"> </span>--cpus<span class="w"> </span><span class="m">2</span><span class="w"> </span>-m<span class="w"> </span>1g<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20<span class="w"> </span>sh<span class="w"> </span>-c<span class="w"> </span><span class="s1">'nproc; grep MemTotal /proc/meminfo'</span>
 <a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="go">2</span>

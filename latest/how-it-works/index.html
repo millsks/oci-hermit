@@ -1571,15 +1571,18 @@ built yet, is in the <a href="../design/">design document</a>.</p>
 <ol>
 <li><strong>On the host,</strong> oci-hermit finds the image: a local OCI layout or <code>.tar</code>, else an image in its store, else it
    pulls the image from the registry. Every manifest, config and layer is checked against its sha256 digest.</li>
-<li>It applies the image's layers in memory, works out the user to run as from the image's own <code>/etc/passwd</code>, and
-   writes an initramfs: the guest agent as <code>/init</code>, and the image's files under <code>/rootfs</code>. Nothing is mounted and
-   nothing needs privileges.</li>
-<li>It starts the bundled QEMU as a normal child process, with a software CPU (<code>-accel tcg</code>), no network device and
-   no disks, and boots oci-hermit's own Linux kernel with that initramfs.</li>
+<li>It turns each of the image's layers into a read-only EROFS disk, once per layer (later runs reuse them), works
+   out the user to run as from the image's own <code>/etc/passwd</code> on those disks, and writes an initramfs with the guest
+   agent as <code>/init</code>. Nothing is mounted on the host and nothing needs privileges. (An image run straight from a
+   file has its files put in the initramfs under <code>/rootfs</code> instead.)</li>
+<li>It starts the bundled QEMU as a normal child process, with a software CPU (<code>-accel tcg</code>), no network device, and
+   the layer disks attached read-only, and boots oci-hermit's own Linux kernel with that initramfs.</li>
 <li><strong>In the guest,</strong> the agent runs as PID 1. It mounts <code>/proc</code>, <code>/sys</code> and <code>/dev</code>, says it is ready, and waits for
    instructions on a private serial channel.</li>
-<li>oci-hermit sends the command. The agent enters <code>/rootfs</code> with <code>chroot</code>, starts the command as the image's user,
-   and relays its input, output and exit code.</li>
+<li>oci-hermit sends the command and the disks' serial numbers. The agent mounts each disk read-only and stacks them
+   with overlayfs on <code>/rootfs</code>, under a writable layer in the guest's memory that is thrown away with the sandbox,
+   so nothing the command writes reaches the disks. It enters <code>/rootfs</code> with <code>chroot</code>, starts the command as the
+   image's user, and relays its input, output and exit code.</li>
 <li>When the command exits, oci-hermit asks the agent to power off, and exits with the command's exit code.</li>
 </ol>
 <h2 id="components">Components<a class="headerlink" href="#components" title="Permanent link">&para;</a></h2>
@@ -2050,15 +2053,13 @@ command as root. <code>oci-hermit version</code> prints the protocol version the
 <td>The kernel command line. The x86_64 guest's clock runs at a fixed 1 GHz on every host, and the kernel is told so.</td>
 </tr>
 <tr>
-<td>no <code>-netdev</code>, no <code>-drive</code></td>
-<td>No network device and no disks.</td>
+<td><code>-drive …,readonly=on</code> and <code>-device virtio-blk-device,serial=layerN</code> per layer</td>
+<td>The image's layer disks, read-only, found by the agent by serial number. No network device.</td>
 </tr>
 </tbody>
 </table>
 <h2 id="what-changes-later">What changes later<a class="headerlink" href="#what-changes-later" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Layer disks</strong> (<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>): today the whole image is copied into the initramfs, so the guest needs about twice the
-  image's size in RAM. Read-only EROFS disks per layer, cached by digest, with an overlayfs root, replace that.</li>
 <li><strong>crun</strong> (<a href="https://github.com/millsks/oci-hermit/issues/21">#21</a>) replaces <code>chroot</code> and adds namespaces and cgroups inside the guest.</li>
 <li><strong>Containers that outlive a command</strong> (<a href="https://github.com/millsks/oci-hermit/issues/20">#20</a>, <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>): <code>run -d</code>, <code>exec</code>, <code>logs</code>, <code>ps</code>, <code>stop</code>, <code>rm</code>.</li>
 <li><strong>Networking</strong> (<a href="https://github.com/millsks/oci-hermit/issues/26">#26</a> to <a href="https://github.com/millsks/oci-hermit/issues/29">#29</a>) and <strong>bind mounts</strong> (<a href="https://github.com/millsks/oci-hermit/issues/30">#30</a> to <a href="https://github.com/millsks/oci-hermit/issues/34">#34</a>), with the defaults described in

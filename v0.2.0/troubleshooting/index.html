@@ -1,0 +1,1921 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Run OCI images in a sealed, software-emulated sandbox without root, admin or a hypervisor">
+      
+      
+      
+        <link rel="canonical" href="https://millsks.github.io/oci-hermit/latest/troubleshooting/">
+      
+      
+        <link rel="prev" href="../performance/">
+      
+      
+        <link rel="next" href="../contributing/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Troubleshooting - oci-hermit</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <style>/* The Aesir brand on Material for MkDocs: the brand package's light and dark theme mapping (colors/COLORS.md). The
+   light page stays white so Deep Emerald links read at 4.76:1 (AA); on Cloud Gray they would be 4.40:1. */
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #f5f6f7;
+  --md-primary-fg-color--dark: #f5f6f7;
+  --md-primary-bg-color: #1a1d20;
+  --md-primary-bg-color--light: #5b636b;
+  --md-accent-fg-color: #2fb889;
+  --md-accent-fg-color--transparent: rgba(47, 184, 137, 0.1);
+  --md-typeset-a-color: #07835d;
+  --md-code-bg-color: #f5f6f7;
+  --md-footer-bg-color: #1a1d20;
+  --md-footer-bg-color--dark: #111315;
+  --aesir-mark: #07835d;
+  --aesir-crossbar: #1a1d20;
+  --aesir-rule: #c9ced3;
+  --aesir-surface: #ffffff;
+  --aesir-tint: #d3f5e7;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #052620;
+  --md-default-bg-color--light: rgba(5, 38, 32, 0.54);
+  --md-default-bg-color--lighter: rgba(5, 38, 32, 0.26);
+  --md-default-bg-color--lightest: rgba(5, 38, 32, 0.07);
+  --md-default-fg-color: rgba(234, 251, 243, 0.9);
+  --md-default-fg-color--light: rgba(169, 217, 198, 0.9);
+  --md-default-fg-color--lighter: rgba(169, 217, 198, 0.4);
+  --md-default-fg-color--lightest: rgba(169, 217, 198, 0.14);
+  --md-typeset-color: #eafbf3;
+  --md-primary-fg-color: #031915;
+  --md-primary-fg-color--light: #0a3a30;
+  --md-primary-fg-color--dark: #031915;
+  --md-primary-bg-color: #eafbf3;
+  --md-primary-bg-color--light: #a9d9c6;
+  --md-accent-fg-color: #5ae9b6;
+  --md-accent-fg-color--transparent: rgba(90, 233, 182, 0.1);
+  --md-typeset-a-color: #5ae9b6;
+  --md-code-bg-color: #0a3a30;
+  --md-code-fg-color: #eafbf3;
+  --md-footer-bg-color: #031915;
+  --md-footer-bg-color--dark: #021210;
+  --aesir-mark: #5ae9b6;
+  --aesir-crossbar: #ffffff;
+  --aesir-rule: #125244;
+  --aesir-surface: #0a3a30;
+  --aesir-tint: #0a3a30;
+}
+
+/* The oci-hermit mark: an emerald shell with a charcoal door on light, Aesir Emerald with a white door on dark. */
+.md-logo svg .oci-hermit-mark__shell { fill: var(--aesir-mark); }
+.md-logo svg .oci-hermit-mark__door { fill: var(--aesir-crossbar); }
+
+/* A white header needs a rule under it and a visible search field. */
+.md-header { box-shadow: 0 1px 0 var(--aesir-rule); }
+.md-header[data-md-state="shadow"], .md-header--shadow { box-shadow: 0 1px 0 var(--aesir-rule), 0 0.2rem 0.4rem rgba(0, 0, 0, 0.08); }
+[data-md-color-scheme="default"] .md-search__form { background-color: rgba(26, 29, 32, 0.06); }
+[data-md-color-scheme="default"] .md-search__form:hover { background-color: rgba(26, 29, 32, 0.1); }
+
+/* Inter ExtraBold and Bold for headings, tracked in as the brand sets them. */
+.md-typeset h1 { font-weight: 800; letter-spacing: -0.025em; color: var(--md-typeset-color); }
+.md-typeset h2 { font-weight: 700; letter-spacing: -0.02em; }
+.md-typeset h3 { font-weight: 700; }
+.md-header__title { font-weight: 700; }
+
+/* Architecture diagrams (how-it-works.md): inline SVGs, so they follow the colour scheme. Host in emerald, QEMU in
+   amber, the guest in blue, the command in violet; planned parts are grey and dashed. */
+:root,
+[data-md-color-scheme="default"] {
+  --oh-text: #1a1d20;
+  --oh-muted: #5b636b;
+  --oh-surface: #ffffff;
+  --oh-surface-2: #f0f2f3;
+  --oh-border: #c9ced3;
+  --oh-accent: #07835d;
+  --oh-host-fill: #e6f6ee;
+  --oh-host-stroke: #07835d;
+  --oh-qemu-fill: #fcf3e3;
+  --oh-qemu-stroke: #9a5b00;
+  --oh-guest-fill: #e8f1fa;
+  --oh-guest-stroke: #1f64a8;
+  --oh-cmd-fill: #f2ebfb;
+  --oh-cmd-stroke: #6c40b8;
+  --oh-plan: #6b737b;
+  --oh-band-a: rgba(7, 131, 93, 0.06);
+  --oh-band-b: rgba(154, 91, 0, 0.06);
+}
+
+[data-md-color-scheme="slate"] {
+  --oh-text: #eafbf3;
+  --oh-muted: #a9d9c6;
+  --oh-surface: #0a3a30;
+  --oh-surface-2: #0f4a3d;
+  --oh-border: #1d6a58;
+  --oh-accent: #5ae9b6;
+  --oh-host-fill: rgba(90, 233, 182, 0.1);
+  --oh-host-stroke: #5ae9b6;
+  --oh-qemu-fill: rgba(227, 162, 75, 0.12);
+  --oh-qemu-stroke: #e8ad5c;
+  --oh-guest-fill: rgba(122, 184, 245, 0.12);
+  --oh-guest-stroke: #8cc3f7;
+  --oh-cmd-fill: rgba(180, 149, 240, 0.14);
+  --oh-cmd-stroke: #c0a6f4;
+  --oh-plan: #8fb5a6;
+  --oh-band-a: rgba(90, 233, 182, 0.06);
+  --oh-band-b: rgba(227, 162, 75, 0.07);
+}
+
+.md-typeset figure.oh-diagram { display: block; width: 100%; max-width: 100%; margin: 1.5em 0; padding: 0.6rem; border: 1px solid var(--oh-border); border-radius: 0.4rem; background: var(--oh-surface); }
+.md-typeset figure.oh-diagram figcaption { max-width: none; margin: 0.6rem 0.2rem 0.1rem; font-style: normal; text-align: left; color: var(--md-default-fg-color--light); }
+.oh-diagram .oh-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.oh-diagram svg { display: block; width: 100%; height: auto; min-width: 640px; }
+.oh-diagram svg text { font-family: var(--md-text-font-family), system-ui, sans-serif; fill: var(--oh-text); font-size: 13px; }
+.oh-diagram svg .mono { font-family: var(--md-code-font-family), ui-monospace, monospace; font-size: 12px; }
+.oh-diagram svg .b { font-weight: 600; }
+.oh-diagram svg .t { font-weight: 700; font-size: 14px; }
+.oh-diagram svg .m { fill: var(--oh-muted); font-size: 12.5px; }
+.oh-diagram svg .small { font-size: 12px; }
+.oh-diagram svg .halo { paint-order: stroke; stroke: var(--oh-surface); stroke-width: 5px; stroke-linejoin: round; }
+.oh-diagram svg .r-host { fill: var(--oh-host-fill); stroke: var(--oh-host-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-qemu { fill: var(--oh-qemu-fill); stroke: var(--oh-qemu-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-guest { fill: var(--oh-guest-fill); stroke: var(--oh-guest-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-cmd { fill: var(--oh-cmd-fill); stroke: var(--oh-cmd-stroke); stroke-width: 1.5; }
+.oh-diagram svg .r-box { fill: var(--oh-surface); stroke: var(--oh-border); stroke-width: 1.2; }
+.oh-diagram svg .r-host-box { fill: var(--oh-surface); stroke: var(--oh-host-stroke); stroke-width: 1.2; }
+.oh-diagram svg .r-qemu-box { fill: var(--oh-surface); stroke: var(--oh-qemu-stroke); stroke-width: 1.2; }
+.oh-diagram svg .r-guest-box { fill: var(--oh-surface); stroke: var(--oh-guest-stroke); stroke-width: 1.2; }
+.oh-diagram svg .r-chroot { fill: none; stroke: var(--oh-cmd-stroke); stroke-width: 1.3; stroke-dasharray: 6 4; }
+.oh-diagram svg .r-plan { fill: var(--oh-surface); stroke: var(--oh-plan); stroke-width: 1.3; stroke-dasharray: 6 4; }
+.oh-diagram svg .r-mod { fill: var(--oh-surface-2); stroke: none; }
+.oh-diagram svg .lbl-host { fill: var(--oh-host-stroke); }
+.oh-diagram svg .lbl-qemu { fill: var(--oh-qemu-stroke); }
+.oh-diagram svg .lbl-guest { fill: var(--oh-guest-stroke); }
+.oh-diagram svg .lbl-cmd { fill: var(--oh-cmd-stroke); }
+.oh-diagram svg .lbl-plan { fill: var(--oh-plan); }
+.oh-diagram svg .lbl-accent { fill: var(--oh-accent); }
+.oh-diagram svg .ln { stroke: var(--oh-text); stroke-width: 1.5; fill: none; }
+.oh-diagram svg .ln-accent { stroke: var(--oh-accent); stroke-width: 2; fill: none; }
+.oh-diagram svg .ln-muted { stroke: var(--oh-muted); stroke-width: 1.4; fill: none; }
+.oh-diagram svg .ln-dash { stroke-dasharray: 5 4; }
+.oh-diagram svg .life { stroke: var(--oh-border); stroke-width: 1.5; stroke-dasharray: 4 5; }
+.oh-diagram svg .band-a { fill: var(--oh-band-a); }
+.oh-diagram svg .band-b { fill: var(--oh-band-b); }
+.oh-diagram svg .loop { fill: none; stroke: var(--oh-muted); stroke-width: 1.2; }
+.oh-diagram svg .loop-tab { fill: var(--oh-surface-2); }
+.oh-diagram svg .ln-guest-msg { stroke: var(--oh-guest-stroke); stroke-width: 1.6; fill: none; }
+.oh-diagram svg .ln-host-msg { stroke: var(--oh-host-stroke); stroke-width: 1.6; fill: none; }
+.oh-diagram svg marker path { stroke: none; }
+.oh-diagram svg .ah path { fill: var(--oh-text); }
+.oh-diagram svg .ah-acc path, .oh-diagram svg .ah-host path { fill: var(--oh-host-stroke); }
+.oh-diagram svg .ah-mut path { fill: var(--oh-muted); }
+.oh-diagram svg .ah-guest path { fill: var(--oh-guest-stroke); }</style>
+  
+  <script>
+    (function () {
+      try {
+        var key = "__source_fetched_at";
+        var fetched = Number(sessionStorage.getItem(key) || 0);
+        if (Date.now() - fetched > 10 * 60 * 1000) {
+          sessionStorage.removeItem("__source");
+          sessionStorage.setItem(key, String(Date.now()));
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#troubleshooting" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="oci-hermit" class="md-header__button md-logo" aria-label="oci-hermit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="380 380 1288 1288"><path class="oci-hermit-mark__shell" fill-rule="evenodd" d="M 540 400 L 1508 400 A 140 140 0 0 1 1648 540 L 1648 1508 A 140 140 0 0 1 1508 1648 L 540 1648 A 140 140 0 0 1 400 1508 L 400 540 A 140 140 0 0 1 540 400 z M 620 620 L 620 1428 L 1428 1428 L 1428 620 z"/><path class="oci-hermit-mark__door" d="M 904 1648 L 904 1180 A 120 120 0 0 1 1144 1180 L 1144 1648 z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            oci-hermit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Troubleshooting
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/millsks/oci-hermit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    millsks/oci-hermit
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="oci-hermit" class="md-nav__button md-logo" aria-label="oci-hermit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="380 380 1288 1288"><path class="oci-hermit-mark__shell" fill-rule="evenodd" d="M 540 400 L 1508 400 A 140 140 0 0 1 1648 540 L 1648 1508 A 140 140 0 0 1 1508 1648 L 540 1648 A 140 140 0 0 1 400 1508 L 400 540 A 140 140 0 0 1 540 400 z M 620 620 L 620 1428 L 1428 1428 L 1428 620 z"/><path class="oci-hermit-mark__door" d="M 904 1648 L 904 1180 A 120 120 0 0 1 1144 1180 L 1144 1648 z"/></svg>
+
+    </a>
+    oci-hermit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/millsks/oci-hermit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    millsks/oci-hermit
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../when-to-use/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    When to use oci-hermit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Field manual
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Field manual
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/run-a-public-image/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run a public image and get a shell
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/private-registry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pull from a private registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/without-a-registry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Bring images in without a registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/move-images/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Move images between machines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/image-store/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manage the image store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../no-admin/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run on a managed device
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../field-manual/platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choose a platform
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command-line reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker-and-podman/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    oci-hermit, Docker and Podman
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../how-it-works/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How it works
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance and limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#where-the-logs-are" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where the logs are
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#it-will-not-start-at-all" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        It will not start at all
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#qemu-or-the-guest-is-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        QEMU or the guest is missing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-boot-times-out-or-is-very-slow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The boot times out or is very slow
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The boot times out or is very slow">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#it-is-much-slower-than-expected" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        It is much slower than expected
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#registry-errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registry errors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-command-fails-to-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The command fails to start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-image-store-is-busy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The image store is busy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-command-cannot-reach-the-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The command cannot reach the network
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#asking-for-help" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Asking for help
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_11" >
+        
+          
+          <label class="md-nav__link" for="__nav_11" id="__nav_11_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../building-qemu/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building QEMU
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../building-guest/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building the guest
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#where-the-logs-are" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where the logs are
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#it-will-not-start-at-all" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        It will not start at all
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#qemu-or-the-guest-is-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        QEMU or the guest is missing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-boot-times-out-or-is-very-slow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The boot times out or is very slow
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The boot times out or is very slow">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#it-is-much-slower-than-expected" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        It is much slower than expected
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#registry-errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registry errors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-command-fails-to-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The command fails to start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-image-store-is-busy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The image store is busy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-command-cannot-reach-the-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The command cannot reach the network
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#asking-for-help" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Asking for help
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/millsks/oci-hermit/edit/main/docs/troubleshooting.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h1>
+<p>Start with these two commands. Most problems show up in one of them, with the reason:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>oci-hermit<span class="w"> </span>machine<span class="w"> </span>boot
+</code></pre></div>
+<p><code>machine info</code> says what oci-hermit found and where; <code>machine boot</code> boots a sandbox with no image involved. If both
+work, the problem is with the image or the command. Every error oci-hermit prints starts with <code>oci-hermit:</code>.</p>
+<h2 id="where-the-logs-are">Where the logs are<a class="headerlink" href="#where-the-logs-are" title="Permanent link">&para;</a></h2>
+<p>Each <code>run</code> and <code>machine boot</code> gets its own folder under the run dir that <code>machine info</code> shows:</p>
+<table>
+<thead>
+<tr>
+<th>OS</th>
+<th>Run dir</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Windows</td>
+<td><code>%TMP%\oci-hermit\sandbox-&lt;pid&gt;-&lt;time&gt;</code></td>
+</tr>
+<tr>
+<td>macOS</td>
+<td><code>$TMPDIR/oci-hermit/sandbox-&lt;pid&gt;-&lt;time&gt;</code></td>
+</tr>
+<tr>
+<td>Linux</td>
+<td><code>$TMPDIR/oci-hermit/sandbox-&lt;pid&gt;-&lt;time&gt;</code>, or under <code>/tmp</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>console.log</code>: the guest's console, the kernel's boot messages and the agent's <code>hermit-agent: …</code> lines. It shows
+  how far the guest got.</li>
+<li><code>qemu.log</code>: QEMU's own messages.</li>
+</ul>
+<p><code>machine boot</code> prints the console log's path as it starts, and an error from a sandbox names both files. The
+newest folder is the last run. oci-hermit does not delete these folders; remove old ones when you no longer need
+them.</p>
+<h2 id="it-will-not-start-at-all">It will not start at all<a class="headerlink" href="#it-will-not-start-at-all" title="Permanent link">&para;</a></h2>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:3"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Windows</label><label for="__tabbed_1_2">macOS</label><label for="__tabbed_1_3">Linux</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<p><strong>"Windows protected your PC" (SmartScreen), or the file is blocked.</strong> A browser marks what it downloads with the
+Mark of the Web, and SmartScreen warns about unsigned programs that carry it. Release binaries will be signed
+(<a href="https://github.com/millsks/oci-hermit/issues/39">#39</a>). Until then, unblock the folder, if your organisation allows it:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nb">Get-ChildItem</span> <span class="n">-Recurse</span> <span class="p">.\</span><span class="n">oci-hermit</span> <span class="p">|</span> <span class="nb">Unblock-File</span>
+</code></pre></div>
+<p>Or download with <code>gh run download</code> (see <a href="../getting-started/#1-download">Getting started</a>), which does not mark
+files.</p>
+<p><strong>"This app has been blocked by your system administrator",</strong> or nothing happens: application control
+(AppLocker, App Control for Business) or endpoint protection blocked <code>oci-hermit.exe</code>, <code>qemu-system-*.exe</code> or one
+of QEMU's DLLs. The Event Viewer, under <em>Applications and Services Logs &gt; Microsoft &gt; Windows &gt; AppLocker</em> or
+<em>CodeIntegrity</em>, names the blocked file, and <em>Windows Security &gt; Protection history</em> shows Defender's blocks. This
+needs your IT department; see <a href="../no-admin/">Running without admin rights</a>.</p>
+</div>
+<div class="tabbed-block">
+<p><strong>"cannot be opened because the developer cannot be verified", or "is damaged".</strong> Gatekeeper refuses unsigned
+programs downloaded with a browser, which marks them as quarantined. Release binaries will be signed (<a href="https://github.com/millsks/oci-hermit/issues/39">#39</a>). Until
+then, remove the mark from the folder:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>xattr<span class="w"> </span>-dr<span class="w"> </span>com.apple.quarantine<span class="w"> </span>oci-hermit
+</code></pre></div>
+<p>Or download with <code>gh run download</code>, which does not set it. If <em>System Settings &gt; Privacy &amp; Security</em> has no
+<em>Open Anyway</em> button and <code>xattr</code> is not allowed, your organisation manages this; see
+<a href="../no-admin/">Running without admin rights</a>.</p>
+</div>
+<div class="tabbed-block">
+<p><strong>"Permission denied" on a file that is executable.</strong> Your home directory may be mounted <code>noexec</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>findmnt<span class="w"> </span>-no<span class="w"> </span>OPTIONS<span class="w"> </span>--target<span class="w"> </span>~
+</code></pre></div>
+<p>If the options include <code>noexec</code>, unpack oci-hermit somewhere that allows programs to run. <code>noexec</code> on the temp
+directory is fine: oci-hermit only reads from there. If the mount is not the cause, check for a policy denial:
+<code>fapolicyd</code>, SELinux (<code>ausearch -m avc -ts recent</code>) or AppArmor (<code>journalctl -k | grep apparmor</code>).</p>
+</div>
+</div>
+</div>
+<h2 id="qemu-or-the-guest-is-missing">QEMU or the guest is missing<a class="headerlink" href="#qemu-or-the-guest-is-missing" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>oci-hermit: no bundled QEMU found; looked in …/libexec/oci-hermit/qemu …/qemu (set OCI_HERMIT_QEMU_DIR to a bundle built by qemu/build.sh)
+</code></pre></div>
+<p>The <code>qemu/</code> folder is not beside <code>oci-hermit</code>. Keep the package's folder together: the binary, <code>qemu/</code> and <code>guest/</code>.
+Copying only <code>oci-hermit(.exe)</code> somewhere else breaks this. To keep them apart, set <code>OCI_HERMIT_QEMU_DIR</code> and
+<code>OCI_HERMIT_GUEST_DIR</code> (<a href="../configuration/">Configuration</a>).</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>oci-hermit: no x86_64 guest kernel and agent found; looked in … (set OCI_HERMIT_GUEST_DIR to a directory with x86_64/kernel and x86_64/hermit-agent)
+</code></pre></div>
+<p>The guest for that architecture is missing. <code>machine info</code> shows which ones were found.</p>
+<p>A message saying a QEMU <code>is not the bundled QEMU</code> means the folder holds some other QEMU. oci-hermit runs only the
+bundle it was built for, from the same package or CI run.</p>
+<h2 id="the-boot-times-out-or-is-very-slow">The boot times out or is very slow<a class="headerlink" href="#the-boot-times-out-or-is-very-slow" title="Permanent link">&para;</a></h2>
+<p><code>machine boot</code> waits 120 seconds for the agent by default, and so does <code>run</code>. A timeout ends with
+<code>the agent did not answer within …s</code> and the paths of both logs.</p>
+<ol>
+<li>Look at the end of <code>console.log</code>. If the kernel's messages stop early, the guest is stuck or very slow; if the
+   last line is <code>hermit-agent: ready …</code>, the agent started and something on the host side failed.</li>
+<li>Try the other guest: <code>oci-hermit machine boot --arch aarch64</code> or <code>--arch x86_64</code>.</li>
+<li>Give it longer: <code>oci-hermit machine boot --timeout 600</code>. If it then boots, the machine is just slow, or something
+   is slowing QEMU down (next section).</li>
+</ol>
+<p><code>QEMU exited before the agent answered</code> means QEMU stopped; <code>qemu.log</code> says why.</p>
+<h3 id="it-is-much-slower-than-expected">It is much slower than expected<a class="headerlink" href="#it-is-much-slower-than-expected" title="Permanent link">&para;</a></h3>
+<p>Compare a boot with the <a href="../performance/#start-time">measured start times</a>. Endpoint protection often inspects
+programs that generate code as they run, which QEMU does all the time, and that can make it many times slower. Look
+for alerts from your security software naming <code>qemu-system-*</code>. Running oci-hermit from a folder IT has allowed, or
+asking IT for an exclusion, is the fix; there is nothing to change in oci-hermit.</p>
+<h2 id="registry-errors">Registry errors<a class="headerlink" href="#registry-errors" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Message</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pulling the manifest of …: error sending request for url (https://…)</code></td>
+<td>The registry cannot be reached: check the name, the network and the proxy.</td>
+</tr>
+<tr>
+<td><code>… invalid peer certificate …</code></td>
+<td>The system does not trust the registry's certificate. If the registry uses your company's own CA, put that CA in the registry's <code>certs.d</code> folder: see <a href="../field-manual/private-registry/#a-registry-behind-a-company-certificate-authority">a registry with its own CA</a>.</td>
+</tr>
+<tr>
+<td><code>… (the registry may want a client certificate: …)</code></td>
+<td>The registry asks for a client certificate (mutual TLS). Put it and its key in the registry's <code>certs.d</code> folder: see <a href="../field-manual/private-registry/#a-registry-that-wants-a-client-certificate">client certificates</a>.</td>
+</tr>
+<tr>
+<td><code>… has no matching ….key</code></td>
+<td>A client certificate in a <code>certs.d</code> folder is missing its key (or the other way round). Copy both.</td>
+</tr>
+<tr>
+<td><code>pulling the manifest of …: 401 … (no login for … was found …)</code></td>
+<td>No login was found for that registry. Check the auth files in <code>machine info</code> and log in. See <a href="../field-manual/private-registry/">Pull from a private registry</a>.</td>
+</tr>
+<tr>
+<td><code>… the token server … answered 401</code> or <code>403 DENIED</code></td>
+<td>The login was refused, or it cannot see this repository.</td>
+</tr>
+<tr>
+<td><code>pulling the manifest of …: 404 MANIFEST_UNKNOWN</code> or <code>NAME_UNKNOWN</code></td>
+<td>Wrong repository or tag, or your login cannot see it.</td>
+</tr>
+<tr>
+<td><code>toomanyrequests</code> or <code>rate exceeded</code></td>
+<td>The registry is throttling you; Docker Hub limits anonymous pulls. oci-hermit already retried four times. Log in, wait, or use a mirror such as <code>public.ecr.aws/docker/library/…</code> for official images.</td>
+</tr>
+<tr>
+<td><code>… does not match its digest: the image is corrupt or has been altered</code></td>
+<td>A blob did not hash to its digest, so nothing was stored. Try again; if it repeats, something between you and the registry is changing the data.</td>
+</tr>
+</tbody>
+</table>
+<p>A <code>run</code> with an image that is not stored tries to pull it first (<code>Unable to find image '…' locally</code>). For an image
+you loaded from a file, check the name with <code>oci-hermit images</code>, including the platform: asking for a platform the
+store does not have also leads to a pull.</p>
+<h2 id="the-command-fails-to-start">The command fails to start<a class="headerlink" href="#the-command-fails-to-start" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Message</th>
+<th>What it means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>the agent refused: starting &lt;cmd&gt;: executable file not found in $PATH</code></td>
+<td>The image has no such program. Small images have <code>sh</code>, not <code>bash</code>.</td>
+</tr>
+<tr>
+<td><code>user "&lt;name&gt;" is not in the image's /etc/passwd</code></td>
+<td>The image's <code>User</code>, or <code>-u</code>, names a user the image does not have. Use a number (<code>-u 1000:1000</code>) or a user it does have.</td>
+</tr>
+<tr>
+<td><code>the image has no entrypoint or command, and none was given</code></td>
+<td>Give a command after the image name.</td>
+</tr>
+<tr>
+<td><code>-d/--detach is not supported yet (#22); run it without -d/--detach</code></td>
+<td>The flag is planned, not implemented; the same for <code>--name</code>, <code>-p</code>, <code>-v</code> and <code>--pod</code>.</td>
+</tr>
+<tr>
+<td><code>--memory 10m: use e.g. 512m or 2g, at least 64m</code></td>
+<td><code>-m</code> needs a size with a unit, at least 64 MiB.</td>
+</tr>
+<tr>
+<td><code>unsupported --platform …</code></td>
+<td>Only <code>linux/amd64</code> and <code>linux/arm64</code> run.</td>
+</tr>
+</tbody>
+</table>
+<p>All of these make <code>run</code> exit with 125.</p>
+<h2 id="the-image-store-is-busy">The image store is busy<a class="headerlink" href="#the-image-store-is-busy" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>oci-hermit: the image store is in use by another oci-hermit (a pull, load or run); try again when it has finished
+</code></pre></div>
+<p><code>rmi</code> and <code>image prune</code> delete blobs, so they wait for no one: they refuse while another oci-hermit is reading the
+store. Let the other command finish and run them again. If no other oci-hermit is running, check for a stuck process
+(Task Manager, or <code>ps aux | grep oci-hermit</code>).</p>
+<h2 id="the-command-cannot-reach-the-network">The command cannot reach the network<a class="headerlink" href="#the-command-cannot-reach-the-network" title="Permanent link">&para;</a></h2>
+<p>That is by design: the sandbox has no network device, and nothing turns it on. Put what the command needs into the
+image beforehand. See <a href="../how-it-works/#no-network-on-purpose">How it works</a>.</p>
+<h2 id="asking-for-help">Asking for help<a class="headerlink" href="#asking-for-help" title="Permanent link">&para;</a></h2>
+<p>Open an <a href="https://github.com/millsks/oci-hermit/issues">issue</a> with the output of <code>oci-hermit version</code> and
+<code>oci-hermit machine info</code>, the command you ran, the full error, and the end of <code>console.log</code> and <code>qemu.log</code>. Leave
+out anything your organisation treats as confidential. A security problem goes through the
+<a href="../security/">security policy</a> instead.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../performance/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Performance and limits">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Performance and limits
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../contributing/" class="md-footer__link md-footer__link--next" aria-label="Next: Overview">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Overview
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Apache-2.0 licensed
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/millsks/oci-hermit" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "search.highlight", "search.suggest", "content.code.copy", "content.action.edit", "content.tabs.link"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1704,15 +1704,31 @@ asking IT for an exclusion, is the fix; there is nothing to change in oci-hermit
 </thead>
 <tbody>
 <tr>
-<td><code>logging in to pull …: error sending request for url (https://…/v2/)</code></td>
-<td>The registry cannot be reached: check the name, the network, the proxy, and that the registry's certificate is trusted by the system (open the URL in a browser on the same machine).</td>
+<td><code>pulling the manifest of …: error sending request for url (https://…)</code></td>
+<td>The registry cannot be reached: check the name, the network and the proxy.</td>
 </tr>
 <tr>
-<td><code>pulling the manifest of …: Not authorized</code></td>
-<td>No login was found for that registry, or it was refused. Check the auth files in <code>machine info</code> and log in again. See <a href="../field-manual/private-registry/">Pull from a private registry</a>.</td>
+<td><code>… invalid peer certificate …</code></td>
+<td>The system does not trust the registry's certificate. If the registry uses your company's own CA, put that CA in the registry's <code>certs.d</code> folder: see <a href="../field-manual/private-registry/#a-registry-behind-a-company-certificate-authority">a registry with its own CA</a>.</td>
 </tr>
 <tr>
-<td><code>pulling the manifest of …: … does not exist …</code></td>
+<td><code>… (the registry may want a client certificate: …)</code></td>
+<td>The registry asks for a client certificate (mutual TLS). Put it and its key in the registry's <code>certs.d</code> folder: see <a href="../field-manual/private-registry/#a-registry-that-wants-a-client-certificate">client certificates</a>.</td>
+</tr>
+<tr>
+<td><code>… has no matching ….key</code></td>
+<td>A client certificate in a <code>certs.d</code> folder is missing its key (or the other way round). Copy both.</td>
+</tr>
+<tr>
+<td><code>pulling the manifest of …: 401 … (no login for … was found …)</code></td>
+<td>No login was found for that registry. Check the auth files in <code>machine info</code> and log in. See <a href="../field-manual/private-registry/">Pull from a private registry</a>.</td>
+</tr>
+<tr>
+<td><code>… the token server … answered 401</code> or <code>403 DENIED</code></td>
+<td>The login was refused, or it cannot see this repository.</td>
+</tr>
+<tr>
+<td><code>pulling the manifest of …: 404 MANIFEST_UNKNOWN</code> or <code>NAME_UNKNOWN</code></td>
 <td>Wrong repository or tag, or your login cannot see it.</td>
 </tr>
 <tr>
