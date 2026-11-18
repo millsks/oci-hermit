@@ -605,21 +605,18 @@ pub struct Pulled {
     pub digest: String,
 }
 
-/// Pull `reference` for `linux/<arch>` into `store`, writing progress to `out`.
-pub fn pull(
-    reference: &Reference,
-    arch: &str,
-    store: &Store,
-    settings: &Settings,
-    out: &mut impl Write,
-) -> Result<Pulled, PullError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+/// The one-thread runtime registry requests run on.
+fn runtime() -> Result<tokio::runtime::Runtime, PullError> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| PullError::Registry(format!("starting the network runtime: {e}")))?;
-    let auth = credentials(reference.registry(), settings, run_helper);
+        .map_err(|e| PullError::Registry(format!("starting the network runtime: {e}")))
+}
+
+/// A session with `reference`'s repository, with the registry's certificates and `auth`.
+fn session<'a>(reference: &Reference, settings: &'a Settings, auth: &'a Auth) -> Result<Session<'a>, PullError> {
     let certs = settings.certs_for(reference.registry()).map_err(PullError::Registry)?;
-    let mut session = Session {
+    Ok(Session {
         client: http_client(certs.as_ref()).map_err(PullError::Registry)?,
         certs,
         base: format!(
@@ -630,10 +627,79 @@ pub fn pull(
         ),
         registry: reference.registry().to_string(),
         repository: reference.repository().to_string(),
-        auth: &auth,
+        auth,
         authorization: None,
         delays: &settings.retry_delays,
-    };
+    })
+}
+
+/// `manifest inspect`: the index or manifest `reference` names, as the registry serves it (indented, as Docker and
+/// Podman print it), checked against its digest. With `verbose`, Docker's form instead: for an index, each entry's descriptor with the manifest it points
+/// to (each checked too); for a single manifest, the same for it alone.
+pub fn inspect(reference: &Reference, settings: &Settings, verbose: bool) -> Result<String, PullError> {
+    let runtime = runtime()?;
+    let auth = credentials(reference.registry(), settings, run_helper);
+    let mut session = session(reference, settings, &auth)?;
+    runtime.block_on(async {
+        let (bytes, digest) = session.manifest(reference.target()).await?;
+        if let Some(wanted) = reference.digest()
+            && wanted != digest
+        {
+            return Err(ImageError::Mismatch(wanted.to_string()).into());
+        }
+        let invalid = |e: serde_json::Error| PullError::Image(ImageError::Invalid(format!("manifest: {e}")));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+        if !verbose {
+            let mut text = serde_json::to_string_pretty(&value).map_err(invalid)?;
+            text.push('\n');
+            return Ok(text);
+        }
+        let entry = |name: String, descriptor: serde_json::Value, manifest: serde_json::Value| {
+            let key = if descriptor["mediaType"] == DOCKER_MANIFEST || manifest["mediaType"] == DOCKER_MANIFEST {
+                "SchemaV2Manifest"
+            } else {
+                "OCIManifest"
+            };
+            serde_json::json!({"Ref": name, "Descriptor": descriptor, key: manifest})
+        };
+        let repository = format!("{}/{}", reference.registry(), reference.repository());
+        let shown = match value["manifests"].as_array() {
+            Some(entries) => {
+                let mut resolved = Vec::new();
+                for descriptor in entries {
+                    let wanted = descriptor["digest"].as_str().unwrap_or_default().to_string();
+                    let (bytes, digest) = session.manifest(&wanted).await?;
+                    if digest != wanted {
+                        return Err(ImageError::Mismatch(wanted).into());
+                    }
+                    let manifest = serde_json::from_slice(&bytes).map_err(invalid)?;
+                    resolved.push(entry(format!("{repository}@{digest}"), descriptor.clone(), manifest));
+                }
+                serde_json::Value::Array(resolved)
+            }
+            None => {
+                let media_type = value["mediaType"].as_str().unwrap_or(OCI_MANIFEST).to_string();
+                let descriptor = serde_json::json!({"mediaType": media_type, "digest": digest, "size": bytes.len()});
+                entry(reference.whole(), descriptor, value)
+            }
+        };
+        let mut text = serde_json::to_string_pretty(&shown).map_err(invalid)?;
+        text.push('\n');
+        Ok(text)
+    })
+}
+
+/// Pull `reference` for `linux/<arch>` into `store`, writing progress to `out`.
+pub fn pull(
+    reference: &Reference,
+    arch: &str,
+    store: &Store,
+    settings: &Settings,
+    out: &mut impl Write,
+) -> Result<Pulled, PullError> {
+    let runtime = runtime()?;
+    let auth = credentials(reference.registry(), settings, run_helper);
+    let mut session = session(reference, settings, &auth)?;
     runtime.block_on(async {
         let (mut bytes, mut digest) = session.manifest(reference.target()).await?;
         if let Some(wanted) = reference.digest()
@@ -1459,6 +1525,43 @@ mod tests {
         )
         .unwrap();
         crate::login::verify(&address, "me", "hunter2", &tls_settings(&certs_d, vec![])).unwrap();
+    }
+
+    #[test]
+    fn inspects_an_index_or_a_manifest_without_pulling() {
+        let address = registry("registry-inspect", None, false, 0);
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        let plain = inspect(&reference, &settings(&address, vec![]), false).unwrap();
+        let index: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        assert_eq!(index["mediaType"], OCI_INDEX);
+        assert_eq!(index["manifests"].as_array().unwrap().len(), 2);
+        assert!(plain.starts_with("{\n  \""), "indented: {plain}");
+
+        // --verbose resolves each entry, as Docker does.
+        let verbose: serde_json::Value =
+            serde_json::from_str(&inspect(&reference, &settings(&address, vec![]), true).unwrap()).unwrap();
+        let entries = verbose.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        for (entry, descriptor) in entries.iter().zip(index["manifests"].as_array().unwrap()) {
+            assert_eq!(entry["Descriptor"], *descriptor);
+            let digest = descriptor["digest"].as_str().unwrap();
+            assert_eq!(entry["Ref"], format!("{address}/test/app@{digest}"));
+            assert!(entry["OCIManifest"]["layers"].is_array(), "{entry}");
+        }
+
+        // A single-platform image is one entry, and a pinned digest is checked.
+        let single = testing::registry_of("registry-inspect-single", None, false, 0, &["arm64"], false);
+        let reference = normalize(&format!("{single}/test/app:1")).unwrap();
+        let shown: serde_json::Value =
+            serde_json::from_str(&inspect(&reference, &settings(&single, vec![]), true).unwrap()).unwrap();
+        assert_eq!(shown["Ref"], format!("{single}/test/app:1"));
+        assert_eq!(shown["Descriptor"]["mediaType"], OCI_MANIFEST);
+        let digest = shown["Descriptor"]["digest"].as_str().unwrap().to_string();
+        let pinned = normalize(&format!("{single}/test/app@{digest}")).unwrap();
+        assert!(inspect(&pinned, &settings(&single, vec![]), false).is_ok());
+        let missing = normalize(&format!("{single}/test/app:2")).unwrap();
+        let err = inspect(&missing, &settings(&single, vec![]), false).unwrap_err();
+        assert!(err.to_string().contains("404"), "{err}");
     }
 
     #[test]

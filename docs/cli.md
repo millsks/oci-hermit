@@ -15,6 +15,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | --- | --- |
 | [`run`](#run) | Run a command from an image in a new sandbox |
 | [`pull`](#pull) | Pull an image from a registry |
+| [`manifest inspect`](#manifest-inspect) | Show an image's platforms and digests in a registry, without pulling |
 | [`load`](#load) | Load images from a `docker save` archive or an OCI layout |
 | [`login`](#login) | Log in to a registry |
 | [`logout`](#logout) | Remove a registry login |
@@ -130,6 +131,42 @@ Logins come from [`login`](#login) and from the Podman and Docker auth files and
 server errors are retried four times. A registry's own CA and client certificate come from its `certs.d` folder
 (see [a registry with its own CA](field-manual/private-registry.md#a-registry-behind-a-company-certificate-authority)).
 Exits 0 on success, 1 on failure.
+
+## manifest inspect
+
+Show an image's index or manifest as the registry serves it, without pulling anything: which platforms it has, and
+each one's digest and size. Handy before a pull over a slow link, or to check that a private registry has the
+`linux/amd64` or `linux/arm64` build you need.
+
+```
+oci-hermit manifest inspect [OPTIONS] <IMAGE>
+```
+
+| Argument or option | Meaning |
+| --- | --- |
+| `IMAGE` | An image reference, as for `pull`; `name@sha256:…` works too. |
+| `-v`, `--verbose` | Docker's verbose form: for each entry of an index, its descriptor (`Descriptor`) and the manifest it points to (`OCIManifest`, or `SchemaV2Manifest` for Docker's format), named by digest (`Ref`). For a single-platform image, the same for that manifest alone. |
+| `--cert-dir <DIR>` | Use the CA certificates and client certificate in `DIR` for this registry, as for `pull`. |
+
+```console
+$ oci-hermit manifest inspect ghcr.io/prefix-dev/pixi:0.84.2
+{
+  "manifests": [
+    {
+      "digest": "sha256:96b7c4d3efbd1d7b7ec8c6bb601545e8cf8ff62d6aedf4957cabc716e504cc50",
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      },
+      "size": 1056
+    },
+    …
+```
+
+The JSON is the registry's, indented, with its keys in alphabetical order. Logins, certificates, plain-HTTP registries
+and retries work as for [`pull`](#pull), and every manifest is checked against its digest. Nothing is stored. Exits
+0 on success, 1 on failure.
 
 ## login
 
@@ -429,7 +466,6 @@ Not in the command line yet, and planned:
 
 | Command | Issue |
 | --- | --- |
-| `manifest inspect` for remote images | #76 |
 | `create`, `start`, `restart` | #77 |
 | `wait`, `kill` | #78 |
 | `attach` | #79 |
