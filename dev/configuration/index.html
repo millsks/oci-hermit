@@ -1627,7 +1627,7 @@ oci-hermit processes. Change it only through oci-hermit's commands.</p>
 same release from elsewhere, is refused. A missing guest for one architecture only stops images of that architecture.</p>
 <h2 id="what-machine-info-shows">What machine info shows<a class="headerlink" href="#what-machine-info-shows" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="go">oci-hermit 0.1.0 (control protocol 1.2)</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="go">oci-hermit 0.1.0 (control protocol 1.3)</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="go">host: macos/aarch64, so images default to linux/arm64</span>
 </code></pre></div>
 <p>The version, and the host's OS and architecture, which decide the default image platform.</p>
@@ -1645,7 +1645,7 @@ version and accelerator. A problem here makes <code>machine info</code> exit 1, 
 <p>Each guest, its sizes and where it was found. A missing one says <code>not found; &lt;platform&gt; images cannot run</code>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="go">sandbox defaults for run:</span>
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">  cpus:       1 (--cpus)</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="go">  memory:     twice the image's size plus 256 MiB, at least 512 MiB (--memory)</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="go">  memory:     512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB (--memory)</span>
 <a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="go">  network:    none: no egress; -p (127.0.0.1 only) is not implemented yet</span>
 <a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="go">  run dir:    /var/folders/kb/…/T/oci-hermit (a sandbox-* folder per run: initramfs, console.log, qemu.log)</span>
 </code></pre></div>

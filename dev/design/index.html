@@ -1812,7 +1812,7 @@
 <li>Handles exec, PTYs, logs, signals and exit codes for the host tool.</li>
 <li>Runs containers of one pod in a shared network namespace.</li>
 </ul>
-<p><strong><code>run</code> in M1.</strong> Until the image pipeline below exists, <code>oci-hermit run</code> reads a local OCI layout (directory or <code>.tar</code>), applies its layers in memory, and puts the files in the initramfs under <code>/rootfs</code>. The agent mounts <code>proc</code>, <code>sys</code>, <code>dev</code> and <code>dev/pts</code> there, chroots in, and starts the command with <code>posix_spawn</code>, on a pty for <code>-t</code> or on pipes otherwise, then relays it over the control channel and reports its exit code. The VM is the isolation boundary until crun arrives.</p>
+<p><strong><code>run</code> today.</strong> A stored image runs through the image pipeline below. An image opened from a path (an OCI layout directory or <code>.tar</code>), or one with more layers than a sandbox takes disks, is applied in memory instead and its files go into the initramfs under <code>/rootfs</code>. Either way the agent mounts <code>proc</code>, <code>sys</code>, <code>dev</code> and <code>dev/pts</code> in <code>/rootfs</code>, chroots in, and starts the command with <code>posix_spawn</code>, on a pty for <code>-t</code> or on pipes otherwise, then relays it over the control channel and reports its exit code. The VM is the isolation boundary until crun arrives.</p>
 <p><strong>Image pipeline.</strong> pull or load → verify digests → per-layer EROFS image (cached) → attached read-only to the VM → stacked with overlayfs in the guest. The host never mounts anything, so no privileges are needed.</p>
 <h2 id="networking">Networking<a class="headerlink" href="#networking" title="Permanent link">&para;</a></h2>
 <p>The sandbox has no egress at all. The only way in is a port the user publishes, and it is bound to the host's 127.0.0.1.</p>
@@ -2080,8 +2080,8 @@ on stderr:</p>
 Hosted runners are small shared VMs (3 or 4 vCPUs), so they are slower and noisier than a laptop; the Intel macOS
 runner varied most, from 5.3s to 7.4s for the aarch64 guest.</p>
 <p>Boot dominates everywhere, and a sandbox is ready in 1 to 6 seconds. An x86_64 guest boots more slowly than an
-aarch64 one on every host except the Intel Mac, where the order flips. The M1 <code>run</code> copies the whole image into the initramfs, so prepare grows with the image's size; the
-EROFS layer disks (<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>) remove that copy.</p>
+aarch64 one on every host except the Intel Mac, where the order flips. These runs are from a file, so the image is copied into the initramfs and prepare grows with its size; a stored
+image runs from its EROFS layer disks (<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>) instead.</p>
 <h2 id="prior-art">Prior art<a class="headerlink" href="#prior-art" title="Permanent link">&para;</a></h2>
 <p>No existing tool combines rootless, no-hypervisor, cross-platform and a Docker-style UX.</p>
 <table>

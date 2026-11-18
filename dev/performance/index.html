@@ -1457,7 +1457,8 @@ dominates. Set <code>OCI_HERMIT_TIMINGS=1</code> to see the breakdown of any <co
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="go">timings: prepare 0.35s, boot 0.63s, command 0.05s, stop 0.03s, total 1.06s</span>
 </code></pre></div>
 <ul>
-<li><strong>prepare:</strong> read the image, apply its layers, write the initramfs. Grows with the image's size.</li>
+<li><strong>prepare:</strong> find the image, build any layer disk it does not have yet (once per layer), read the user from them,
+  write the initramfs. For an image run from a file, apply its layers into the initramfs, which grows with its size.</li>
 <li><strong>boot:</strong> start QEMU, boot the kernel, wait for the agent to be ready.</li>
 <li><strong>command:</strong> start the command and wait for it to exit.</li>
 <li><strong>stop:</strong> power the guest off.</li>
@@ -1646,7 +1647,7 @@ the Apple M4 Mac's own <code>/bin/sh</code>, and about 12 seconds in Alpine's <c
 </tr>
 <tr>
 <td>Memory for <code>run</code></td>
-<td>twice the image's size plus 256 MiB, at least 512 MiB</td>
+<td>512 MiB for a stored image; twice the size plus 256 MiB for one run from a file</td>
 <td><code>run -m 2g</code> (at least <code>64m</code>)</td>
 </tr>
 <tr>
@@ -1656,9 +1657,10 @@ the Apple M4 Mac's own <code>/bin/sh</code>, and about 12 seconds in Alpine's <c
 </tr>
 </tbody>
 </table>
-<p>The memory is the guest's RAM, which QEMU reserves on your machine. It is twice the image's size
-because today the image's files travel in the initramfs and are unpacked from it in the guest's RAM; layer disks
-(<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>) will remove that. A large image therefore needs a lot of memory: a 1 GB image gets a 2.3 GB sandbox. If a
+<p>The memory is the guest's RAM, which QEMU reserves on your machine. An image from the store (pulled or loaded) runs
+from read-only disks, one per layer, so 512 MiB does whatever its size; what the command writes is kept in that RAM
+until the sandbox stops. An image run straight from a file (<code>run image.tar</code>), or one with more than 20 layers,
+travels in the initramfs and is unpacked in the guest's RAM instead, so it gets twice its size plus 256 MiB. If a
 command runs out of memory, raise <code>-m</code>. More CPUs help commands that use several threads; booting does not get faster.</p>
 <h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
 <ul>
@@ -1666,8 +1668,9 @@ command runs out of memory, raise <code>-m</code>. More CPUs help commands that 
   containers yet (<a href="https://github.com/millsks/oci-hermit/issues/20">#20</a>, <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>).</li>
 <li><strong>No network.</strong> No outbound access at all, by design, and no published ports yet (<a href="https://github.com/millsks/oci-hermit/issues/27">#27</a>).</li>
 <li><strong>No bind mounts yet</strong> (<a href="https://github.com/millsks/oci-hermit/issues/33">#33</a>). Put what the command needs in the image, or pass it on stdin with <code>-i</code>.</li>
-<li><strong>Image size.</strong> The whole image is read into memory and copied into the initramfs. Images of a few hundred MB are
-  fine; multi-GB images are slow to prepare and need a lot of RAM until layer disks arrive (<a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>).</li>
+<li><strong>Image size.</strong> A stored image's layers become disks, once each, so the first <code>run</code> of a large image takes a moment
+  longer and later ones do not. An image run straight from a file is read into memory and copied into the
+  initramfs: fine for a few hundred MB, slow for multi-GB images. <code>load</code> it first to run it from disks.</li>
 <li><strong>Layer compression.</strong> Plain and gzip layers. zstd layers are not supported yet.</li>
 <li><strong>Platforms.</strong> <code>linux/amd64</code> and <code>linux/arm64</code> only.</li>
 <li><strong>Terminal.</strong> The terminal size is sent when a <code>-t</code> command starts; resizing the window afterwards is not passed on.</li>
