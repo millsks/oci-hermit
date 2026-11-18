@@ -98,7 +98,7 @@ Names are looked up in the image's own `/etc/passwd` and `/etc/group`, so a name
 
 ## 6. Give it more room
 
-Each `run` gets one emulated CPU and enough memory to hold the image twice over (at least 512 MiB). For a heavier
+Each `run` gets one emulated CPU and 512 MiB of memory: the image's layers are read-only disks, so its size does not matter. For a heavier
 command, ask for more:
 
 ```console

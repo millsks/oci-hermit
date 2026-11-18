@@ -3,6 +3,29 @@
 
 use crate::rootfs::{Node, Rootfs};
 
+/// What a path in an image is, for reading `/etc/passwd` and `/etc/group`: from the image unpacked in memory, or
+/// from its layer disks (#17).
+pub enum Entry {
+    File(Vec<u8>),
+    Symlink(String),
+    Other,
+}
+
+/// An image's files, looked up by path (relative, no leading slash), without following symbolic links.
+pub trait Files {
+    fn entry(&self, path: &str) -> Option<Entry>;
+}
+
+impl Files for Rootfs {
+    fn entry(&self, path: &str) -> Option<Entry> {
+        Some(match self.get(path)? {
+            Node::File(_, data) => Entry::File(data.clone()),
+            Node::Symlink(_, target) => Entry::Symlink(target.clone()),
+            _ => Entry::Other,
+        })
+    }
+}
+
 /// Who a command runs as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -68,7 +91,7 @@ fn groups(text: &str) -> Vec<Group<'_>> {
 
 /// A file's contents, following symbolic links inside the image (never above its root); empty when it does not
 /// exist.
-fn read(rootfs: &Rootfs, path: &str) -> String {
+fn read(files: &impl Files, path: &str) -> String {
     let mut pending: Vec<String> = path.split('/').rev().map(str::to_string).collect();
     let mut resolved: Vec<String> = Vec::new();
     let mut links = 0;
@@ -81,7 +104,7 @@ fn read(rootfs: &Rootfs, path: &str) -> String {
             }
             _ => resolved.push(part),
         }
-        if let Some(Node::Symlink(_, target)) = rootfs.get(&resolved.join("/")) {
+        if let Some(Entry::Symlink(target)) = files.entry(&resolved.join("/")) {
             links += 1;
             if links > 16 {
                 return String::new();
@@ -93,16 +116,16 @@ fn read(rootfs: &Rootfs, path: &str) -> String {
             pending.extend(target.split('/').rev().map(str::to_string));
         }
     }
-    match rootfs.get(&resolved.join("/")) {
-        Some(Node::File(_, data)) => String::from_utf8_lossy(data).into_owned(),
+    match files.entry(&resolved.join("/")) {
+        Some(Entry::File(data)) => String::from_utf8_lossy(&data).into_owned(),
         _ => String::new(),
     }
 }
 
 /// Resolve `spec` (`user`, `uid`, `user:group` or `uid:gid`; empty means root) against the image.
-pub fn resolve(spec: &str, rootfs: &Rootfs) -> Result<Identity, String> {
-    let passwd_text = read(rootfs, "etc/passwd");
-    let group_text = read(rootfs, "etc/group");
+pub fn resolve(spec: &str, files: &impl Files) -> Result<Identity, String> {
+    let passwd_text = read(files, "etc/passwd");
+    let group_text = read(files, "etc/group");
     let (users, all_groups) = (passwd(&passwd_text), groups(&group_text));
     let (user_part, group_part) = match spec.split_once(':') {
         Some((user, group)) => (user, Some(group)),

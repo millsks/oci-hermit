@@ -68,7 +68,7 @@ oci-hermit run [OPTIONS] <IMAGE> [COMMAND]...
 | `-u`, `--user <USER>` | Run as this user instead of the image's `User`: `name`, `uid`, `name:group` or `uid:gid`. Names are looked up in the image's `/etc/passwd` and `/etc/group`. |
 | `--platform <PLATFORM>` | The image platform. Without it, the host's, or the other one with a warning if the image has only that. |
 | `--cpus <CPUS>` | Number of emulated CPUs. Default 1. |
-| `-m`, `--memory <MEMORY>` | Memory for the sandbox: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix, as Docker. At least `64m`. Default: twice the image's size plus 256 MiB, at least 512 MiB. |
+| `-m`, `--memory <MEMORY>` | Memory for the sandbox: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix, as Docker. At least `64m`. Default: 512 MiB for a stored image, which runs from its layer disks; for an image run from a file, twice its size plus 256 MiB. |
 | `--rm` | Accepted for Docker compatibility. Changes nothing: a sandbox is always thrown away when its command ends. |
 | `-d`, `--detach` | Planned (#22). Refused today. |
 | `--name <NAME>` | Planned (#20). Refused today. |
@@ -414,7 +414,7 @@ oci-hermit machine boot [OPTIONS]
 ```console
 $ oci-hermit machine boot --arch x86_64
 booting an x86_64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12666-1794883275416245000/console.log
-agent ready after 0.6s (control protocol 1.2)
+agent ready after 0.6s (control protocol 1.3)
 guest powered off; sandbox stopped
 ```
 
@@ -426,7 +426,7 @@ Print the version and the control protocol version the host speaks.
 
 ```console
 $ oci-hermit version
-oci-hermit 0.1.0 (control protocol 1.2)
+oci-hermit 0.1.0 (control protocol 1.3)
 ```
 
 ## Exit codes

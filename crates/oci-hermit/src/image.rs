@@ -352,6 +352,14 @@ impl Image {
         json("manifest", &bytes)
     }
 
+    /// The layers, bottom first, as `(digest, media type)`.
+    pub fn layers(&self) -> Vec<(&str, &str)> {
+        self.layers
+            .iter()
+            .map(|l| (l.digest.as_str(), l.media_type.as_str()))
+            .collect()
+    }
+
     /// The root filesystem: every layer applied in order.
     pub fn rootfs(&self) -> Result<Rootfs, ImageError> {
         let mut rootfs = Rootfs::new();

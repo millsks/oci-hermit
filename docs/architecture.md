@@ -9,7 +9,7 @@ oci-hermit is a Cargo workspace of three crates, plus the build scripts for the 
 | --- | --- |
 | `crates/oci-hermit` | The host tool and its command line. |
 | `crates/oci-hermit/src/cli.rs` | The command line (clap), modelled on Docker and Podman, including the commands that are not implemented yet. |
-| `crates/oci-hermit/src/main.rs` | Dispatch; `run` (choose the architecture, find the image, build the initramfs, size the VM, run, report timings); `machine info` and `machine boot`. |
+| `crates/oci-hermit/src/main.rs` | Dispatch; `run` (choose the architecture, find the image, attach its layer disks or build the initramfs, size the VM, run, report timings); `machine info` and `machine boot`. |
 | `crates/oci-hermit/src/qemu.rs` | Finds the bundled QEMU (`$OCI_HERMIT_QEMU_DIR`, then the install layouts) and refuses any other: exact version and marker, `tcg`, firmware. |
 | `crates/oci-hermit/src/guest.rs` | Finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`, then the install layouts). |
 | `crates/oci-hermit/src/image.rs` | Reads an OCI image layout (directory or `.tar`): the manifest for the guest architecture, the config and the layers, checking every blob against its sha256 digest. |

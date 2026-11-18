@@ -124,7 +124,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 - Handles exec, PTYs, logs, signals and exit codes for the host tool.
 - Runs containers of one pod in a shared network namespace.
 
-**`run` in M1.** Until the image pipeline below exists, `oci-hermit run` reads a local OCI layout (directory or `.tar`), applies its layers in memory, and puts the files in the initramfs under `/rootfs`. The agent mounts `proc`, `sys`, `dev` and `dev/pts` there, chroots in, and starts the command with `posix_spawn`, on a pty for `-t` or on pipes otherwise, then relays it over the control channel and reports its exit code. The VM is the isolation boundary until crun arrives.
+**`run` today.** A stored image runs through the image pipeline below. An image opened from a path (an OCI layout directory or `.tar`), or one with more layers than a sandbox takes disks, is applied in memory instead and its files go into the initramfs under `/rootfs`. Either way the agent mounts `proc`, `sys`, `dev` and `dev/pts` in `/rootfs`, chroots in, and starts the command with `posix_spawn`, on a pty for `-t` or on pipes otherwise, then relays it over the control channel and reports its exit code. The VM is the isolation boundary until crun arrives.
 
 **Image pipeline.** pull or load → verify digests → per-layer EROFS image (cached) → attached read-only to the VM → stacked with overlayfs in the guest. The host never mounts anything, so no privileges are needed.
 
@@ -264,8 +264,8 @@ Hosted runners are small shared VMs (3 or 4 vCPUs), so they are slower and noisi
 runner varied most, from 5.3s to 7.4s for the aarch64 guest.
 
 Boot dominates everywhere, and a sandbox is ready in 1 to 6 seconds. An x86_64 guest boots more slowly than an
-aarch64 one on every host except the Intel Mac, where the order flips. The M1 `run` copies the whole image into the initramfs, so prepare grows with the image's size; the
-EROFS layer disks (#16, #17) remove that copy.
+aarch64 one on every host except the Intel Mac, where the order flips. These runs are from a file, so the image is copied into the initramfs and prepare grows with its size; a stored
+image runs from its EROFS layer disks (#16, #17) instead.
 
 ## Prior art
 

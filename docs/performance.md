@@ -13,7 +13,8 @@ $ OCI_HERMIT_TIMINGS=1 oci-hermit run public.ecr.aws/docker/library/debian:bookw
 timings: prepare 0.35s, boot 0.63s, command 0.05s, stop 0.03s, total 1.06s
 ```
 
-- **prepare:** read the image, apply its layers, write the initramfs. Grows with the image's size.
+- **prepare:** find the image, build any layer disk it does not have yet (once per layer), read the user from them,
+  write the initramfs. For an image run from a file, apply its layers into the initramfs, which grows with its size.
 - **boot:** start QEMU, boot the kernel, wait for the agent to be ready.
 - **command:** start the command and wait for it to exit.
 - **stop:** power the guest off.
@@ -70,12 +71,13 @@ sys	0m 0.00s
 | | Default | Change with |
 | --- | --- | --- |
 | CPUs | 1 | `run --cpus N`, `machine boot --cpus N` |
-| Memory for `run` | twice the image's size plus 256 MiB, at least 512 MiB | `run -m 2g` (at least `64m`) |
+| Memory for `run` | 512 MiB for a stored image; twice the size plus 256 MiB for one run from a file | `run -m 2g` (at least `64m`) |
 | Memory for `machine boot` | 512 MiB | `machine boot --memory 1024` (MiB) |
 
-The memory is the guest's RAM, which QEMU reserves on your machine. It is twice the image's size
-because today the image's files travel in the initramfs and are unpacked from it in the guest's RAM; layer disks
-(#16, #17) will remove that. A large image therefore needs a lot of memory: a 1 GB image gets a 2.3 GB sandbox. If a
+The memory is the guest's RAM, which QEMU reserves on your machine. An image from the store (pulled or loaded) runs
+from read-only disks, one per layer, so 512 MiB does whatever its size; what the command writes is kept in that RAM
+until the sandbox stops. An image run straight from a file (`run image.tar`), or one with more than 20 layers,
+travels in the initramfs and is unpacked in the guest's RAM instead, so it gets twice its size plus 256 MiB. If a
 command runs out of memory, raise `-m`. More CPUs help commands that use several threads; booting does not get faster.
 
 ## Limits
@@ -84,8 +86,9 @@ command runs out of memory, raise `-m`. More CPUs help commands that use several
   containers yet (#20, #22).
 - **No network.** No outbound access at all, by design, and no published ports yet (#27).
 - **No bind mounts yet** (#33). Put what the command needs in the image, or pass it on stdin with `-i`.
-- **Image size.** The whole image is read into memory and copied into the initramfs. Images of a few hundred MB are
-  fine; multi-GB images are slow to prepare and need a lot of RAM until layer disks arrive (#16, #17).
+- **Image size.** A stored image's layers become disks, once each, so the first `run` of a large image takes a moment
+  longer and later ones do not. An image run straight from a file is read into memory and copied into the
+  initramfs: fine for a few hundred MB, slow for multi-GB images. `load` it first to run it from disks.
 - **Layer compression.** Plain and gzip layers. zstd layers are not supported yet.
 - **Platforms.** `linux/amd64` and `linux/arm64` only.
 - **Terminal.** The terminal size is sent when a `-t` command starts; resizing the window afterwards is not passed on.

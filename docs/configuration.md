@@ -82,7 +82,7 @@ same release from elsewhere, is refused. A missing guest for one architecture on
 
 ```console
 $ oci-hermit machine info
-oci-hermit 0.1.0 (control protocol 1.2)
+oci-hermit 0.1.0 (control protocol 1.3)
 host: macos/aarch64, so images default to linux/arm64
 ```
 
@@ -109,7 +109,7 @@ Each guest, its sizes and where it was found. A missing one says `not found; <pl
 ```console
 sandbox defaults for run:
   cpus:       1 (--cpus)
-  memory:     twice the image's size plus 256 MiB, at least 512 MiB (--memory)
+  memory:     512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB (--memory)
   network:    none: no egress; -p (127.0.0.1 only) is not implemented yet
   run dir:    /var/folders/kb/…/T/oci-hermit (a sandbox-* folder per run: initramfs, console.log, qemu.log)
 ```

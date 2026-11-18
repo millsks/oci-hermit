@@ -294,7 +294,7 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
     }
 }
 
-/// `oci-hermit 0.1.0 (control protocol 1.2)`.
+/// `oci-hermit 0.1.0 (control protocol 1.3)`.
 fn version_line() -> String {
     let (major, minor) = hermit_proto::PROTOCOL_VERSION;
     format!(
@@ -403,7 +403,7 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
     lines.push(row("cpus", "1 (--cpus)".into()));
     lines.push(row(
         "memory",
-        "twice the image's size plus 256 MiB, at least 512 MiB (--memory)".into(),
+        "512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB (--memory)".into(),
     ));
     lines.push(row(
         "network",
@@ -748,6 +748,7 @@ fn boot(
             memory_mib: args.memory,
             cpus: args.cpus,
         },
+        disks: &[],
     })?;
     let _ = writeln!(
         out,
@@ -1000,10 +1001,37 @@ fn run_in_sandbox(
     let (image, arch, store) = open_image(&args.image, requested, env, err)?;
     qemu::verify(&bundle, arch)?;
     let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
-    let rootfs = image.rootfs()?;
-    drop(store);
+    // A stored image runs from its layer disks (#17), built once per layer and kept; the guest stacks them with
+    // overlayfs. An image opened from a path, or one with more layers than a sandbox takes disks, goes into the
+    // initramfs instead, which needs about twice its size in memory.
+    let disks = match &store {
+        Some(store) if image.layers().len() <= supervisor::MAX_DISKS => Some(
+            image
+                .layers()
+                .iter()
+                .map(|(digest, media_type)| store.layer_disk(digest, media_type))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        _ => None,
+    };
     let user_spec = args.user.as_deref().or(image.config.user.as_deref()).unwrap_or("");
-    let identity = users::resolve(user_spec, &rootfs)?;
+    let (rootfs, identity) = match &disks {
+        Some(paths) => {
+            let layers = erofs::Layers(
+                paths
+                    .iter()
+                    .rev()
+                    .map(|p| erofs::reader::Disk::open_path(p))
+                    .collect::<std::io::Result<_>>()?,
+            );
+            (None, users::resolve(user_spec, &layers)?)
+        }
+        None => {
+            let rootfs = image.rootfs()?;
+            let identity = users::resolve(user_spec, &rootfs)?;
+            (Some(rootfs), identity)
+        }
+    };
     let argv = image.config.argv(&args.command);
     if argv.is_empty() {
         return Err("the image has no entrypoint or command, and none was given".into());
@@ -1012,14 +1040,19 @@ fn run_in_sandbox(
         Some(text) => {
             parse_memory(text).ok_or_else(|| format!("--memory {text}: use e.g. 512m or 2g, at least 64m"))?
         }
-        None => memory_for(rootfs.content_bytes()),
+        None => memory_for(rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes)),
     };
     let dir = supervisor::run_dir(&env.run_base)?;
     let initrd = dir.join("initrd.cpio");
+    let agent = std::fs::read(&guest.agent)?;
     std::fs::write(
         &initrd,
-        initramfs::build_with_rootfs(&std::fs::read(&guest.agent)?, &rootfs),
+        match &rootfs {
+            Some(rootfs) => initramfs::build_with_rootfs(&agent, rootfs),
+            None => initramfs::build(&agent),
+        },
     )?;
+    drop(rootfs);
     let console = dir.join("console.log");
     let qemu_log = dir.join("qemu.log");
     let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
@@ -1032,6 +1065,7 @@ fn run_in_sandbox(
             memory_mib: memory,
             cpus: args.cpus.unwrap_or(1),
         },
+        disks: disks.as_deref().unwrap_or_default(),
     })?;
     let see_logs =
         |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
@@ -1039,6 +1073,15 @@ fn run_in_sandbox(
     let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
     let (_, version) = sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
     timings.mark("boot");
+    // QEMU has the layer disks open now, so the store may let `rmi` go ahead.
+    drop(store);
+    if disks.is_some() && version < (1, 3) {
+        return Err(format!(
+            "the guest agent speaks control protocol {}.{} and cannot mount layer disks; it needs 1.3 or later",
+            version.0, version.1
+        )
+        .into());
+    }
     // An agent older than 1.2 ignores the user and would run the command as root.
     if !identity.is_root() && version < (1, 2) {
         return Err(format!(
@@ -1073,6 +1116,12 @@ fn run_in_sandbox(
             gid: identity.gid,
             groups: identity.groups.clone(),
         }),
+        layers: disks
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, _)| supervisor::disk_serial(i))
+            .collect(),
     };
     let stdin = args.interactive.then(|| {
         let (chunks, input) = std::sync::mpsc::channel();
@@ -1190,7 +1239,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.2"));
+        assert!(out.contains("control protocol 1.3"));
         assert!(err.is_empty());
     }
 
@@ -1636,7 +1685,7 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.2)"),
+                out.contains("(control protocol 1.3)"),
                 "the fake agent speaks 1.0: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
@@ -1724,9 +1773,10 @@ mod tests {
                 rows: None,
                 cols: None,
                 user: None,
+                layers: Vec::new(),
             }
         );
-        // The initramfs holds the agent and the image's files under rootfs/.
+        // An image opened from a path has no layer disks: the initramfs holds the agent and its files under rootfs/.
         let run = std::fs::read_dir(bundle.join("run"))
             .unwrap()
             .next()
@@ -1958,11 +2008,39 @@ mod tests {
         );
         let seen = std::fs::read_to_string(bundle.join("run.seen")).unwrap();
         assert!(seen.contains("from-the-registry"), "{seen}");
+        // A stored image runs from its layer disk (#17): the agent is told the disk, and the initramfs holds the
+        // agent alone.
+        assert!(seen.contains(r#""layers":["layer0"]"#), "{seen}");
+        let disks = env
+            .data_dir
+            .as_ref()
+            .unwrap()
+            .join(format!("images/erofs/{}", erofs::FORMAT));
+        assert_eq!(std::fs::read_dir(&disks).unwrap().count(), 1);
+        let run = std::fs::read_dir(bundle.join("run"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let names: Vec<_> = initramfs::testing::parse(&std::fs::read(run.join("initrd.cpio")).unwrap())
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"init".to_string()));
+        assert!(!names.iter().any(|n| n.starts_with("rootfs/")), "{names:?}");
 
-        // The second run finds it in the store.
+        // The second run finds it in the store, and its disk.
         let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", &reference]);
         assert_eq!(code, 3);
         assert_eq!(err, "oops\n");
+        assert_eq!(std::fs::read_dir(&disks).unwrap().count(), 1);
+
+        // An agent older than 1.3 cannot mount the disks, and says so.
+        std::fs::write(bundle.join("agent.version"), "1,2").unwrap();
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", &reference]);
+        assert_eq!(code, 125);
+        assert!(err.contains("cannot mount layer disks; it needs 1.3"), "{err}");
     }
 
     #[test]

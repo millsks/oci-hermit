@@ -15,15 +15,18 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 
 1. **On the host,** oci-hermit finds the image: a local OCI layout or `.tar`, else an image in its store, else it
    pulls the image from the registry. Every manifest, config and layer is checked against its sha256 digest.
-2. It applies the image's layers in memory, works out the user to run as from the image's own `/etc/passwd`, and
-   writes an initramfs: the guest agent as `/init`, and the image's files under `/rootfs`. Nothing is mounted and
-   nothing needs privileges.
-3. It starts the bundled QEMU as a normal child process, with a software CPU (`-accel tcg`), no network device and
-   no disks, and boots oci-hermit's own Linux kernel with that initramfs.
+2. It turns each of the image's layers into a read-only EROFS disk, once per layer (later runs reuse them), works
+   out the user to run as from the image's own `/etc/passwd` on those disks, and writes an initramfs with the guest
+   agent as `/init`. Nothing is mounted on the host and nothing needs privileges. (An image run straight from a
+   file has its files put in the initramfs under `/rootfs` instead.)
+3. It starts the bundled QEMU as a normal child process, with a software CPU (`-accel tcg`), no network device, and
+   the layer disks attached read-only, and boots oci-hermit's own Linux kernel with that initramfs.
 4. **In the guest,** the agent runs as PID 1. It mounts `/proc`, `/sys` and `/dev`, says it is ready, and waits for
    instructions on a private serial channel.
-5. oci-hermit sends the command. The agent enters `/rootfs` with `chroot`, starts the command as the image's user,
-   and relays its input, output and exit code.
+5. oci-hermit sends the command and the disks' serial numbers. The agent mounts each disk read-only and stacks them
+   with overlayfs on `/rootfs`, under a writable layer in the guest's memory that is thrown away with the sandbox,
+   so nothing the command writes reaches the disks. It enters `/rootfs` with `chroot`, starts the command as the
+   image's user, and relays its input, output and exit code.
 6. When the command exits, oci-hermit asks the agent to power off, and exits with the command's exit code.
 
 ## Components
@@ -348,12 +351,10 @@ command as root. `oci-hermit version` prints the protocol version the host speak
 | `-chardev file,… -serial chardev:console` | The guest console goes to `console.log`, for people; oci-hermit never parses it. |
 | `-chardev stdio,…,signal=off` and a `virtserialport` named `org.oci-hermit.control` | The control channel on QEMU's stdin and stdout. `signal=off`, so a byte is never taken as Ctrl-C. |
 | `-append "console=ttyS0 panic=-1 tsc_early_khz=1000000"` or `"console=ttyAMA0 panic=-1"` | The kernel command line. The x86_64 guest's clock runs at a fixed 1 GHz on every host, and the kernel is told so. |
-| no `-netdev`, no `-drive` | No network device and no disks. |
+| `-drive …,readonly=on` and `-device virtio-blk-device,serial=layerN` per layer | The image's layer disks, read-only, found by the agent by serial number. No network device. |
 
 ## What changes later
 
-- **Layer disks** (#16, #17): today the whole image is copied into the initramfs, so the guest needs about twice the
-  image's size in RAM. Read-only EROFS disks per layer, cached by digest, with an overlayfs root, replace that.
 - **crun** (#21) replaces `chroot` and adds namespaces and cgroups inside the guest.
 - **Containers that outlive a command** (#20, #22): `run -d`, `exec`, `logs`, `ps`, `stop`, `rm`.
 - **Networking** (#26 to #29) and **bind mounts** (#30 to #34), with the defaults described in
