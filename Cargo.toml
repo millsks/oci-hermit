@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/oci-hermit", "crates/hermit-agent", "crates/hermit-proto"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/millsks/oci-hermit"
@@ -13,7 +13,7 @@ rust-version = "1.89"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-hermit-proto = { path = "crates/hermit-proto", version = "0.1.0" }
+hermit-proto = { path = "crates/hermit-proto", version = "0.2.0" }
 # Reading OCI image layers: gzip and tar, pure Rust.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4.46", default-features = false }

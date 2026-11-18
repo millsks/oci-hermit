@@ -121,7 +121,7 @@ You now have an `oci-hermit` folder. The commands below run from the folder that
 
 ```console
 $ oci-hermit version
-oci-hermit 0.1.0 (control protocol 1.3)
+oci-hermit 0.2.0 (control protocol 1.3)
 ```
 
 `machine info` lists both emulators with `accel tcg`, both guests, the defaults `run` uses, where images are stored
@@ -130,7 +130,7 @@ found beside `oci-hermit`. On a Mac with Apple silicon it looks like this (paths
 
 ```console
 $ oci-hermit machine info
-oci-hermit 0.1.0 (control protocol 1.3)
+oci-hermit 0.2.0 (control protocol 1.3)
 host: macos/aarch64, so images default to linux/arm64
 
 emulator (QEMU, software CPU only):
