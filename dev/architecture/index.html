@@ -1469,7 +1469,11 @@
 </tr>
 <tr>
 <td><code>crates/oci-hermit/src/registry.rs</code></td>
-<td><code>pull</code> over oci-client (reqwest, rustls with ring, the OS trust store): Podman and Docker auth files and credential helpers, retries, <code>$OCI_HERMIT_INSECURE_REGISTRIES</code>.</td>
+<td><code>pull</code>: the distribution API's reads over reqwest (rustls with ring, the OS trust store), with Basic and Bearer (token server) auth: Podman and Docker auth files and credential helpers, retries, <code>$OCI_HERMIT_INSECURE_REGISTRIES</code>.</td>
+</tr>
+<tr>
+<td><code>crates/oci-hermit/src/reference.rs</code></td>
+<td>Image references as Docker reads them: <code>debian</code> is <code>docker.io/library/debian:latest</code>.</td>
 </tr>
 <tr>
 <td><code>crates/oci-hermit/src/load.rs</code></td>
