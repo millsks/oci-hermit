@@ -2030,6 +2030,10 @@ command cannot be started.</p>
 <td><code>--platform &lt;PLATFORM&gt;</code></td>
 <td>The platform to pull. Default: the host's.</td>
 </tr>
+<tr>
+<td><code>--cert-dir &lt;DIR&gt;</code></td>
+<td>Use the CA certificates (<code>*.crt</code>) and client certificate (<code>*.cert</code> with <code>*.key</code>) in <code>DIR</code> for this registry, instead of its <code>certs.d</code> folder.</td>
+</tr>
 </tbody>
 </table>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>pull<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20
@@ -2040,7 +2044,9 @@ command cannot be started.</p>
 </code></pre></div>
 <p>Logins come from <a href="#login"><code>login</code></a> and from the Podman and Docker auth files and credential helpers (see
 <a href="../field-manual/private-registry/">Pull from a private registry</a>); with none, the pull is anonymous. Throttling and
-server errors are retried four times. Exits 0 on success, 1 on failure.</p>
+server errors are retried four times. A registry's own CA and client certificate come from its <code>certs.d</code> folder
+(see <a href="../field-manual/private-registry/#a-registry-behind-a-company-certificate-authority">a registry with its own CA</a>).
+Exits 0 on success, 1 on failure.</p>
 <h2 id="login">login<a class="headerlink" href="#login" title="Permanent link">&para;</a></h2>
 <p>Log in to a registry. The user name and password are checked with the registry before anything is saved, as
 <code>docker login</code> does, then stored where Podman keeps logins, so <code>pull</code>, Podman and skopeo all use them.</p>
@@ -2077,6 +2083,10 @@ server errors are retried four times. Exits 0 on success, 1 on failure.</p>
 <tr>
 <td><code>--get-login</code></td>
 <td>Print the user name logged in to <code>REGISTRY</code>, and nothing else.</td>
+</tr>
+<tr>
+<td><code>--cert-dir &lt;DIR&gt;</code></td>
+<td>Use the CA certificates and client certificate in <code>DIR</code> for this registry, as for <code>pull</code>.</td>
 </tr>
 </tbody>
 </table>

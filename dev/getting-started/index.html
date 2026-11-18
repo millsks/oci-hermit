@@ -1859,7 +1859,9 @@ file).</p>
 <li><code>oci-hermit logout registry.example.com</code> removes the login; <code>logout --all</code> removes them all.</li>
 <li>More, including tokens for GHCR, GitLab and Harbor: <a href="../field-manual/private-registry/">Pull from a private registry</a>.</li>
 <li>Registry certificates are checked against your operating system's trust store, so a company certificate
-  authority that IT installed works. Per-registry certificates (<code>certs.d</code>) are <a href="https://github.com/millsks/oci-hermit/issues/86">#86</a>.</li>
+  authority that IT installed works. A CA that is not installed, or a client certificate the registry asks for,
+  goes in a folder for that registry, <code>~/.config/containers/certs.d/&lt;host:port&gt;/</code>, as Podman and Docker keep them:
+  see <a href="../field-manual/private-registry/#a-registry-behind-a-company-certificate-authority">a registry with its own CA</a>.</li>
 </ul>
 <p>Set <code>OCI_HERMIT_TIMINGS=1</code> to see how long each phase of a <code>run</code> took. Booting dominates; on CI hosts a shell is
 ready in 1 to 6 seconds (see <a href="../performance/">Performance and limits</a>).</p>

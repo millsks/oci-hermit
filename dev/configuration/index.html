@@ -1577,6 +1577,12 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 <td>the same</td>
 <td>the same</td>
 </tr>
+<tr>
+<td>A registry's own CAs and client certificate</td>
+<td><code>~\.config\containers\certs.d\&lt;host&gt;&lt;port&gt;\</code>, or Docker's</td>
+<td><code>~/.config/containers/certs.d/&lt;host:port&gt;/</code>, or <code>/etc/containers/certs.d</code>, or Docker's</td>
+<td>the same as macOS</td>
+</tr>
 </tbody>
 </table>
 <p>oci-hermit never writes beside itself, so its folder can be read-only. It does not delete old <code>sandbox-*</code> folders:

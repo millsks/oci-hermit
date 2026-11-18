@@ -751,6 +751,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-registry-that-wants-a-client-certificate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A registry that wants a client certificate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-registry-over-plain-http" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1491,6 +1502,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-registry-that-wants-a-client-certificate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A registry that wants a client certificate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-registry-over-plain-http" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1702,24 +1724,65 @@ seconds. <code>run</code> pulls a missing image the same way, so <code>oci-hermi
 <h2 id="a-registry-behind-a-company-certificate-authority">A registry behind a company certificate authority<a class="headerlink" href="#a-registry-behind-a-company-certificate-authority" title="Permanent link">&para;</a></h2>
 <p>oci-hermit checks registry certificates against the operating system's trust store: the Windows certificate store,
 the macOS keychain, or the system certificates on Linux. A company root certificate that IT has installed on the
-machine is therefore trusted with nothing more to do. If a pull fails with a certificate error, check the same URL
-in a browser on the same machine: if the browser does not trust it either, the certificate is missing from the
-system store, and IT needs to install it.</p>
-<p>Per-registry certificate files (<code>certs.d</code>, as Podman and Docker use them) and client certificates are planned in
-<a href="https://github.com/millsks/oci-hermit/issues/86">#86</a>.</p>
-<h2 id="a-registry-over-plain-http">A registry over plain HTTP<a class="headerlink" href="#a-registry-over-plain-http" title="Permanent link">&para;</a></h2>
-<p>A local test registry often has no TLS at all. Name it in <code>OCI_HERMIT_INSECURE_REGISTRIES</code>, as <code>host:port</code>, comma
-separated:</p>
+machine is therefore trusted with nothing more to do.</p>
+<p>When it is not installed, and you cannot install it machine-wide without admin rights, give it to oci-hermit for
+that registry alone. Put the CA certificate (PEM, the text that starts <code>-----BEGIN CERTIFICATE-----</code>) in a folder
+named after the registry, host and port as you write them in image names, with a <code>.crt</code> extension:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="4:2"><input checked="checked" id="__tabbed_4_1" name="__tabbed_4" type="radio" /><input id="__tabbed_4_2" name="__tabbed_4" type="radio" /><div class="tabbed-labels"><label for="__tabbed_4_1">macOS and Linux</label><label for="__tabbed_4_2">Windows</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_INSECURE_REGISTRIES</span><span class="o">=</span>localhost:5000
-<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>localhost:5000/my-app:dev
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/containers/certs.d/registry.corp.example:5000
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>cp<span class="w"> </span>corp-root-ca.pem<span class="w"> </span>~/.config/containers/certs.d/registry.corp.example:5000/ca.crt
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>registry.corp.example:5000/team/app:1.4
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nv">$env:OCI_HERMIT_INSECURE_REGISTRIES</span> <span class="p">=</span> <span class="s2">"localhost:5000"</span>
-<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="n">oci-hermit</span> <span class="n">pull</span> <span class="n">localhost</span><span class="p">:</span><span class="n">5000</span><span class="p">/</span><span class="n">my-app</span><span class="p">:</span><span class="n">dev</span>
+<p>A folder name cannot hold a <code>:</code> on Windows, so drop it, as Docker does: <code>registry.corp.example:5000</code> is
+<code>registry.corp.example5000</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nv">$dir</span> <span class="p">=</span> <span class="s2">"$HOME\.config\containers\certs.d\registry.corp.example5000"</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="nb">New-Item</span> <span class="n">-ItemType</span> <span class="n">Directory</span> <span class="n">-Force</span> <span class="nv">$dir</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="nb">Copy-Item</span> <span class="n">corp-root-ca</span><span class="p">.</span><span class="n">pem</span> <span class="s2">"$dir\ca.crt"</span>
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="n">oci-hermit</span> <span class="n">pull</span> <span class="n">registry</span><span class="p">.</span><span class="n">corp</span><span class="p">.</span><span class="n">example</span><span class="p">:</span><span class="n">5000</span><span class="p">/</span><span class="n">team</span><span class="p">/</span><span class="n">app</span><span class="p">:</span><span class="n">1</span><span class="p">.</span><span class="n">4</span>
+</code></pre></div>
+</div>
+</div>
+</div>
+<p>This is the <code>certs.d</code> layout Podman and Docker use, so a folder you already set up for them works too. oci-hermit
+looks for the registry's folder in these, in order, and uses the first it finds:</p>
+<ol>
+<li><code>$XDG_CONFIG_HOME/containers/certs.d</code>, or <code>~/.config/containers/certs.d</code> (Podman, yours)</li>
+<li><code>/etc/containers/certs.d</code> (Podman, the whole machine; macOS and Linux)</li>
+<li><code>~/.docker/certs.d</code> (Docker)</li>
+<li><code>/etc/docker/certs.d</code> on macOS and Linux, <code>%ProgramData%\docker\certs.d</code> on Windows (Docker, the whole machine)</li>
+</ol>
+<p><code>pull --cert-dir DIR</code> and <code>login --cert-dir DIR</code> use the files in <code>DIR</code> instead. A registry's CAs are trusted for
+that registry only, on top of the system's, never for any other host. <code>machine info</code> lists the folders and what each
+holds for which registry.</p>
+<h2 id="a-registry-that-wants-a-client-certificate">A registry that wants a client certificate<a class="headerlink" href="#a-registry-that-wants-a-client-certificate" title="Permanent link">&para;</a></h2>
+<p>Some registries ask for a client certificate (mutual TLS) as well as, or instead of, a login. Put the certificate
+and its private key, both PEM, in the registry's folder beside its CA, as a <code>.cert</code> and a <code>.key</code> with the same
+name:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>~/.config/containers/certs.d/registry.corp.example:5000/
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a>  ca.crt          the registry's CA (if the system does not trust it already)
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>  client.cert     your certificate
+<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a>  client.key      its private key
+</code></pre></div>
+<p>A <code>.cert</code> without its <code>.key</code> (or the other way round) is an error, so a half-copied setup is reported instead of
+failing later. On macOS and Linux, keep the key readable by you only (<code>chmod 600 client.key</code>): oci-hermit warns when
+other users can read it. It never prints a key.</p>
+<h2 id="a-registry-over-plain-http">A registry over plain HTTP<a class="headerlink" href="#a-registry-over-plain-http" title="Permanent link">&para;</a></h2>
+<p>A local test registry often has no TLS at all. Name it in <code>OCI_HERMIT_INSECURE_REGISTRIES</code>, as <code>host:port</code>, comma
+separated:</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="5:2"><input checked="checked" id="__tabbed_5_1" name="__tabbed_5" type="radio" /><input id="__tabbed_5_2" name="__tabbed_5" type="radio" /><div class="tabbed-labels"><label for="__tabbed_5_1">macOS and Linux</label><label for="__tabbed_5_2">Windows</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OCI_HERMIT_INSECURE_REGISTRIES</span><span class="o">=</span>localhost:5000
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>oci-hermit<span class="w"> </span>pull<span class="w"> </span>localhost:5000/my-app:dev
+</code></pre></div>
+</div>
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nv">$env:OCI_HERMIT_INSECURE_REGISTRIES</span> <span class="p">=</span> <span class="s2">"localhost:5000"</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="n">oci-hermit</span> <span class="n">pull</span> <span class="n">localhost</span><span class="p">:</span><span class="n">5000</span><span class="p">/</span><span class="n">my-app</span><span class="p">:</span><span class="n">dev</span>
 </code></pre></div>
 </div>
 </div>
@@ -1735,15 +1798,27 @@ separated:</p>
 </thead>
 <tbody>
 <tr>
-<td><code>logging in to pull …: error sending request for url (https://…/v2/)</code></td>
-<td>The registry cannot be reached: a typo in the name, no network, a proxy, or a certificate the system does not trust.</td>
+<td><code>pulling the manifest of …: error sending request for url (https://…)</code></td>
+<td>The registry cannot be reached: a typo in the name, no network, or a proxy.</td>
 </tr>
 <tr>
-<td><code>pulling the manifest of …: Not authorized</code></td>
-<td>No login for this registry was found, or it was refused. Check <code>machine info</code> and the host name the login is filed under.</td>
+<td><code>… invalid peer certificate … (if … uses its own CA, put that CA in …)</code></td>
+<td>The registry's certificate is from a CA the system does not trust. Add it as <a href="#a-registry-behind-a-company-certificate-authority">above</a>.</td>
 </tr>
 <tr>
-<td><code>pulling the manifest of …: … does not exist</code></td>
+<td><code>… (the registry may want a client certificate: …)</code></td>
+<td>The registry asked for a client certificate and got none, or one it does not accept. See <a href="#a-registry-that-wants-a-client-certificate">client certificates</a>.</td>
+</tr>
+<tr>
+<td><code>pulling the manifest of …: 401 … (no login for … was found …)</code></td>
+<td>No login for this registry was found. Check <code>machine info</code> and the host name the login is filed under.</td>
+</tr>
+<tr>
+<td><code>… the token server … answered 401</code> or <code>403 DENIED</code></td>
+<td>The login was refused, or it cannot see this repository.</td>
+</tr>
+<tr>
+<td><code>pulling the manifest of …: 404 MANIFEST_UNKNOWN</code> or <code>NAME_UNKNOWN</code></td>
 <td>The repository or tag is wrong, or your login cannot see it.</td>
 </tr>
 <tr>
