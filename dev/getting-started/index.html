@@ -1856,6 +1856,8 @@ file).</p>
   else <code>~/.config/containers/auth.json</code>), readable by you only. Podman and skopeo use it too, and logins you already
   made with <code>podman login</code> or <code>docker login</code> work in oci-hermit without logging in again. <code>machine info</code> lists
   every auth file it reads and the one <code>login</code> writes.</li>
+<li><code>oci-hermit manifest inspect registry.example.com/team/app:1.4</code> shows which platforms the image has, and their
+  digests and sizes, without pulling it.</li>
 <li><code>oci-hermit logout registry.example.com</code> removes the login; <code>logout --all</code> removes them all.</li>
 <li>More, including tokens for GHCR, GitLab and Harbor: <a href="../field-manual/private-registry/">Pull from a private registry</a>.</li>
 <li>Registry certificates are checked against your operating system's trust store, so a company certificate
