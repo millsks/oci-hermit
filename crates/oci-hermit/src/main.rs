@@ -5,6 +5,7 @@
 
 mod certs;
 mod cli;
+mod erofs;
 mod guest;
 mod image;
 mod images;

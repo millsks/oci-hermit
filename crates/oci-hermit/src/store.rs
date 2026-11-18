@@ -272,8 +272,71 @@ impl Store {
                 deleted.push(digest);
             }
         }
+        // Layer disks go with their layers, and every disk of an older builder goes.
+        let erofs = self.dir.join("erofs");
+        if let Ok(formats) = std::fs::read_dir(&erofs) {
+            let current = crate::erofs::FORMAT.to_string();
+            for format in formats.flatten() {
+                let Ok(disks) = std::fs::read_dir(format.path()) else {
+                    continue;
+                };
+                for disk in disks.flatten() {
+                    let name = disk.file_name().to_string_lossy().into_owned();
+                    let hex = name.strip_suffix(".erofs").unwrap_or_default();
+                    let in_use = format.file_name() == current.as_str()
+                        && hex.len() == 64
+                        && wanted.contains(&format!("sha256:{hex}"));
+                    // A disk being written (`.tmp`) by another process is left alone.
+                    if !in_use && !name.ends_with(".tmp") {
+                        freed += disk.metadata().map(|m| m.len()).unwrap_or(0);
+                        std::fs::remove_file(disk.path())?;
+                    }
+                }
+                if format.file_name() != current.as_str() {
+                    let _ = std::fs::remove_dir(format.path());
+                }
+            }
+        }
         deleted.sort();
         Ok((deleted, freed))
+    }
+
+    /// The folder of layer disks the current builder writes: `erofs/<format>/`. Older formats' folders are left for
+    /// [`Store::collect_garbage`].
+    fn disks_dir(&self) -> PathBuf {
+        self.dir.join("erofs").join(crate::erofs::FORMAT.to_string())
+    }
+
+    /// The EROFS disk of layer `digest` (#16): built from the stored blob the first time it is asked for, and kept
+    /// under `erofs/<format>/<hex>.erofs` so every image with that layer reuses it. Written to a temporary name and
+    /// renamed, so a half-written disk is never used.
+    #[cfg_attr(not(test), expect(dead_code, reason = "run attaches the disks in #17"))]
+    pub fn layer_disk(&self, digest: &str, media_type: &str) -> Result<PathBuf, ImageError> {
+        // Checks the digest is a well-formed sha256 one, so the name below is plain hex.
+        image::blob_path(digest)?;
+        let hex = &digest["sha256:".len()..];
+        let dir = self.disks_dir();
+        let path = dir.join(format!("{hex}.erofs"));
+        if path.is_file() {
+            return Ok(path);
+        }
+        std::fs::create_dir_all(&dir)?;
+        let blob = self.blob(digest)?;
+        let temp = dir.join(format!("{hex}.erofs.{}.tmp", std::process::id()));
+        let built = std::fs::File::create(&temp).map_err(ImageError::from).and_then(|file| {
+            let mut out = std::io::BufWriter::new(file);
+            crate::erofs::build(image::layer_reader(media_type, &blob)?, &mut out)
+                .map_err(|e| ImageError::Invalid(format!("layer {digest}: {e}")))?;
+            out.into_inner()
+                .map_err(|e| ImageError::from(e.into_error()))?
+                .sync_all()?;
+            Ok(())
+        });
+        if let Err(e) = built.and_then(|()| std::fs::rename(&temp, &path).map_err(ImageError::from)) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+        Ok(path)
     }
 
     /// Whether the store has image `name` for `os/arch`.
@@ -295,6 +358,8 @@ pub struct Usage {
     pub names: usize,
     /// The blobs' total size.
     pub bytes: u64,
+    /// The layer disks' total size (#16), built from the blobs.
+    pub disk_bytes: u64,
 }
 
 /// What the store under `data_dir` holds, read without creating anything; `None` if there is no store there yet.
@@ -317,10 +382,20 @@ pub fn usage(data_dir: &Path) -> Option<Usage> {
                 .sum()
         })
         .unwrap_or(0);
+    let disk_bytes = std::fs::read_dir(dir.join("erofs"))
+        .map(|formats| {
+            formats
+                .flatten()
+                .filter_map(|f| std::fs::read_dir(f.path()).ok())
+                .flat_map(|disks| disks.flatten().filter_map(|d| d.metadata().ok()).map(|m| m.len()))
+                .sum()
+        })
+        .unwrap_or(0);
     Some(Usage {
         entries: manifests.len(),
         names: names.len(),
         bytes,
+        disk_bytes,
     })
 }
 
@@ -350,6 +425,47 @@ mod tests {
     use crate::image::testing::{layer, manifest};
     use crate::qemu::GuestArch;
     use crate::qemu::testing::scratch;
+
+    #[test]
+    fn layer_disks_are_built_once_and_collected_with_their_layer() {
+        let dir = scratch("store-disks");
+        let store = Store::open(&dir).unwrap();
+        let (digest, _) = manifest(&dir.join("images"), "amd64", &layer(), "{}");
+        store
+            .tag("example.com/app:1", "linux", "amd64", "m", &digest, 2)
+            .unwrap();
+        let blobs = store.blobs_of(&store.entries().unwrap()[0]).unwrap();
+        let (layer_digest, _) = blobs
+            .iter()
+            .find(|(d, _)| d != &digest && store.blob(d).unwrap().starts_with(&[0x1f, 0x8b]))
+            .unwrap();
+        let disk = store
+            .layer_disk(layer_digest, "application/vnd.oci.image.layer.v1.tar+gzip")
+            .unwrap();
+        assert!(disk.ends_with(format!("erofs/{}/{}.erofs", crate::erofs::FORMAT, &layer_digest[7..])));
+        let image = crate::erofs::reader::Image::open(std::fs::read(&disk).unwrap());
+        assert!(
+            image.walk().contains_key("/bin/sh"),
+            "the layer's files are on the disk"
+        );
+        // A second ask reuses the disk.
+        let built = std::fs::metadata(&disk).unwrap().modified().unwrap();
+        assert_eq!(store.layer_disk(layer_digest, "").unwrap(), disk);
+        assert_eq!(std::fs::metadata(&disk).unwrap().modified().unwrap(), built);
+        assert!(usage(&dir).unwrap().disk_bytes > 0);
+        assert!(store.layer_disk("sha256:nothex", "").is_err());
+
+        // An older builder's disk goes at the next collection, the current one stays while its layer does.
+        let old = dir.join("images/erofs/0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(format!("{}.erofs", &layer_digest[7..])), b"old").unwrap();
+        store.collect_garbage().unwrap();
+        assert!(disk.is_file() && !old.exists());
+        assert_eq!(store.untag(|e| e.name == "example.com/app:1").unwrap().len(), 1);
+        store.collect_garbage().unwrap();
+        assert!(!disk.exists());
+        assert_eq!(usage(&dir).unwrap().disk_bytes, 0);
+    }
 
     #[test]
     fn the_data_dir_follows_each_platform() {

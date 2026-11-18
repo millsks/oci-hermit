@@ -19,6 +19,7 @@ oci-hermit is a Cargo workspace of three crates, plus the build scripts for the 
 | `crates/oci-hermit/src/reference.rs` | Image references as Docker reads them: `debian` is `docker.io/library/debian:latest`. |
 | `crates/oci-hermit/src/load.rs` | `load -i`: OCI layouts and `docker save` archives (old and Docker 25+) into the store; unnamed images go by ID. |
 | `crates/oci-hermit/src/images.rs` | The image commands over the store: `images`, `rmi`, `inspect`, `tag`, `save`, `image prune`, `image history`, `image exists`, `system df`. |
+| `crates/oci-hermit/src/erofs.rs` | Writes each layer as a read-only EROFS image without mounting anything, the way overlayfs reads a lower layer; cached by layer digest in the image store. |
 | `crates/oci-hermit/src/rootfs.rs` | Applies layers in memory: whiteouts, opaque directories, hard links; refuses paths that climb out with `..`. |
 | `crates/oci-hermit/src/users.rs` | Resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does. |
 | `crates/oci-hermit/src/initramfs.rs` | Writes the guest initramfs (the agent as `/init`, `/dev/console`, the image under `/rootfs`) as a `newc` cpio in memory, without privileges. |

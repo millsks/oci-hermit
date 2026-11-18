@@ -100,6 +100,19 @@ struct Descriptor {
     annotations: HashMap<String, String>,
 }
 
+/// The uncompressed tarball of a layer blob: gzip (by media type or by its magic bytes) or plain. zstd is not read
+/// yet.
+pub fn layer_reader<'a>(media_type: &str, blob: &'a [u8]) -> Result<Box<dyn std::io::Read + 'a>, ImageError> {
+    if media_type.ends_with("+zstd") || media_type.ends_with(".zstd") {
+        return Err(ImageError::Unsupported(format!("a zstd layer ({media_type})")));
+    }
+    if media_type.ends_with("+gzip") || media_type.ends_with(".gzip") || blob.starts_with(&[0x1f, 0x8b]) {
+        Ok(Box::new(flate2::read::GzDecoder::new(blob)))
+    } else {
+        Ok(Box::new(blob))
+    }
+}
+
 /// `sha256:<hex>` of `bytes`.
 pub fn digest_of(bytes: &[u8]) -> String {
     use sha2::Digest;
@@ -344,15 +357,7 @@ impl Image {
         let mut rootfs = Rootfs::new();
         for layer in &self.layers {
             let blob = self.source.read_blob(&layer.digest)?;
-            let media = layer.media_type.as_str();
-            if media.ends_with("+zstd") || media.ends_with(".zstd") {
-                return Err(ImageError::Unsupported(format!("a zstd layer ({media})")));
-            }
-            if media.ends_with("+gzip") || media.ends_with(".gzip") || blob.starts_with(&[0x1f, 0x8b]) {
-                rootfs.apply_layer(flate2::read::GzDecoder::new(&blob[..]))?;
-            } else {
-                rootfs.apply_layer(&blob[..])?;
-            }
+            rootfs.apply_layer(layer_reader(&layer.media_type, &blob)?)?;
         }
         Ok(rootfs)
     }

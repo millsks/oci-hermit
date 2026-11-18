@@ -22,6 +22,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/certs.rs` | per-registry CAs and client certificates from Podman's and Docker's `certs.d` folders (or `--cert-dir`); one HTTP client per registry, so a registry's CA never applies elsewhere |
 | `crates/oci-hermit/src/reference.rs` | image references as Docker reads them (`debian` is `docker.io/library/debian:latest`) |
 | `crates/oci-hermit/src/login.rs` | `login`/`logout`: checks credentials with the registry (reqwest: `/v2/` with Basic, or its token server for a Bearer challenge), then writes Podman's `auth.json` (0600); never prints secrets |
+| `crates/oci-hermit/src/erofs.rs` | a layer tarball as a read-only EROFS image, in user space (#16): whiteouts as 0:0 devices, opaque dirs as `trusted.overlay.opaque`, the layer's own `trusted.*` xattrs dropped; `Store::layer_disk` caches one per layer digest under `erofs/<FORMAT>/`. Bump `erofs::FORMAT` whenever the output changes |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
