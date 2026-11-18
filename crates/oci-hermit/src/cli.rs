@@ -53,6 +53,9 @@ pub enum Command {
     /// Manage images
     #[command(subcommand)]
     Image(ImageCommand),
+    /// Look at image manifests in a registry, without pulling
+    #[command(subcommand)]
+    Manifest(ManifestCommand),
     /// Show what oci-hermit uses and where it keeps things (as `machine info`)
     Info,
     /// Manage oci-hermit's data
@@ -113,6 +116,7 @@ impl Command {
             Command::Tag(_) => "tag",
             Command::Save(_) => "save",
             Command::Image(_) => "image",
+            Command::Manifest(_) => "manifest",
             Command::Info => "info",
             Command::System(_) => "system",
             Command::Run(_) => "run",
@@ -128,6 +132,25 @@ impl Command {
             Command::Version => "version",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ManifestCommand {
+    /// Show an image's index or manifest as the registry serves it (platforms, digests, sizes)
+    Inspect(ManifestInspectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ManifestInspectArgs {
+    /// Resolve each platform's manifest too, as `docker manifest inspect --verbose` does
+    #[arg(short, long)]
+    pub verbose: bool,
+    /// Folder with the registry's CA certificates (*.crt) and client certificate (*.cert, *.key), instead of the
+    /// certs.d folders
+    #[arg(long, value_name = "DIR")]
+    pub cert_dir: Option<std::path::PathBuf>,
+    /// Image reference, e.g. debian:bookworm-slim or ghcr.io/org/app:1.2
+    pub image: String,
 }
 
 #[derive(Debug, Args)]
@@ -426,6 +449,7 @@ mod tests {
             (&["tag", "alpine", "mine"], "tag"),
             (&["save", "-o", "a.tar", "alpine"], "save"),
             (&["image", "ls"], "image"),
+            (&["manifest", "inspect", "alpine"], "manifest"),
             (&["info"], "info"),
             (&["system", "df"], "system"),
             (&["run", "alpine"], "run"),

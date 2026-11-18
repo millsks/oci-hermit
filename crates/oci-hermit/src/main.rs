@@ -249,6 +249,28 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
+        cli::Command::Manifest(cli::ManifestCommand::Inspect(args)) => {
+            let shown = registry::normalize(&args.image)
+                .map_err(registry::PullError::Registry)
+                .and_then(|reference| {
+                    let settings = registry::Settings {
+                        cert_dir: args.cert_dir.clone(),
+                        ..env.registry.clone()
+                    };
+                    warn_about_certs(&settings, reference.registry(), err);
+                    registry::inspect(&reference, &settings, args.verbose)
+                });
+            match shown {
+                Ok(text) => {
+                    let _ = out.write_all(text.as_bytes());
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(err, "oci-hermit: {e}");
+                    1
+                }
+            }
+        }
         cli::Command::Pull {
             platform,
             image,
@@ -1847,6 +1869,34 @@ mod tests {
         // Root needs nothing new from the agent.
         let (code, err, _) = run_as("main-user-old-root", "", "1,1", &[]);
         assert_eq!(code, 3, "{err}");
+    }
+
+    #[test]
+    fn manifest_inspect_prints_what_the_registry_serves() {
+        let address = registry::testing::registry("main-manifest-registry", None, false, 0);
+        let env = Env {
+            registry: registry::Settings {
+                insecure: vec![address.clone()],
+                ..registry::Settings::default()
+            },
+            ..no_qemu("main-manifest-env")
+        };
+        let reference = format!("{address}/test/app:1");
+        let (code, out, err) = run_with(&env, &["manifest", "inspect", &reference]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(
+            out.contains("\"mediaType\": \"application/vnd.oci.image.index.v1+json\""),
+            "{out}"
+        );
+        let (code, out, _) = run_with(&env, &["manifest", "inspect", "-v", &reference]);
+        assert_eq!(code, 0);
+        assert_eq!(out.matches("\"OCIManifest\"").count(), 2, "{out}");
+        let (code, _, err) = run_with(&env, &["manifest", "inspect", "Not A Reference"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("is not an image reference"), "{err}");
+        // Nothing was stored.
+        let (_, out, _) = run_with(&env, &["images", "-q"]);
+        assert_eq!(out, "");
     }
 
     #[test]

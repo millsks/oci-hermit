@@ -267,6 +267,8 @@ oci-hermit pull registry.example.com/team/app:1.4
   else `~/.config/containers/auth.json`), readable by you only. Podman and skopeo use it too, and logins you already
   made with `podman login` or `docker login` work in oci-hermit without logging in again. `machine info` lists
   every auth file it reads and the one `login` writes.
+- `oci-hermit manifest inspect registry.example.com/team/app:1.4` shows which platforms the image has, and their
+  digests and sizes, without pulling it.
 - `oci-hermit logout registry.example.com` removes the login; `logout --all` removes them all.
 - More, including tokens for GHCR, GitLab and Harbor: [Pull from a private registry](field-manual/private-registry.md).
 - Registry certificates are checked against your operating system's trust store, so a company certificate
