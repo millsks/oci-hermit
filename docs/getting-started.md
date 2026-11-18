@@ -50,7 +50,10 @@ right-click the `.zip` and choose **Extract All**; on macOS, double-click the `.
     ```powershell
     $tag = gh release list -R millsks/oci-hermit -L 1 --json tagName -q '.[0].tagName'
     gh release download $tag -R millsks/oci-hermit -p '*-win-64.zip' -p SHA256SUMS
-    Expand-Archive oci-hermit-*-win-64.zip -DestinationPath .
+    $zip = Get-Item oci-hermit-*-win-64.zip
+    $want = (Select-String -Path SHA256SUMS -Pattern $zip.Name -SimpleMatch).Line.Split(' ')[0]
+    if ((Get-FileHash $zip -Algorithm SHA256).Hash -eq $want) { 'OK' } else { 'MISMATCH' }
+    Expand-Archive $zip -DestinationPath .
     ```
 
 === "macOS"
@@ -76,7 +79,15 @@ right-click the `.zip` and choose **Extract All**; on macOS, double-click the `.
     ```
 
 `gh release list` takes the newest release, pre-releases included; `gh release download` alone would skip those.
-`SHA256SUMS` lets you check the download, as the macOS and Linux tabs do.
+Each tab checks the download against `SHA256SUMS` before unpacking it; anything but `OK` means a damaged or
+different file.
+
+**If the download never finishes.** On some managed networks a browser download from the releases page stalls, going
+back and forth between 0 and 1 byte and resuming without end. GitHub serves the files from a second host,
+`release-assets.githubusercontent.com`, through short-lived links, and a proxy or scanner that holds the file back
+until it has seen all of it can outlast the link. Download it on another machine and copy it across (a USB stick or
+a file share is fine), then check it with `SHA256SUMS` as above. The folder needs nothing from the internet to run.
+To see what the network is doing, `curl.exe -L -v -o oci-hermit.zip <link to the file>` prints each step.
 
 You now have an `oci-hermit` folder. The commands below run from the folder that contains it.
 

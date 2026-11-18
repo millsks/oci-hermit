@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import sys
 import tarfile
 import urllib.request
@@ -25,26 +26,59 @@ def fail(message: str) -> None:
     raise SystemExit(f"sources: {message}")
 
 
-def fetch(url: str, sha256: str | None) -> bytes:
-    """Downloads ``url``, retrying with growing waits (source hosts such as git.kernel.org drop connections now
-    and then), and checks it against ``sha256`` when one is given."""
+# Second places to get a source archive when its host fails, as (pattern, replacement) on the URL. Each serves the
+# same bytes (checked: GitHub's tag archive of dtc matches git.kernel.org's snapshot), and a mirror is only used when
+# the recipe pins a sha256, so a mirror can never change what goes into the archive.
+MIRRORS = [
+    (r"^https://git\.kernel\.org/pub/scm/utils/dtc/dtc\.git/snapshot/dtc-(.+)\.tar\.gz$",
+     r"https://github.com/dgibson/dtc/archive/refs/tags/v\1.tar.gz"),
+    (r"^https://cdn\.kernel\.org/", "https://mirrors.edge.kernel.org/"),
+    (r"^https?://ftp\.gnu\.org/(?:pub/)?gnu/", "https://ftpmirror.gnu.org/"),
+]
+
+
+def candidates(url: str, sha256: str | None) -> list[str]:
+    """``url``, then its mirrors when ``sha256`` pins the content."""
+    found = [url]
+    if sha256:
+        found += [re.sub(p, r, url) for p, r in MIRRORS if re.search(p, url)]
+    return found
+
+
+def download(url: str) -> bytes:
+    """Downloads ``url``, retrying with growing waits: source hosts such as git.kernel.org drop connections now and
+    then."""
     import time
 
-    last = None
-    for wait in (0, 5, 15, 30, 60):
+    last: OSError | None = None
+    for wait in (0, 5, 15, 30):
         time.sleep(wait)
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "oci-hermit-release"})
             with urllib.request.urlopen(request, timeout=300) as response:
-                data = response.read()
-            break
+                return response.read()
         except OSError as e:
             last = e
-    else:
-        fail(f"{url}: {last}")
-    if sha256 and hashlib.sha256(data).hexdigest() != sha256:
-        fail(f"{url}: sha256 {hashlib.sha256(data).hexdigest()}, expected {sha256}")
-    return data
+    raise OSError(f"{url}: {last}")
+
+
+def fetch(url: str, sha256: str | None) -> bytes:
+    """Downloads ``url`` (or a mirror of it, see MIRRORS) and checks it against ``sha256`` when one is given."""
+    errors = []
+    for candidate in candidates(url, sha256):
+        try:
+            data = download(candidate)
+        except OSError as e:
+            errors.append(str(e))
+            continue
+        if sha256 and hashlib.sha256(data).hexdigest() != sha256:
+            errors.append(f"{candidate}: sha256 {hashlib.sha256(data).hexdigest()}, expected {sha256}")
+            continue
+        if candidate != url:
+            sys.stderr.write(f"sources: {url} failed, used {candidate} (sha256 matches)\n")
+        return data
+    fail("; ".join(errors))
+    raise AssertionError  # fail() never returns
 
 
 def package_files(packages: Path) -> dict[str, bytes]:
