@@ -19,11 +19,9 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 tar = { version = "0.4.46", default-features = false }
 # The host terminal in raw mode for `run -t`, on Linux, macOS and Windows.
 crossterm = { version = "0.29", default-features = false, features = ["windows"] }
-# Pulling from registries (#14): the OCI distribution protocol over reqwest, run on a one-thread tokio runtime. TLS is
-# rustls with the ring provider, which builds without CMake or NASM on every host; sha256 verifies every manifest and
-# blob against its digest.
-oci-client = { version = "0.18", default-features = false, features = ["rustls-tls-no-provider"] }
-# `login` (#75) asks the registry itself, as `docker login` does; the same reqwest oci-client uses, so no new crates.
+# Pulling from registries (#14) and `login` (#75): the distribution API's reads over reqwest (registry.rs), run on a
+# one-thread tokio runtime. TLS is rustls with the ring provider, which builds without CMake or NASM on every host;
+# sha256 verifies every manifest and blob against its digest.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "query"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }

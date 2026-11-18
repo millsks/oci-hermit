@@ -19,7 +19,6 @@ tar.workspace = true
 crossterm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-oci-client.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 tokio.workspace = true

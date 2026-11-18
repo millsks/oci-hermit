@@ -14,7 +14,8 @@ oci-hermit is a Cargo workspace of three crates, plus the build scripts for the 
 | `crates/oci-hermit/src/guest.rs` | Finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`, then the install layouts). |
 | `crates/oci-hermit/src/image.rs` | Reads an OCI image layout (directory or `.tar`): the manifest for the guest architecture, the config and the layers, checking every blob against its sha256 digest. |
 | `crates/oci-hermit/src/store.rs` | The image store: one OCI layout in the user's data folder, images named by full reference and platform, a shared lock for readers and an exclusive one for deleting. |
-| `crates/oci-hermit/src/registry.rs` | `pull` over oci-client (reqwest, rustls with ring, the OS trust store): Podman and Docker auth files and credential helpers, retries, `$OCI_HERMIT_INSECURE_REGISTRIES`. |
+| `crates/oci-hermit/src/registry.rs` | `pull`: the distribution API's reads over reqwest (rustls with ring, the OS trust store), with Basic and Bearer (token server) auth: Podman and Docker auth files and credential helpers, retries, `$OCI_HERMIT_INSECURE_REGISTRIES`. |
+| `crates/oci-hermit/src/reference.rs` | Image references as Docker reads them: `debian` is `docker.io/library/debian:latest`. |
 | `crates/oci-hermit/src/load.rs` | `load -i`: OCI layouts and `docker save` archives (old and Docker 25+) into the store; unnamed images go by ID. |
 | `crates/oci-hermit/src/images.rs` | The image commands over the store: `images`, `rmi`, `inspect`, `tag`, `save`, `image prune`, `image history`, `image exists`, `system df`. |
 | `crates/oci-hermit/src/rootfs.rs` | Applies layers in memory: whiteouts, opaque directories, hard links; refuses paths that climb out with `..`. |

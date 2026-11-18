@@ -1,20 +1,22 @@
 //! Pulling images from OCI registries into the local [`Store`], on the host only: the guest never sees a registry,
 //! a credential or a route out.
 //!
-//! Every manifest and blob is checked against its digest before it is stored; a mismatch is an error and nothing
-//! is named. Credentials come from the files Podman and Docker already use (`podman login`, `docker login`),
-//! including Docker credential helpers; with none, the pull is anonymous.
+//! The distribution API's reads over reqwest: the manifest by tag or digest, the platform's manifest from an index,
+//! then the config and layers, with the registry's Basic or Bearer (token server) authorization. Every manifest and
+//! blob is checked against its digest before it is stored; a mismatch is an error and nothing is named. Credentials
+//! come from the files Podman and Docker already use (`podman login`, `docker login`), including Docker credential
+//! helpers; with none, the pull is anonymous.
 
 use crate::image::{self, ImageError};
 use crate::store::Store;
-use oci_client::client::{ClientConfig, ClientProtocol};
-use oci_client::secrets::RegistryAuth;
-use oci_client::{Client, Reference, RegistryOperation};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
+
+pub use crate::reference::Reference;
 
 /// Comma-separated registries (`host:port`) to reach over plain HTTP, such as a local test registry.
 pub const INSECURE_ENV: &str = "OCI_HERMIT_INSECURE_REGISTRIES";
@@ -54,52 +56,12 @@ pub struct Settings {
     /// Registries reached over plain HTTP.
     pub insecure: Vec<String>,
     /// How long to wait before each retry of a request the registry turned away for now (rate limits, 5xx).
-    pub retry_delays: Vec<std::time::Duration>,
+    pub retry_delays: Vec<Duration>,
 }
 
 /// The waits between retries of a throttled or failing request: 1, 2, 4 and 8 seconds.
-pub fn default_retry_delays() -> Vec<std::time::Duration> {
-    [1, 2, 4, 8].map(std::time::Duration::from_secs).to_vec()
-}
-
-/// Whether a registry error is worth retrying: throttling, a gateway or server hiccup, a dropped connection.
-fn transient(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    [
-        "rate exceeded",
-        "toomanyrequests",
-        "too many requests",
-        "429",
-        "502",
-        "503",
-        "504",
-        "service unavailable",
-        "connection reset",
-        "timed out",
-    ]
-    .iter()
-    .any(|sign| error.contains(sign))
-}
-
-/// Runs `attempt` until it succeeds, fails for good, or the delays run out.
-async fn with_retries<T, F, Fut>(
-    delays: &[std::time::Duration],
-    mut attempt: F,
-) -> Result<T, oci_client::errors::OciDistributionError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, oci_client::errors::OciDistributionError>>,
-{
-    let mut delays = delays.iter();
-    loop {
-        match attempt().await {
-            Err(e) if transient(&e.to_string()) => match delays.next() {
-                Some(delay) => tokio::time::sleep(*delay).await,
-                None => return Err(e),
-            },
-            done => return done,
-        }
-    }
+pub fn default_retry_delays() -> Vec<Duration> {
+    [1, 2, 4, 8].map(Duration::from_secs).to_vec()
 }
 
 impl Settings {
@@ -155,6 +117,72 @@ impl Settings {
             retry_delays: default_retry_delays(),
         }
     }
+
+    /// `http` for a registry listed in `$OCI_HERMIT_INSECURE_REGISTRIES`, `https` for every other.
+    pub(crate) fn scheme(&self, registry: &str) -> &'static str {
+        if self.insecure.iter().any(|r| r == registry) {
+            "http"
+        } else {
+            "https"
+        }
+    }
+}
+
+/// The HTTP client every registry request goes through: rustls with the system's trust store.
+pub(crate) fn http_client() -> Result<reqwest::Client, String> {
+    install_crypto();
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(120))
+        .user_agent(concat!("oci-hermit/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| describe(&e))
+}
+
+/// A reqwest error with its causes, which is where TLS and connection problems are spelled out.
+pub(crate) fn describe(error: &reqwest::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
+/// Whether a failed request is worth sending again: a dropped connection or a timeout is, a certificate the
+/// system does not trust is not.
+fn retryable(error: &reqwest::Error) -> bool {
+    !error.is_builder() && !error.is_redirect() && !tls_failure(&describe(error))
+}
+
+/// Whether a request failed in the TLS handshake: rustls says so in its message (`invalid peer certificate`,
+/// `received fatal alert`), however many layers the platform verifier and hyper wrap it in.
+fn tls_failure(described: &str) -> bool {
+    ["certificate", "received fatal alert"]
+        .iter()
+        .any(|sign| described.contains(sign))
+}
+
+/// How to authenticate to a registry.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Auth {
+    Anonymous,
+    /// A user name and password (or token), as `login` stores them.
+    Basic(String, String),
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Auth::Anonymous => write!(f, "Anonymous"),
+            Auth::Basic(user, _) => write!(f, "Basic({user:?}, <hidden>)"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,7 +201,6 @@ struct AuthEntry {
     auth: Option<String>,
 }
 
-/// The keys an auth file may file `registry` under.
 /// The names auth files may keep a registry's login under.
 pub(crate) fn keys(registry: &str) -> Vec<String> {
     let mut keys = vec![registry.to_string(), format!("https://{registry}")];
@@ -213,7 +240,7 @@ pub fn credentials(
     registry: &str,
     settings: &Settings,
     helper: impl Fn(&str, &str) -> Option<(String, String)>,
-) -> RegistryAuth {
+) -> Auth {
     for path in &settings.auth_files {
         let Ok(text) = std::fs::read(path) else { continue };
         let Ok(file) = serde_json::from_slice::<AuthFile>(&text) else {
@@ -223,7 +250,7 @@ pub fn credentials(
             if let Some(name) = file.cred_helpers.get(&key)
                 && let Some((user, secret)) = helper(name, &key)
             {
-                return RegistryAuth::Basic(user, secret);
+                return Auth::Basic(user, secret);
             }
             let decoded = file
                 .auths
@@ -232,18 +259,242 @@ pub fn credentials(
                 .and_then(hermit_proto::b64::decode)
                 .and_then(|bytes| String::from_utf8(bytes).ok());
             if let Some((user, secret)) = decoded.as_deref().and_then(|d| d.split_once(':')) {
-                return RegistryAuth::Basic(user.to_string(), secret.to_string());
+                return Auth::Basic(user.to_string(), secret.to_string());
             }
         }
         if let Some(store) = &file.creds_store {
             for key in keys(registry) {
                 if let Some((user, secret)) = helper(store, &key) {
-                    return RegistryAuth::Basic(user, secret);
+                    return Auth::Basic(user, secret);
                 }
             }
         }
     }
-    RegistryAuth::Anonymous
+    Auth::Anonymous
+}
+
+/// The `key="value"` pairs of a `WWW-Authenticate: Bearer ...` header.
+pub(crate) fn bearer_challenge(header: &str) -> Option<Vec<(String, String)>> {
+    let header = header.trim();
+    let rest = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))?;
+    let mut pairs = Vec::new();
+    let mut rest = rest.trim();
+    while !rest.is_empty() {
+        let (key, after) = rest.split_once('=')?;
+        let after = after.trim_start();
+        let (value, tail) = match after.strip_prefix('"') {
+            Some(quoted) => {
+                let end = quoted.find('"')?;
+                (&quoted[..end], &quoted[end + 1..])
+            }
+            None => after.split_once(',').unwrap_or((after, "")),
+        };
+        pairs.push((key.trim().to_ascii_lowercase(), value.to_string()));
+        rest = tail.trim_start().trim_start_matches(',').trim_start();
+    }
+    Some(pairs)
+}
+
+/// A registry's error answer as people read it: `429 TOOMANYREQUESTS: Rate exceeded`.
+fn answer_text(status: reqwest::StatusCode, body: &[u8]) -> String {
+    #[derive(Deserialize)]
+    struct Errors {
+        errors: Vec<ErrorEntry>,
+    }
+    #[derive(Deserialize)]
+    struct ErrorEntry {
+        #[serde(default)]
+        code: String,
+        #[serde(default)]
+        message: String,
+    }
+    let detail = serde_json::from_slice::<Errors>(body)
+        .ok()
+        .map(|e| {
+            e.errors
+                .iter()
+                .map(|e| format!("{}: {}", e.code, e.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| status.canonical_reason().unwrap_or("").to_string());
+    format!("{} {detail}", status.as_u16())
+}
+
+/// One repository on one registry, with the authorization its server asked for.
+struct Session<'a> {
+    client: reqwest::Client,
+    /// `https://<api host>/v2/<repository>`.
+    base: String,
+    registry: String,
+    repository: String,
+    auth: &'a Auth,
+    authorization: Option<String>,
+    delays: &'a [Duration],
+}
+
+impl Session<'_> {
+    /// GETs `path` under the repository, authorizing when the registry asks and retrying what is worth retrying.
+    async fn get(&mut self, path: &str, accept: &[&str]) -> Result<(reqwest::header::HeaderMap, Vec<u8>), String> {
+        let url = format!("{}/{path}", self.base);
+        let mut delays = self.delays.iter();
+        let mut authorized = false;
+        loop {
+            let mut request = self.client.get(&url);
+            if !accept.is_empty() {
+                request = request.header(reqwest::header::ACCEPT, accept.join(", "));
+            }
+            if let Some(authorization) = &self.authorization {
+                request = request.header(reqwest::header::AUTHORIZATION, authorization);
+            }
+            let failure = match request.send().await {
+                Err(e) if retryable(&e) => describe(&e),
+                Err(e) => return Err(describe(&e)),
+                Ok(answer) => {
+                    let status = answer.status();
+                    // A 401 asks for authorization; a token can also expire during a long pull, so ask once more.
+                    if status == reqwest::StatusCode::UNAUTHORIZED && !authorized {
+                        authorized = true;
+                        let challenge = answer
+                            .headers()
+                            .get(reqwest::header::WWW_AUTHENTICATE)
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        self.authorize(&challenge).await?;
+                        continue;
+                    }
+                    let headers = answer.headers().clone();
+                    match answer.bytes().await {
+                        Ok(body) if status.is_success() => return Ok((headers, body.to_vec())),
+                        Ok(body) => {
+                            let text = answer_text(status, &body);
+                            if status == reqwest::StatusCode::UNAUTHORIZED {
+                                return Err(match self.auth {
+                                    Auth::Anonymous => format!(
+                                        "{text} (no login for {} was found; log in with `hrmt login {}`)",
+                                        self.registry, self.registry
+                                    ),
+                                    Auth::Basic(..) => format!("{text} (the registry turned the login down)"),
+                                });
+                            }
+                            if status != reqwest::StatusCode::TOO_MANY_REQUESTS && !status.is_server_error() {
+                                return Err(text);
+                            }
+                            text
+                        }
+                        Err(e) => describe(&e),
+                    }
+                }
+            };
+            match delays.next() {
+                Some(delay) => tokio::time::sleep(*delay).await,
+                None => return Err(failure),
+            }
+        }
+    }
+
+    /// Answers a `WWW-Authenticate` challenge: Basic with the login, or Bearer with a token from the registry's
+    /// token server for pulling this repository.
+    async fn authorize(&mut self, challenge: &str) -> Result<(), String> {
+        let basic = match self.auth {
+            Auth::Basic(user, password) => Some((user.as_str(), password.as_str())),
+            Auth::Anonymous => None,
+        };
+        let Some(pairs) = bearer_challenge(challenge) else {
+            let Some((user, password)) = basic else {
+                return Err(format!(
+                    "{} needs a login and none was found; log in with `hrmt login {}`",
+                    self.registry, self.registry
+                ));
+            };
+            let secret = hermit_proto::b64::encode(format!("{user}:{password}").as_bytes());
+            self.authorization = Some(format!("Basic {secret}"));
+            return Ok(());
+        };
+        let value = |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        let realm = value("realm").ok_or_else(|| format!("{} sent a token challenge with no realm", self.registry))?;
+        let mut query = vec![(
+            "scope".to_string(),
+            value("scope").unwrap_or_else(|| format!("repository:{}:pull", self.repository)),
+        )];
+        query.extend(value("service").map(|s| ("service".to_string(), s)));
+        let mut request = self.client.get(&realm).query(&query);
+        if let Some((user, password)) = basic {
+            request = request.basic_auth(user, Some(password));
+        }
+        let answer = request
+            .send()
+            .await
+            .map_err(|e| format!("asking the token server {realm}: {}", describe(&e)))?;
+        let status = answer.status();
+        let body = answer
+            .bytes()
+            .await
+            .map_err(|e| format!("reading from the token server {realm}: {}", describe(&e)))?;
+        if !status.is_success() {
+            return Err(format!(
+                "the token server {realm} answered {}",
+                answer_text(status, &body)
+            ));
+        }
+        #[derive(Deserialize)]
+        struct Token {
+            #[serde(default)]
+            token: String,
+            #[serde(default)]
+            access_token: String,
+        }
+        let token: Token =
+            serde_json::from_slice(&body).map_err(|e| format!("the token server {realm} sent no token: {e}"))?;
+        let token = if token.token.is_empty() {
+            token.access_token
+        } else {
+            token.token
+        };
+        if token.is_empty() {
+            return Err(format!("the token server {realm} sent an empty token"));
+        }
+        self.authorization = Some(format!("Bearer {token}"));
+        Ok(())
+    }
+
+    /// A manifest by tag or digest, with its digest: the registry's `Docker-Content-Digest` when it sends one
+    /// (checked against the bytes), else the bytes' own.
+    async fn manifest(&mut self, target: &str) -> Result<(Vec<u8>, String), PullError> {
+        let accepted = [OCI_INDEX, OCI_MANIFEST, DOCKER_LIST, DOCKER_MANIFEST];
+        let (headers, bytes) = self
+            .get(&format!("manifests/{target}"), &accepted)
+            .await
+            .map_err(|e| PullError::Registry(format!("pulling the manifest of {}: {e}", self.name(target))))?;
+        let digest = headers
+            .get("docker-content-digest")
+            .and_then(|h| h.to_str().ok())
+            .map_or_else(|| image::digest_of(&bytes), str::to_string);
+        image::verify(&digest, &bytes)?;
+        Ok((bytes, digest))
+    }
+
+    async fn blob(&mut self, digest: &str) -> Result<Vec<u8>, PullError> {
+        let (_, bytes) = self
+            .get(&format!("blobs/{digest}"), &[])
+            .await
+            .map_err(|e| PullError::Registry(format!("pulling blob {digest} of {}: {e}", self.name(""))))?;
+        Ok(bytes)
+    }
+
+    fn name(&self, target: &str) -> String {
+        let at = if target.starts_with("sha256:") { "@" } else { ":" };
+        let target = if target.is_empty() {
+            String::new()
+        } else {
+            format!("{at}{target}")
+        };
+        format!("{}/{}{target}", self.registry, self.repository)
+    }
 }
 
 /// Why a pull failed.
@@ -272,11 +523,6 @@ impl From<ImageError> for PullError {
     fn from(e: ImageError) -> Self {
         PullError::Image(e)
     }
-}
-
-fn registry_error(what: &str, reference: &Reference) -> impl Fn(oci_client::errors::OciDistributionError) -> PullError {
-    let context = format!("{what} {reference}");
-    move |e| PullError::Registry(format!("{context}: {e}"))
 }
 
 #[derive(Deserialize)]
@@ -326,27 +572,27 @@ pub fn pull(
     settings: &Settings,
     out: &mut impl Write,
 ) -> Result<Pulled, PullError> {
-    install_crypto();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| PullError::Registry(format!("starting the network runtime: {e}")))?;
-    let client = Client::new(ClientConfig {
-        protocol: ClientProtocol::HttpsExcept(settings.insecure.clone()),
-        ..ClientConfig::default()
-    });
-    let auth = credentials(reference.resolve_registry(), settings, run_helper);
+    let auth = credentials(reference.registry(), settings, run_helper);
+    let mut session = Session {
+        client: http_client().map_err(PullError::Registry)?,
+        base: format!(
+            "{}://{}/v2/{}",
+            settings.scheme(reference.registry()),
+            reference.api_host(),
+            reference.repository()
+        ),
+        registry: reference.registry().to_string(),
+        repository: reference.repository().to_string(),
+        auth: &auth,
+        authorization: None,
+        delays: &settings.retry_delays,
+    };
     runtime.block_on(async {
-        client
-            .auth(reference, &auth, RegistryOperation::Pull)
-            .await
-            .map_err(registry_error("logging in to pull", reference))?;
-        let accepted = [OCI_INDEX, OCI_MANIFEST, DOCKER_LIST, DOCKER_MANIFEST];
-        let delays = &settings.retry_delays;
-        let (mut bytes, mut digest) = with_retries(delays, || client.pull_manifest_raw(reference, &auth, &accepted))
-            .await
-            .map_err(registry_error("pulling the manifest of", reference))?;
-        image::verify(&digest, &bytes)?;
+        let (mut bytes, mut digest) = session.manifest(reference.target()).await?;
         if let Some(wanted) = reference.digest()
             && wanted != digest
         {
@@ -377,12 +623,7 @@ pub fn pull(
                         }
                     ))
                 })?;
-            let by_digest = reference.clone_with_digest(pick.digest.clone());
-            let (platform_bytes, platform_digest) =
-                with_retries(delays, || client.pull_manifest_raw(&by_digest, &auth, &accepted))
-                    .await
-                    .map_err(registry_error("pulling the manifest of", reference))?;
-            image::verify(&pick.digest, &platform_bytes)?;
+            let (platform_bytes, platform_digest) = session.manifest(&pick.digest).await?;
             if platform_digest != pick.digest {
                 return Err(ImageError::Mismatch(pick.digest.clone()).into());
             }
@@ -402,15 +643,10 @@ pub fn pull(
                 }
                 continue;
             }
-            let data = with_retries(delays, || async {
-                let mut data = Vec::with_capacity(usize::try_from(blob.size).unwrap_or(0));
-                client
-                    .pull_blob(reference, blob.digest.as_str(), &mut data)
-                    .await
-                    .map(|()| data)
-            })
-            .await
-            .map_err(registry_error(&format!("pulling blob {} of", blob.digest), reference))?;
+            let data = session.blob(&blob.digest).await?;
+            if blob.size != 0 && data.len() as u64 != blob.size {
+                return Err(ImageError::Mismatch(blob.digest.clone()).into());
+            }
             // A single-platform image says its architecture only in its config: check it before any layer.
             if i == 0 {
                 check_arch(reference, arch, &data)?;
@@ -469,19 +705,40 @@ pub(crate) mod testing {
         pub(crate) body: Vec<u8>,
     }
 
+    /// Who may read from a test registry.
+    #[derive(Clone)]
+    pub(crate) enum Gate {
+        Open,
+        /// Basic auth with this `user:password` (base64) on every request.
+        Basic(String),
+        /// A Bearer challenge; the registry's `/token` hands out a token for this Basic secret (or to anyone, when
+        /// `None`), as Docker Hub and GHCR do.
+        Bearer(Option<String>),
+    }
+
+    const TOKEN: &str = "test-token";
+
     /// Serves `routes` (path to response) on a free port until the test process ends; returns `127.0.0.1:<port>`.
     /// With `basic` set (`user:password`, base64), every request but `/v2/` needs that `Authorization`.
     /// The first `throttle` requests other than `/v2/` get `429 Too Many Requests`, as a rate-limited registry does.
     pub(crate) fn serve(routes: HashMap<String, Response>, basic: Option<String>, throttle: usize) -> String {
+        serve_gated(routes, basic.map_or(Gate::Open, Gate::Basic), throttle)
+    }
+
+    /// [`serve`] with any [`Gate`].
+    pub(crate) fn serve_gated(routes: HashMap<String, Response>, gate: Gate, throttle: usize) -> String {
         let throttled = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let routes = std::sync::Arc::new(routes);
+        let served = address.clone();
         std::thread::spawn(move || {
+            let address = served;
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let routes = routes.clone();
-                let basic = basic.clone();
+                let gate = gate.clone();
+                let address = address.clone();
                 let throttled = throttled.clone();
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -507,11 +764,17 @@ pub(crate) mod testing {
                             }
                         }
                         let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
-                        let allowed = match &basic {
-                            None => true,
-                            Some(secret) => authorization.as_deref() == Some(&format!("Basic {secret}")),
+                        let sent = authorization.as_deref();
+                        let token_request = path.starts_with("/token?");
+                        let allowed = match &gate {
+                            Gate::Open => true,
+                            Gate::Basic(secret) => sent == Some(&format!("Basic {secret}")),
+                            Gate::Bearer(Some(secret)) if token_request => sent == Some(&format!("Basic {secret}")),
+                            Gate::Bearer(None) if token_request => true,
+                            Gate::Bearer(_) => sent == Some(&format!("Bearer {TOKEN}")),
                         };
-                        let throttle_now = path != "/v2/" && {
+                        let token_body = format!(r#"{{"token":"{TOKEN}"}}"#);
+                        let throttle_now = path != "/v2/" && !token_request && {
                             let mut count = throttled.lock().unwrap();
                             *count += 1;
                             *count <= throttle
@@ -523,6 +786,11 @@ pub(crate) mod testing {
                                 br#"{"errors":[{"code":"TOOMANYREQUESTS","message":"Rate exceeded"}]}"#,
                             ),
                             _ if !allowed => ("401 Unauthorized", "text/plain", b"unauthorized"),
+                            // Only a token for pulling `test/app` is handed out.
+                            _ if token_request && path.contains("scope=repository%3Atest%2Fapp%3Apull") => {
+                                ("200 OK", "application/json", token_body.as_bytes())
+                            }
+                            _ if token_request => ("403 Forbidden", "text/plain", b"wrong scope"),
                             Some(r) => ("200 OK", &r.content_type, &r.body),
                             None if path == "/v2/" => ("200 OK", "application/json", b"{}"),
                             None => (
@@ -531,10 +799,12 @@ pub(crate) mod testing {
                                 br#"{"errors":[{"code":"NAME_UNKNOWN","message":"not here"}]}"#,
                             ),
                         };
-                        let challenge = if allowed {
-                            ""
-                        } else {
-                            "WWW-Authenticate: Basic realm=\"test\"\r\n"
+                        let challenge = match &gate {
+                            _ if allowed => String::new(),
+                            Gate::Bearer(_) if !token_request => format!(
+                                "WWW-Authenticate: Bearer realm=\"http://{address}/token\",service=\"test\"\r\n"
+                            ),
+                            _ => "WWW-Authenticate: Basic realm=\"test\"\r\n".to_string(),
                         };
                         let head = format!(
                             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{challenge}\r\n",
@@ -570,6 +840,11 @@ pub(crate) mod testing {
         arches: &[&str],
         index: bool,
     ) -> String {
+        serve(routes_of(name, tamper, arches, index), basic, throttle)
+    }
+
+    /// The routes of [`registry_of`]'s registry.
+    pub(crate) fn routes_of(name: &str, tamper: bool, arches: &[&str], index: bool) -> HashMap<String, Response> {
         use super::{OCI_INDEX, OCI_MANIFEST};
         use crate::image::testing::{layer, manifest};
         let dir = crate::qemu::testing::scratch(name);
@@ -623,7 +898,7 @@ pub(crate) mod testing {
             }
         };
         routes.insert("/v2/test/app/manifests/1".into(), tag);
-        serve(routes, basic, throttle)
+        routes
     }
 }
 
@@ -669,8 +944,6 @@ mod tests {
             ..patient
         };
         pull(&reference, "amd64", &store, &patient, &mut Vec::new()).unwrap();
-        assert!(transient("Registry error: OCI API error: Rate exceeded"));
-        assert!(!transient("manifest unknown"));
         assert_eq!(default_retry_delays().len(), 4);
     }
 
@@ -803,6 +1076,111 @@ mod tests {
     }
 
     #[test]
+    fn pulls_with_a_token_from_the_token_server() {
+        use testing::{Gate, routes_of, serve_gated};
+        let store = Store::open(&scratch("registry-bearer-store")).unwrap();
+        // Anonymous tokens, as Docker Hub hands out for public images.
+        let address = serve_gated(
+            routes_of("registry-bearer-anon", false, &["amd64"], true),
+            Gate::Bearer(None),
+            0,
+        );
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        pull(
+            &reference,
+            "amd64",
+            &store,
+            &settings(&address, vec![]),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        // A token server that wants the login: without one the pull says how to log in, with one it goes through.
+        let secret = hermit_proto::b64::encode(b"me:hunter2");
+        let address = serve_gated(
+            routes_of("registry-bearer-login", false, &["amd64"], true),
+            Gate::Bearer(Some(secret.clone())),
+            0,
+        );
+        let reference = normalize(&format!("{address}/test/app:1")).unwrap();
+        let store = Store::open(&scratch("registry-bearer-login-store")).unwrap();
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &settings(&address, vec![]),
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("token server"), "{err}");
+        let auth = scratch("registry-bearer-auth").join("auth.json");
+        std::fs::write(&auth, format!(r#"{{"auths":{{"{address}":{{"auth":"{secret}"}}}}}}"#)).unwrap();
+        pull(
+            &reference,
+            "amd64",
+            &store,
+            &settings(&address, vec![auth]),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        // A token for another repository is not handed out.
+        let other = normalize(&format!("{address}/test/other:1")).unwrap();
+        let err = pull(&other, "amd64", &store, &settings(&address, vec![]), &mut Vec::new())
+            .err()
+            .unwrap();
+        assert!(matches!(err, PullError::Registry(_)), "{err}");
+    }
+
+    #[test]
+    fn registry_errors_read_as_people_write_them() {
+        let throttled = br#"{"errors":[{"code":"TOOMANYREQUESTS","message":"Rate exceeded"}]}"#;
+        assert_eq!(
+            answer_text(reqwest::StatusCode::TOO_MANY_REQUESTS, throttled),
+            "429 TOOMANYREQUESTS: Rate exceeded"
+        );
+        assert_eq!(answer_text(reqwest::StatusCode::NOT_FOUND, b"<html>"), "404 Not Found");
+        assert_eq!(
+            format!("{:?}", Auth::Basic("me".into(), "hunter2".into())),
+            r#"Basic("me", <hidden>)"#
+        );
+        let anonymous = Settings::default();
+        assert_eq!(anonymous.scheme("example.com"), "https");
+        assert_eq!(settings("localhost:5000", vec![]).scheme("localhost:5000"), "http");
+        // An untrusted certificate is not retried; a dropped connection is.
+        assert!(tls_failure(
+            "client error (Connect): invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(tls_failure("received fatal alert: CertificateRequired"));
+        assert!(!tls_failure("client error (Connect): connection reset by peer"));
+    }
+
+    #[test]
+    fn a_registry_that_cannot_be_reached_fails_with_the_cause() {
+        // Nothing listens on port 9 of 127.0.0.1.
+        let reference = normalize("127.0.0.1:9/test/app:1").unwrap();
+        let store = Store::open(&scratch("registry-unreachable-store")).unwrap();
+        let err = pull(
+            &reference,
+            "amd64",
+            &store,
+            &Settings {
+                retry_delays: vec![],
+                ..settings("127.0.0.1:9", vec![])
+            },
+            &mut Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            err.to_string()
+                .contains("pulling the manifest of 127.0.0.1:9/test/app:1"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn finds_credentials_the_way_docker_and_podman_file_them() {
         let dir = scratch("registry-creds");
         let write = |name: &str, text: &str| {
@@ -810,7 +1188,7 @@ mod tests {
             std::fs::write(&path, text).unwrap();
             path
         };
-        let basic = |user: &str, secret: &str| RegistryAuth::Basic(user.into(), secret.into());
+        let basic = |user: &str, secret: &str| Auth::Basic(user.into(), secret.into());
         let none = |_: &str, _: &str| None;
         let files = |paths: Vec<PathBuf>| Settings {
             auth_files: paths,
@@ -828,7 +1206,7 @@ mod tests {
         );
         assert_eq!(
             credentials("quay.io", &files(vec![podman.clone()]), none),
-            RegistryAuth::Anonymous
+            Auth::Anonymous
         );
 
         let docker = write(
@@ -854,7 +1232,7 @@ mod tests {
         let both = files(vec![broken, dir.join("missing.json"), helpers, podman]);
         assert_eq!(credentials("ghcr.io", &both, helper), basic("from-gh", "x"));
         assert_eq!(credentials("quay.io", &both, helper), basic("from-desktop", "y"));
-        assert_eq!(credentials("example.com", &both, helper), RegistryAuth::Anonymous);
+        assert_eq!(credentials("example.com", &both, helper), Auth::Anonymous);
         assert!(run_helper("oci-hermit-no-such-helper", "example.com").is_none());
     }
 

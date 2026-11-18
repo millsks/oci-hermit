@@ -11,6 +11,7 @@ mod initramfs;
 mod load;
 mod login;
 mod qemu;
+mod reference;
 mod registry;
 mod rootfs;
 mod store;
