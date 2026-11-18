@@ -1488,6 +1488,10 @@
 <td>The image commands over the store: <code>images</code>, <code>rmi</code>, <code>inspect</code>, <code>tag</code>, <code>save</code>, <code>image prune</code>, <code>image history</code>, <code>image exists</code>, <code>system df</code>.</td>
 </tr>
 <tr>
+<td><code>crates/oci-hermit/src/erofs.rs</code></td>
+<td>Writes each layer as a read-only EROFS image without mounting anything, the way overlayfs reads a lower layer; cached by layer digest in the image store.</td>
+</tr>
+<tr>
 <td><code>crates/oci-hermit/src/rootfs.rs</code></td>
 <td>Applies layers in memory: whiteouts, opaque directories, hard links; refuses paths that climb out with <code>..</code>.</td>
 </tr>
