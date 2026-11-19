@@ -62,3 +62,43 @@ bash guest/kernel/boot-test.sh aarch64 qemu/out guest/out/aarch64/Image
 
 `.github/workflows/kernel.yml` builds both architectures on GitHub-hosted Linux runners, boot-tests each, and uploads
 the image, config and `BUNDLE.txt` as artifacts.
+
+## crun
+
+Each command runs in a container started by [crun](https://github.com/containers/crun). `crun/build.sh` builds it
+statically for one architecture, with the libraries it links, all from release tarballs checked against pinned
+sha256 sums:
+
+| Component | Version | License | Why |
+| --- | --- | --- | --- |
+| crun | 1.30.1 | GPL-2.0-or-later (libcrun LGPL-2.1-or-later) | the OCI runtime |
+| json-c | 0.18 | MIT | crun reads `config.json` with it |
+| libseccomp | 2.6.1 | LGPL-2.1-only | seccomp filters (a profile comes with #102) |
+| libcap | 2.78 | BSD-3-Clause or GPL-2.0-only | capabilities |
+
+crun is configured without systemd (cgroups are managed through cgroupfs), CRIU, `dlopen`ed handlers or a shared
+libcrun, and linked against the same conda-forge 2.39 sysroot as the agent, so the glibc source in the release's
+source archive covers both. The build fails unless the binary is static and reports `+CAP` and `+SECCOMP`.
+
+### Output
+
+```
+<out>/crun                    the static binary
+<out>/licenses/<name>/        each component's license files
+<out>/licenses/SOURCES.json   name, version, license and source tarball of each
+<out>/CRUN.txt                versions, the binary's sha256, the compiler and crun's feature list
+```
+
+`packaging/licenses.py crun <guest-dir> <out>` merges the licenses and sources into a guest folder.
+
+### Building
+
+Natively on Linux only, like the kernel:
+
+```bash
+pixi run -e crun-build crun-build                           # this machine's architecture, into guest/out/crun-<arch>
+pixi run -e crun-build crun-build aarch64 guest/out/crun-aarch64
+```
+
+The host puts crun in the initramfs at `/bin/crun`. At boot the agent moves its root onto a tmpfs, taking crun
+along, because crun's `pivot_root` refuses an initramfs root.

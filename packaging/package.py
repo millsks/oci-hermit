@@ -4,7 +4,7 @@
       oci-hermit(.exe)        the host tool
       hrmt(.exe)              the short name: a symlink on Linux and macOS, a copy on Windows (#44)
       qemu/                   the QEMU bundle (qemu/build.sh), with its licenses in qemu/share/licenses/
-      guest/<arch>/           kernel and hermit-agent for x86_64 and aarch64, with their licenses
+      guest/<arch>/           kernel, hermit-agent and crun for x86_64 and aarch64, with their licenses
       LICENSE                 oci-hermit's own (Apache-2.0)
       THIRD-PARTY-LICENSES    every bundled component, Rust crate included, with its license text
       README.txt              how to start
@@ -185,14 +185,20 @@ def build(args: argparse.Namespace) -> None:
     guest_sources: dict[str, dict] = {}
     for arch in GUEST_ARCHES:
         src = Path(args.guest) / arch
-        for name in ("kernel", "hermit-agent"):
+        for name in ("kernel", "hermit-agent", "crun"):
             if not (src / name).is_file():
                 fail(f"no {arch} {name} in {src}")
         shutil.copytree(src, stage / "guest" / arch)
         for component in components(stage / "guest" / arch / "licenses"):
             guest_sources.setdefault(f"{component['name']} {component['version']}", component)
-        os.chmod(stage / "guest" / arch / "hermit-agent", 0o755)
-    parts.append(("The guest: Linux kernel and the C library in hermit-agent (guest/)", list(guest_sources.values())))
+        for name in ("hermit-agent", "crun"):
+            os.chmod(stage / "guest" / arch / name, 0o755)
+    parts.append(
+        (
+            "The guest: Linux kernel, the C library in hermit-agent, and crun with its libraries (guest/)",
+            list(guest_sources.values()),
+        )
+    )
     target = args.target or host_target()
     parts.append(("Rust crates in oci-hermit", cargo_crates("oci-hermit", target)))
     parts.append(("Rust crates in hermit-agent", cargo_crates("hermit-agent", AGENT_TARGET)))

@@ -5,6 +5,10 @@
 //! a `Run` asks for and relays its input and output, reaps children on SIGCHLD, and powers off on the host's
 //! `Shutdown`, on SIGTERM or on SIGINT. Any fatal setup error is logged and also ends in a power-off, because PID 1
 //! must never exit or panic. Without a control channel the agent still runs, and signals still stop it.
+//!
+//! Before anything else it moves its root off the initramfs onto a tmpfs ([`System::leave_initramfs`]): crun's
+//! `pivot_root` refuses an initramfs root. The command runs in a container (protocol 1.4): the agent writes an OCI
+//! runtime bundle whose `config.json` comes from [`container_config`], and crun runs it.
 
 use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, PROTOCOL_VERSION, Stream, b64};
 use std::io::{self, ErrorKind, Write};
@@ -49,6 +53,7 @@ pub struct RunSpec {
     pub size: Option<(u16, u16)>,
     /// Who the command runs as; root when `None`.
     pub user: Option<hermit_proto::User>,
+    pub hostname: String,
 }
 
 /// One early mount.
@@ -63,8 +68,8 @@ pub struct Mount {
     pub data: Option<&'static str>,
 }
 
-/// The early mounts, in order: `/dev/pts` lives on the devtmpfs mounted before it.
-pub const EARLY_MOUNTS: [Mount; 6] = [
+/// The early mounts, in order: `/dev/pts` lives on the devtmpfs mounted before it, `/sys/fs/cgroup` on sysfs.
+pub const EARLY_MOUNTS: [Mount; 7] = [
     Mount {
         source: "proc",
         target: "/proc",
@@ -78,6 +83,16 @@ pub const EARLY_MOUNTS: [Mount; 6] = [
         source: "sysfs",
         target: "/sys",
         fstype: "sysfs",
+        nosuid: true,
+        nodev: true,
+        noexec: true,
+        data: None,
+    },
+    // crun puts each container in a cgroup of its own.
+    Mount {
+        source: "cgroup2",
+        target: "/sys/fs/cgroup",
+        fstype: "cgroup2",
         nosuid: true,
         nodev: true,
         noexec: true,
@@ -138,6 +153,8 @@ pub enum Event {
 pub trait System {
     /// Create a directory and its parents.
     fn mkdir_all(&mut self, path: &str) -> io::Result<()>;
+    /// Move the root off the initramfs onto a tmpfs, taking crun and the image's files (`/rootfs`) along.
+    fn leave_initramfs(&mut self) -> io::Result<()>;
     /// Mount a filesystem; an already-mounted target fails with [`ErrorKind::ResourceBusy`].
     fn mount(&mut self, mount: &Mount) -> io::Result<()>;
     /// Block SIGTERM, SIGINT and SIGCHLD so [`System::next_event`] receives them.
@@ -200,6 +217,139 @@ pub fn layer_devices(layers: &[String], disks: &[(String, String)]) -> io::Resul
         .collect()
 }
 
+/// The hostname of a container the host did not name.
+pub const DEFAULT_HOSTNAME: &str = "oci-hermit";
+
+/// Letters, digits, `-` and `.`, at most 63 characters, not starting with `-` or `.`.
+fn valid_hostname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && !name.starts_with(['-', '.'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+}
+
+/// The capabilities a container's processes get: Docker's defaults.
+pub const CAPABILITIES: [&str; 14] = [
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FSETID",
+    "CAP_FOWNER",
+    "CAP_MKNOD",
+    "CAP_NET_RAW",
+    "CAP_SETGID",
+    "CAP_SETUID",
+    "CAP_SETFCAP",
+    "CAP_SETPCAP",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_SYS_CHROOT",
+    "CAP_KILL",
+    "CAP_AUDIT_WRITE",
+];
+
+/// Where the image's root filesystem is, overlayfs over the layer disks or the files the initramfs brought.
+pub const ROOTFS: &str = "/rootfs";
+
+/// `/etc/hosts` in a container: the loopback names and its own.
+pub fn hosts_file(hostname: &str) -> String {
+    format!("127.0.0.1\tlocalhost {hostname}\n::1\tlocalhost ip6-localhost ip6-loopback\n")
+}
+
+/// The OCI runtime configuration (`config.json`) for `spec`, as Docker would make it: new PID, mount, IPC, UTS,
+/// network and cgroup namespaces (no user namespace: the VM is the boundary, and its root is the container's),
+/// Docker's default capabilities, masked and read-only kernel paths, and only the usual devices. `etc` is the
+/// folder with the container's `hosts` and `hostname`.
+pub fn container_config(spec: &RunSpec, etc: &str) -> serde_json::Value {
+    use serde_json::json;
+    let (uid, gid, groups) = spec
+        .user
+        .as_ref()
+        .map_or((0, 0, Vec::new()), |u| (u.uid, u.gid, u.groups.clone()));
+    let mut process = json!({
+        "terminal": spec.tty,
+        "user": { "uid": uid, "gid": gid, "additionalGids": groups },
+        "args": spec.argv,
+        "env": spec.env,
+        "cwd": spec.cwd,
+        "capabilities": {
+            "bounding": CAPABILITIES,
+            "effective": CAPABILITIES,
+            "permitted": CAPABILITIES,
+        },
+        "noNewPrivileges": false,
+    });
+    if let (true, Some((rows, cols))) = (spec.tty, spec.size) {
+        process["consoleSize"] = json!({ "height": rows, "width": cols });
+    }
+    // Docker's device rules: anything may be created (`m`), only these opened.
+    // A missing major or minor is a wildcard; crun reads null as an error.
+    let device = |kind: &str, major: Option<i64>, minor: Option<i64>, access: &str| {
+        let mut rule = json!({ "allow": true, "type": kind, "access": access });
+        if let Some(major) = major {
+            rule["major"] = json!(major);
+        }
+        if let Some(minor) = minor {
+            rule["minor"] = json!(minor);
+        }
+        rule
+    };
+    json!({
+        "ociVersion": "1.0.2",
+        "process": process,
+        "root": { "path": ROOTFS, "readonly": false },
+        "hostname": spec.hostname,
+        "mounts": [
+            { "destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"] },
+            { "destination": "/dev", "type": "tmpfs", "source": "tmpfs",
+              "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] },
+            { "destination": "/dev/pts", "type": "devpts", "source": "devpts",
+              "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"] },
+            { "destination": "/dev/shm", "type": "tmpfs", "source": "shm",
+              "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"] },
+            { "destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue",
+              "options": ["nosuid", "noexec", "nodev"] },
+            { "destination": "/sys", "type": "sysfs", "source": "sysfs",
+              "options": ["nosuid", "noexec", "nodev", "ro"] },
+            { "destination": "/sys/fs/cgroup", "type": "cgroup", "source": "cgroup",
+              "options": ["nosuid", "noexec", "nodev", "relatime", "ro"] },
+            { "destination": "/etc/hosts", "type": "bind", "source": format!("{etc}/hosts"),
+              "options": ["rbind", "rprivate"] },
+            { "destination": "/etc/hostname", "type": "bind", "source": format!("{etc}/hostname"),
+              "options": ["rbind", "rprivate"] },
+        ],
+        "linux": {
+            "namespaces": [
+                { "type": "pid" }, { "type": "network" }, { "type": "ipc" },
+                { "type": "uts" }, { "type": "mount" }, { "type": "cgroup" },
+            ],
+            "cgroupsPath": format!("/oci-hermit/{}", spec.hostname),
+            "resources": {
+                "devices": [
+                    { "allow": false, "access": "rwm" },
+                    device("c", None, None, "m"),
+                    device("b", None, None, "m"),
+                    device("c", Some(1), Some(3), "rwm"),
+                    device("c", Some(1), Some(5), "rwm"),
+                    device("c", Some(1), Some(7), "rwm"),
+                    device("c", Some(1), Some(8), "rwm"),
+                    device("c", Some(1), Some(9), "rwm"),
+                    device("c", Some(5), Some(0), "rwm"),
+                    device("c", Some(5), Some(1), "rwm"),
+                    device("c", Some(5), Some(2), "rwm"),
+                    device("c", Some(136), None, "rwm"),
+                ],
+            },
+            "maskedPaths": [
+                "/proc/asound", "/proc/acpi", "/proc/interrupts", "/proc/kcore", "/proc/keys",
+                "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats", "/proc/sched_debug",
+                "/proc/scsi", "/sys/firmware", "/sys/devices/virtual/powercap",
+            ],
+            "readonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"],
+        },
+    })
+}
+
 /// Log one line to the console. A console write error has nowhere else to go, so it is dropped.
 fn log(out: &mut impl Write, msg: std::fmt::Arguments<'_>) {
     let _ = writeln!(out, "hermit-agent: {msg}");
@@ -232,6 +382,9 @@ pub fn run(sys: &mut impl System, out: &mut impl Write) -> io::Error {
 fn setup(sys: &mut impl System, out: &mut impl Write) -> io::Result<()> {
     sys.block_signals()
         .map_err(|e| io::Error::new(e.kind(), format!("blocking signals: {e}")))?;
+    sys.leave_initramfs()
+        .map_err(|e| io::Error::new(e.kind(), format!("moving the root onto a tmpfs: {e}")))?;
+    log(out, format_args!("moved the root onto a tmpfs"));
     for m in &EARLY_MOUNTS {
         sys.mkdir_all(m.target)
             .map_err(|e| io::Error::new(e.kind(), format!("creating {}: {e}", m.target)))?;
@@ -370,11 +523,15 @@ fn answer(
             cols,
             user,
             layers,
+            hostname,
         } => {
+            let hostname = hostname.unwrap_or_else(|| DEFAULT_HOSTNAME.to_string());
             if *ran {
                 error("a command already ran in this sandbox")
             } else if argv.is_empty() {
                 error("no command to run")
+            } else if !valid_hostname(&hostname) {
+                error(format!("not a hostname: {hostname:?}"))
             } else if let Err(e) = if layers.is_empty() {
                 Ok(())
             } else {
@@ -399,6 +556,7 @@ fn answer(
                     tty,
                     size: rows.zip(cols),
                     user,
+                    hostname,
                 };
                 match sys.start(&spec) {
                     Ok(pid) => {
@@ -472,6 +630,7 @@ mod tests {
         mount_errors: HashMap<&'static str, ErrorKind>,
         mkdir_error: Option<&'static str>,
         block_error: bool,
+        leave_error: bool,
         no_control: bool,
         send_error: bool,
         events: VecDeque<io::Result<Event>>,
@@ -500,6 +659,13 @@ mod tests {
                 Some(kind) => Err(io::Error::from(*kind)),
                 None => Ok(()),
             }
+        }
+        fn leave_initramfs(&mut self) -> io::Result<()> {
+            self.calls.push("leave_initramfs".into());
+            if self.leave_error {
+                return Err(io::Error::new(ErrorKind::NotFound, "no /bin/crun in the initramfs"));
+            }
+            Ok(())
         }
         fn block_signals(&mut self) -> io::Result<()> {
             self.calls.push("block".into());
@@ -608,9 +774,14 @@ mod tests {
         }
         let mounts: Vec<_> = sys.calls.iter().filter(|c| c.starts_with("mount ")).collect();
         assert_eq!(mounts.len(), EARLY_MOUNTS.len());
-        assert_eq!(sys.calls[0], "block");
+        assert_eq!(
+            sys.calls[..2],
+            ["block", "leave_initramfs"],
+            "the root moves before anything is mounted"
+        );
+        assert!(log.contains("moved the root onto a tmpfs"));
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.3)"));
+        assert!(log.contains("ready (control protocol 1.4)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -711,7 +882,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.3)"));
+        assert!(log.contains("ready (control protocol 1.4)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -742,6 +913,7 @@ mod tests {
             cols: Some(120),
             user: None,
             layers: Vec::new(),
+            hostname: None,
         })
     }
 
@@ -771,6 +943,7 @@ mod tests {
                     cols: None,
                     user: Some(user.clone()),
                     layers: Vec::new(),
+                    hostname: Some("4f2a9c1d0b3e".into()),
                 }),
                 Ok(Event::Signal(Signal::Child)),
                 line(&HostMessage::Shutdown),
@@ -781,6 +954,7 @@ mod tests {
         let (_, log) = run_fake(&mut sys);
         assert_eq!(sys.started.len(), 1);
         assert_eq!(sys.started[0].user, Some(user));
+        assert_eq!(sys.started[0].hostname, "4f2a9c1d0b3e");
         assert!(log.contains("as pid 42, uid 1000"), "{log}");
     }
 
@@ -796,6 +970,7 @@ mod tests {
                 cols: None,
                 user: None,
                 layers,
+                hostname: None,
             })
         };
         let layers = vec!["layer0".to_string(), "layer1".to_string()];
@@ -871,6 +1046,7 @@ mod tests {
                 tty: true,
                 size: Some((40, 120)),
                 user: None,
+                hostname: DEFAULT_HOSTNAME.into(),
             }]
         );
         assert_eq!(
@@ -959,9 +1135,192 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_hostname_that_is_not_one() {
+        for bad in ["", "-web", ".web", "web server", "web/1", &"a".repeat(64)] {
+            let mut sys = with_events(vec![line(&HostMessage::Run {
+                argv: vec!["true".into()],
+                env: Vec::new(),
+                cwd: "/".into(),
+                tty: false,
+                rows: None,
+                cols: None,
+                user: None,
+                layers: Vec::new(),
+                hostname: Some(bad.to_string()),
+            })]);
+            run_fake(&mut sys);
+            assert!(sys.started.is_empty(), "{bad:?}");
+            assert!(matches!(&replies(&sys)[0], GuestMessage::Error { message } if message.contains("not a hostname")));
+        }
+        assert!(valid_hostname("4f2a9c1d0b3e") && valid_hostname("web-1.local"));
+    }
+
+    fn spec(tty: bool, user: Option<hermit_proto::User>) -> RunSpec {
+        RunSpec {
+            argv: vec!["sh".into(), "-c".into(), "id".into()],
+            env: vec!["PATH=/bin".into(), "HOME=/root".into()],
+            cwd: "/srv".into(),
+            tty,
+            size: Some((24, 80)),
+            user,
+            hostname: "4f2a9c1d0b3e".into(),
+        }
+    }
+
+    #[test]
+    fn the_container_gets_its_command_and_dockers_defaults() {
+        let config = container_config(&spec(false, None), "/run/oci-hermit");
+        let process = &config["process"];
+        assert_eq!(process["args"], serde_json::json!(["sh", "-c", "id"]));
+        assert_eq!(process["env"], serde_json::json!(["PATH=/bin", "HOME=/root"]));
+        assert_eq!(process["cwd"], "/srv");
+        assert_eq!(
+            process["user"],
+            serde_json::json!({ "uid": 0, "gid": 0, "additionalGids": [] })
+        );
+        assert_eq!(process["terminal"], false);
+        assert!(process.get("consoleSize").is_none(), "only a terminal has a size");
+        assert_eq!(config["root"]["path"], ROOTFS);
+        assert_eq!(config["hostname"], "4f2a9c1d0b3e");
+
+        // New namespaces for everything but users; never the host's.
+        let namespaces: Vec<&str> = config["linux"]["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(namespaces, ["pid", "network", "ipc", "uts", "mount", "cgroup"]);
+        assert!(
+            config["linux"]["namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|n| n.get("path").is_none())
+        );
+
+        // Docker's capabilities, without the ones that would make it privileged.
+        let caps = process["capabilities"]["bounding"].as_array().unwrap();
+        assert_eq!(caps.len(), 14);
+        for privileged in [
+            "CAP_SYS_ADMIN",
+            "CAP_SYS_MODULE",
+            "CAP_SYS_PTRACE",
+            "CAP_NET_ADMIN",
+            "CAP_SYS_RAWIO",
+        ] {
+            assert!(!caps.iter().any(|c| c == privileged), "{privileged}");
+        }
+        assert_eq!(
+            process["capabilities"]["effective"],
+            process["capabilities"]["bounding"]
+        );
+
+        let mounts: Vec<&str> = config["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["destination"].as_str().unwrap())
+            .collect();
+        for wanted in [
+            "/proc",
+            "/dev",
+            "/dev/pts",
+            "/dev/shm",
+            "/sys",
+            "/sys/fs/cgroup",
+            "/etc/hosts",
+            "/etc/hostname",
+        ] {
+            assert!(mounts.contains(&wanted), "{wanted}");
+        }
+        let sys = config["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["destination"] == "/sys")
+            .unwrap();
+        assert!(sys["options"].as_array().unwrap().iter().any(|o| o == "ro"));
+        let hosts = config["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["destination"] == "/etc/hosts")
+            .unwrap();
+        assert_eq!(hosts["source"], "/run/oci-hermit/hosts");
+        assert!(
+            config["linux"]["maskedPaths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == "/proc/kcore")
+        );
+        assert!(
+            config["linux"]["readonlyPaths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == "/proc/sys")
+        );
+
+        // Devices: everything denied, then the usual ones allowed; a wildcard leaves out major or minor.
+        let devices = config["linux"]["resources"]["devices"].as_array().unwrap();
+        assert_eq!(devices[0], serde_json::json!({ "allow": false, "access": "rwm" }));
+        assert!(
+            devices
+                .iter()
+                .any(|d| d["type"] == "c" && d["major"] == 1 && d["minor"] == 3)
+        );
+        let pts = devices.iter().find(|d| d["major"] == 136).unwrap();
+        assert!(pts.get("minor").is_none());
+        assert!(
+            !devices
+                .iter()
+                .any(|d| d.as_object().unwrap().values().any(serde_json::Value::is_null))
+        );
+        assert_eq!(config["linux"]["cgroupsPath"], "/oci-hermit/4f2a9c1d0b3e");
+    }
+
+    #[test]
+    fn a_container_runs_as_its_user_and_a_terminal_has_its_size() {
+        let user = hermit_proto::User {
+            uid: 1000,
+            gid: 1000,
+            groups: vec![44, 27],
+        };
+        let config = container_config(&spec(true, Some(user)), "/run/oci-hermit");
+        assert_eq!(
+            config["process"]["user"],
+            serde_json::json!({ "uid": 1000, "gid": 1000, "additionalGids": [44, 27] })
+        );
+        assert_eq!(config["process"]["terminal"], true);
+        assert_eq!(
+            config["process"]["consoleSize"],
+            serde_json::json!({ "height": 24, "width": 80 })
+        );
+        assert!(hosts_file("web").starts_with("127.0.0.1\tlocalhost web\n"));
+    }
+
+    #[test]
+    fn failing_to_leave_the_initramfs_is_fatal() {
+        let mut sys = Fake {
+            leave_error: true,
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert!(
+            log.contains("fatal: moving the root onto a tmpfs: no /bin/crun in the initramfs"),
+            "{log}"
+        );
+        assert!(!sys.calls.iter().any(|c| c.starts_with("mount ")));
+        assert!(ends_with_power_off(&sys.calls));
+    }
+
+    #[test]
     fn devpts_is_mounted_after_dev() {
         let pos = |t: &str| EARLY_MOUNTS.iter().position(|m| m.target == t).unwrap();
         assert!(pos("/dev") < pos("/dev/pts"));
+        assert!(pos("/sys") < pos("/sys/fs/cgroup"));
     }
 
     #[test]

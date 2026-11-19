@@ -11,7 +11,7 @@ oci-hermit is a Cargo workspace of three crates, plus the build scripts for the 
 | `crates/oci-hermit/src/cli.rs` | The command line (clap), modelled on Docker and Podman, including the commands that are not implemented yet. |
 | `crates/oci-hermit/src/main.rs` | Dispatch; `run` (choose the architecture, find the image, attach its layer disks or build the initramfs, size the VM, run, report timings); `machine info` and `machine boot`. |
 | `crates/oci-hermit/src/qemu.rs` | Finds the bundled QEMU (`$OCI_HERMIT_QEMU_DIR`, then the install layouts) and refuses any other: exact version and marker, `tcg`, firmware. |
-| `crates/oci-hermit/src/guest.rs` | Finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`, then the install layouts). |
+| `crates/oci-hermit/src/guest.rs` | Finds each architecture's kernel, agent and crun (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent,crun}`, then the install layouts). |
 | `crates/oci-hermit/src/image.rs` | Reads an OCI image layout (directory or `.tar`): the manifest for the guest architecture, the config and the layers, checking every blob against its sha256 digest. |
 | `crates/oci-hermit/src/store.rs` | The image store: one OCI layout in the user's data folder, images named by full reference and platform, a shared lock for readers and an exclusive one for deleting. |
 | `crates/oci-hermit/src/registry.rs` | `pull`: the distribution API's reads over reqwest (rustls with ring, the OS trust store), with Basic and Bearer (token server) auth: Podman and Docker auth files and credential helpers, retries, `$OCI_HERMIT_INSECURE_REGISTRIES`. |
@@ -25,7 +25,8 @@ oci-hermit is a Cargo workspace of three crates, plus the build scripts for the 
 | `crates/oci-hermit/src/users.rs` | Resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does. |
 | `crates/oci-hermit/src/initramfs.rs` | Writes the guest initramfs (the agent as `/init`, `/dev/console`, the image under `/rootfs`) as a `newc` cpio in memory, without privileges. |
 | `crates/oci-hermit/src/supervisor.rs` | Builds the QEMU command line, starts and supervises one sandbox VM, and drives the control protocol with timeouts. |
-| `crates/hermit-agent` | The guest agent, PID 1 in the sandbox; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real system calls (nix). It refuses to start anywhere but as PID 1 on Linux. |
+| `crates/hermit-agent` | The guest agent, PID 1 in the sandbox; Linux only. `init.rs` is the testable logic behind a `System` trait, including the container's OCI `config.json`; `linux.rs` the real system calls (nix): moving the root off the initramfs, running `crun`, receiving its terminal. It refuses to start anywhere but as PID 1 on Linux. |
+| `guest/crun/build.sh` | Builds a static crun per guest architecture, with json-c, libseccomp and libcap, from pinned release tarballs. |
 | `crates/hermit-proto` | The control protocol shared by host and agent: message types, the protocol version, and the `Framer` both sides use to cut the byte stream into lines of at most 64 KiB. |
 | `qemu/` | `build.sh` and patches for the TCG-only QEMU bundle. See [Building QEMU](building-qemu.md). |
 | `guest/kernel/` | `build.sh`, config fragments and a boot test for the guest kernel. See [Building the guest](building-guest.md). |

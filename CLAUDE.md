@@ -12,7 +12,7 @@ no admin, no hypervisor and no WSL.
 |---|---|
 | `crates/oci-hermit` | host tool and CLI (clap), Docker/Podman-style commands |
 | `crates/oci-hermit/src/qemu.rs` | finds and verifies the bundled QEMU (`$OCI_HERMIT_QEMU_DIR`, then install layouts) |
-| `crates/oci-hermit/src/guest.rs` | finds each architecture's kernel and agent (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent}`) |
+| `crates/oci-hermit/src/guest.rs` | finds each architecture's kernel, agent and crun (`$OCI_HERMIT_GUEST_DIR/<arch>/{kernel,hermit-agent,crun}`) |
 | `crates/oci-hermit/src/initramfs.rs` | writes the guest initramfs (agent as `/init`, `/dev/console`) without privileges |
 | `crates/oci-hermit/src/image.rs` | reads an OCI image layout (directory or `.tar`): manifest for the guest arch, config, layers; checks every blob against its sha256 digest |
 | `crates/oci-hermit/src/store.rs` | the image store: one OCI layout in the user's data folder (`$OCI_HERMIT_DATA_DIR`), images named by full reference and platform |
@@ -27,7 +27,8 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
-| `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait, `linux.rs` the real calls (nix) |
+| `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait (and the containers' OCI `config.json`), `linux.rs` the real calls (nix) |
+| `guest/crun/build.sh` | static crun (with json-c, libseccomp, libcap) per guest architecture, from pinned tarballs |
 | `crates/hermit-proto` | control protocol shared by host and agent: newline-delimited JSON (max 64 KiB a line) over the virtio-serial port `org.oci-hermit.control`, which QEMU wires to its stdin/stdout; the `Framer` both sides use |
 | `docs/design.md` | architecture, networking, mounts, security model |
 | `packaging/` | release packaging: `licenses.py` (license files and source of everything bundled, called by `qemu/build.sh` and the guest steps), `package.py` (one host's folder and archive, with `hrmt` and THIRD-PARTY-LICENSES), `sources.py` (the GPL/LGPL source archive); used by `kernel.yml` and `release.yml` |
@@ -83,8 +84,15 @@ Everything runs through pixi.
   on `/rootfs` (#17). The user is resolved by reading `/etc/passwd` and `/etc/group` from the disks (`erofs::Layers`),
   never by unpacking the image. An image opened from a path, or with more layers than disks fit, still goes into
   the initramfs under `/rootfs` (about twice its size in RAM). `run` holds its shared store until QEMU has the disks
-  open (after the handshake), so `rmi` cannot delete a disk being attached. The agent chroots into `/rootfs`; crun
-  (#21) replaces that.
+  open (after the handshake), so `rmi` cannot delete a disk being attached.
+- Commands run in crun containers (#21, protocol 1.4; the host refuses an older agent). The agent writes
+  `/run/oci-hermit/config.json` (`init::container_config`: Docker's namespaces, capabilities, masked paths, devices;
+  no user namespace, no seccomp yet, #102) and spawns `/bin/crun --cgroup-manager=cgroupfs run`. crun's `pivot_root`
+  fails on an initramfs root, so the agent first moves its root onto a tmpfs (`leave_initramfs`, as switch_root
+  does), taking `/bin/crun` and binding `/rootfs`; never use `--no-pivot`. With `-t`, crun sends the pty over
+  `--console-socket` (`SCM_RIGHTS`; the one `unsafe` in the agent). The agent checks the command exists inside the
+  image first (`openat2` with `RESOLVE_IN_ROOT`), so a missing command is exit 125, not crun's 1. crun is built
+  statically by `guest/crun/build.sh` (pixi `crun-build`); libtool needs `-all-static` at make time.
 - Containers (#20): `containers/lock` serializes create, start and remove (unique names; nothing removed while it
   starts). The process running a container holds `<id>/running.lock` alone for its whole life, and only it writes
   `state.json`; "running" means that lock is held, never what `state.json` says, so a run that crashed shows as
