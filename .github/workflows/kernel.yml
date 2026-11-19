@@ -108,6 +108,7 @@ jobs:
           cp -R "guest/out/$arch/licenses" "guest/out/sandbox/$arch/licenses"
           pixi run -e package python -I packaging/licenses.py glibc "guest/out/sandbox/$arch" "$PWD/.pixi/envs/agent"
           pixi run -e package python -I packaging/licenses.py crun "guest/out/sandbox/$arch" "guest/out/crun-$arch"
+          pixi run -e package python -I packaging/licenses.py seccomp "guest/out/sandbox/$arch" crates/hermit-agent/seccomp
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
       - name: Run commands from a Debian image
         env:
@@ -159,6 +160,15 @@ jobs:
           grep -qx 'sys-read-only' <<< "$inside"
           # Another user gets no capabilities at all.
           grep -qx 'CapEff:.0000000000000000' <<< "$("$hermit" run -u nobody debian.tar grep CapEff /proc/self/status)"
+          # Docker's default seccomp profile (#102): a filter is on, and what it blocks fails with EPERM, keyctl
+          # included, which no capability guards. Raw syscalls (perl-base is in every Debian image), by number:
+          # unshare, mount, keyctl.
+          [ "$("$hermit" run debian.tar sh -c 'grep "^Seccomp:" /proc/self/status | cut -f2')" = 2 ]
+          # shellcheck disable=SC2016 # runs in the guest's perl
+          errnos=$("$hermit" run debian.tar perl -e '
+            my @n = `uname -m` =~ /x86_64/ ? (272, 165, 250) : (97, 40, 219);
+            print join(" ", map { syscall($_, 0, 0, 0, 0, 0) == -1 ? $!+0 : "ok" } @n), "\n"')
+          [ "$errnos" = "1 1 1" ] || { echo "::error::unshare, mount, keyctl gave '$errnos', expected EPERM (1) each"; exit 1; }
           # A command the image does not have fails before the container starts.
           set +e
           "$hermit" run debian.tar no-such-command 2> missing.err
@@ -184,6 +194,7 @@ jobs:
           "$hermit" exec idle sh -c 'echo shared > /tmp/note'
           [ "$("$hermit" exec idle cat /tmp/note)" = shared ] || { echo "::error::exec did not share the container's files"; exit 1; }
           [ "$("$hermit" exec -u nobody idle id -u)" = 65534 ]
+          [ "$("$hermit" exec idle sh -c 'grep "^Seccomp:" /proc/self/status | cut -f2')" = 2 ]
           # shellcheck disable=SC2016 # expands in the guest's shell
           [ "$("$hermit" exec -w /tmp -e GREETING=hello idle sh -c 'echo "$GREETING from $(pwd)"')" = "hello from /tmp" ]
           [ "$(echo piped | "$hermit" exec -i idle cat)" = piped ]

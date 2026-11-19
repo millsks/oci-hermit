@@ -38,7 +38,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <div class="oh-scroll">
 <svg viewBox="0 0 1000 760" role="img" aria-labelledby="oh-comp-title oh-comp-desc">
 <title id="oh-comp-title">oci-hermit components</title>
-<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
+<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: networking, bind mounts and an OS sandbox around QEMU.</desc>
 <defs>
 <marker id="oh-ah" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="oh-ah-acc" class="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
@@ -141,12 +141,11 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <text x="554" y="500" class="small">PID 1 of its namespace, as the image's User, or -u</text>
 <path class="ln" d="M910,378 V423" marker-end="url(#oh-ah)"/>
 <text x="902" y="408" text-anchor="end" class="mono small">Run</text>
-<rect class="r-plan" x="500" y="556" width="470" height="154" rx="8"/>
+<rect class="r-plan" x="500" y="556" width="470" height="132" rx="8"/>
 <text x="514" y="578" class="b lbl-plan small">PLANNED &#183; not in the code yet</text>
-<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
-<text x="514" y="624" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
-<text x="514" y="646" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
-<text x="514" y="668" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
+<text x="514" y="602" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
+<text x="514" y="624" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
+<text x="514" y="646" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
 <text x="514" y="716" class="small m">Today the VM has no network device.</text>
 </svg>
 </div>
@@ -300,7 +299,7 @@ instruction, and the guest can touch only the devices QEMU gives it. The layers,
 | Network | **Sealed.** No network device at all: no way out and no way in. | libslirp with `restrict=on` (#26); `-p` bound to 127.0.0.1 only, even when `0.0.0.0` is asked for (#27); an egress test suite (#28). |
 | Control channel | Anonymous pipes, no socket or file. Lines are capped at 64 KiB, anything that is not a message is refused, and every wait has a timeout: the host treats the guest as untrusted. | |
 | Image input | Every manifest, config and layer is checked against its sha256 digest when it is pulled, stored and read. Paths that climb out with `..` are refused, device nodes are skipped. | Signature verification with cosign or notation (#42). |
-| Inside the guest | A crun container: its own PID, mount, IPC, UTS, network and cgroup namespaces (no user namespace), Docker's default capabilities, masked and read-only kernel paths, a device allow-list, run as the image's `User` (or `-u`). The VM stays the main boundary. | Docker's default seccomp profile (#102). |
+| Inside the guest | A crun container: its own PID, mount, IPC, UTS, network and cgroup namespaces (no user namespace), Docker's default capabilities and seccomp profile (unknown syscalls, and those needing capabilities it lacks, fail with EPERM), masked and read-only kernel paths, a device allow-list, run as the image's `User` (or `-u`). The VM stays the main boundary. | |
 | Host code | Rust, with `unsafe` code denied in the host crates; `cargo deny` checks advisories and licences; the QEMU and kernel sources are pinned by sha256. | Code-signed Windows and macOS releases (#39). |
 
 ## No network, on purpose
@@ -372,6 +371,5 @@ command as root. `oci-hermit version` prints the protocol version the host speak
 
 ## What changes later
 
-- **A seccomp profile** (#102), as Docker applies by default.
 - **Networking** (#26 to #29) and **bind mounts** (#30 to #34), with the defaults described in
   [oci-hermit, Docker and Podman](docker-and-podman.md).

@@ -13,7 +13,7 @@ oci-hermit is a development and testing tool. It runs a real OCI image on a mach
 
 - **Speed.** Expect roughly 5–20 times slower than native, and slower again when emulating x86-64 on arm64. It answers "does it work", not "how fast is it". Timing-sensitive tests may be flaky.
 - **Kernel.** Images run on oci-hermit's small guest kernel, not your production hosts' kernel. Most applications never notice. Anything that depends on particular kernel features, cgroup limits or system calls may behave differently.
-- **Runtime.** `oci-hermit run` starts the command with crun, a real OCI runtime, with Docker's defaults inside a small VM. It still does not behave exactly like Docker, Kubernetes or your cloud's container service: no seccomp profile yet (#102), no resource limits beyond the VM's size.
+- **Runtime.** `oci-hermit run` starts the command with crun, a real OCI runtime, with Docker's defaults inside a small VM. It still does not behave exactly like Docker, Kubernetes or your cloud's container service: no resource limits beyond the VM's size, no network, and the CPU is emulated.
 - **Deliberate defaults.**
     - There is no outbound network at all, so an application that needs to reach the internet fails here and works in production.
     - Bind mounts are read-only unless you add `:rw`.

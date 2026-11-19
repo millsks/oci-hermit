@@ -1,0 +1,15 @@
+[
+  {
+    "name": "moby-seccomp-profile",
+    "version": "seccomp/v0.3.0",
+    "license": "Apache-2.0 (Docker's default seccomp profile, embedded in hermit-agent as data)",
+    "from": "https://github.com/moby/profiles, seccomp/default.json, vendored as crates/hermit-agent/seccomp/default.json",
+    "sources": [
+      {
+        "url": "https://raw.githubusercontent.com/moby/profiles/seccomp/v0.3.0/seccomp/default.json",
+        "sha256": "6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6"
+      }
+    ],
+    "patches": []
+  }
+]

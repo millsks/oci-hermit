@@ -292,11 +292,90 @@ pub fn process_config(spec: &RunSpec) -> serde_json::Value {
     process
 }
 
+/// Docker's default seccomp profile, in Docker's own format: moby/profiles `seccomp/v0.3.0` (Apache-2.0), vendored
+/// with its license and source in `seccomp/` (#102).
+pub const DOCKER_SECCOMP: &str = include_str!("../seccomp/default.json");
+
+/// The `linux.seccomp` of an OCI runtime configuration, from a profile in Docker's format, as Docker builds it: for
+/// `arch` (`x86_64` or `aarch64`; the profile names it as Go does, `amd64` or `arm64`) and the architectures that run
+/// on it, keeping a rule only when its `includes` hold (every capability, the architecture, `minKernel` at most
+/// `kernel`) and its `excludes` do not (any capability, the architecture). `capabilities` are the container's.
+pub fn seccomp_config(
+    profile: &serde_json::Value,
+    arch: &str,
+    capabilities: &[&str],
+    kernel: (u32, u32),
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let (go_arch, native) = match arch {
+        "x86_64" => ("amd64", "SCMP_ARCH_X86_64"),
+        "aarch64" => ("arm64", "SCMP_ARCH_AARCH64"),
+        other => (other, ""),
+    };
+    let strings = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let mut architectures = Vec::new();
+    for entry in profile["archMap"].as_array().into_iter().flatten() {
+        if entry["architecture"] == native {
+            architectures.push(native.to_string());
+            architectures.extend(strings(&entry["subArchitectures"]));
+        }
+    }
+    let granted = |cap: &String| capabilities.contains(&cap.as_str());
+    let mut syscalls = Vec::new();
+    for rule in profile["syscalls"].as_array().into_iter().flatten() {
+        let (includes, excludes) = (&rule["includes"], &rule["excludes"]);
+        let included = strings(&includes["caps"]).iter().all(granted)
+            && (includes["arches"].is_null() || strings(&includes["arches"]).iter().any(|a| a == go_arch))
+            && includes["minKernel"]
+                .as_str()
+                .is_none_or(|min| kernel_version(min).is_some_and(|min| kernel >= min));
+        let excluded =
+            strings(&excludes["caps"]).iter().any(granted) || strings(&excludes["arches"]).iter().any(|a| a == go_arch);
+        if !included || excluded {
+            continue;
+        }
+        let mut kept = json!({ "names": rule["names"], "action": rule["action"] });
+        if rule["args"].as_array().is_some_and(|args| !args.is_empty()) {
+            kept["args"] = rule["args"].clone();
+        }
+        if !rule["errnoRet"].is_null() {
+            kept["errnoRet"] = rule["errnoRet"].clone();
+        }
+        syscalls.push(kept);
+    }
+    let mut config = json!({
+        "defaultAction": profile["defaultAction"],
+        "architectures": architectures,
+        "syscalls": syscalls,
+    });
+    if !profile["defaultErrnoRet"].is_null() {
+        config["defaultErrnoRet"] = profile["defaultErrnoRet"].clone();
+    }
+    config
+}
+
+/// `major.minor` of a kernel release such as `6.18.63-oci-hermit-2` or a profile's `minKernel`.
+pub fn kernel_version(release: &str) -> Option<(u32, u32)> {
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// Docker's default seccomp profile for a container of ours on `arch`, under kernel `kernel`.
+pub fn default_seccomp(arch: &str, kernel: (u32, u32)) -> serde_json::Value {
+    let profile: serde_json::Value = serde_json::from_str(DOCKER_SECCOMP).expect("the vendored profile is JSON");
+    seccomp_config(&profile, arch, &CAPABILITIES, kernel)
+}
+
 /// The OCI runtime configuration (`config.json`) for `spec`, as Docker would make it: new PID, mount, IPC, UTS,
 /// network and cgroup namespaces (no user namespace: the VM is the boundary, and its root is the container's),
-/// Docker's default capabilities, masked and read-only kernel paths, and only the usual devices. `etc` is the
-/// folder with the container's `hosts` and `hostname`.
-pub fn container_config(spec: &RunSpec, etc: &str) -> serde_json::Value {
+/// Docker's default capabilities and `seccomp` profile, masked and read-only kernel paths, and only the usual
+/// devices. `etc` is the folder with the container's `hosts` and `hostname`.
+pub fn container_config(spec: &RunSpec, etc: &str, seccomp: serde_json::Value) -> serde_json::Value {
     use serde_json::json;
     let process = process_config(spec);
     // Docker's device rules: anything may be created (`m`), only these opened.
@@ -363,6 +442,7 @@ pub fn container_config(spec: &RunSpec, etc: &str) -> serde_json::Value {
                 "/proc/scsi", "/sys/firmware", "/sys/devices/virtual/powercap",
             ],
             "readonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"],
+            "seccomp": seccomp,
         },
     })
 }
@@ -1442,9 +1522,122 @@ mod tests {
         }
     }
 
+    /// The rules of `config` that name `syscall`, as `(action, has args)`.
+    fn rules_for(config: &serde_json::Value, syscall: &str) -> Vec<(String, bool)> {
+        config["syscalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["names"].as_array().unwrap().iter().any(|n| n == syscall))
+            .map(|r| (r["action"].as_str().unwrap().to_string(), r.get("args").is_some()))
+            .collect()
+    }
+
+    #[test]
+    fn dockers_seccomp_profile_follows_our_capabilities_and_architecture() {
+        for (arch, architectures, own, other) in [
+            (
+                "x86_64",
+                vec!["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
+                "arch_prctl",
+                "arm_fadvise64_64",
+            ),
+            (
+                "aarch64",
+                vec!["SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"],
+                "arm_fadvise64_64",
+                "arch_prctl",
+            ),
+        ] {
+            let config = default_seccomp(arch, (6, 18));
+            assert_eq!(config["defaultAction"], "SCMP_ACT_ERRNO");
+            assert_eq!(config["defaultErrnoRet"], 1, "EPERM, as Docker");
+            assert_eq!(config["architectures"], serde_json::json!(architectures), "{arch}");
+            // The everyday calls are allowed, and each architecture's own.
+            for syscall in ["read", "openat", "execve", "futex", own] {
+                assert_eq!(
+                    rules_for(&config, syscall),
+                    [("SCMP_ACT_ALLOW".into(), false)],
+                    "{arch} {syscall}"
+                );
+            }
+            assert!(rules_for(&config, other).is_empty(), "{arch} {other}");
+            // What needs CAP_SYS_ADMIN, which containers do not get, is left to the default: EPERM.
+            for syscall in [
+                "mount",
+                "unshare",
+                "setns",
+                "umount2",
+                "pivot_root",
+                "keyctl",
+                "add_key",
+                "bpf",
+            ] {
+                assert!(rules_for(&config, syscall).is_empty(), "{arch} {syscall}");
+            }
+            // CAP_SYS_CHROOT is granted, CAP_SYS_PTRACE is not but ptrace is allowed from kernel 4.8 on.
+            assert_eq!(rules_for(&config, "chroot"), [("SCMP_ACT_ALLOW".into(), false)]);
+            assert_eq!(rules_for(&config, "ptrace"), [("SCMP_ACT_ALLOW".into(), false)]);
+            assert!(
+                rules_for(&default_seccomp(arch, (4, 4)), "ptrace").is_empty(),
+                "minKernel 4.8"
+            );
+            // clone is allowed only with arguments that make no namespace; clone3 fails with ENOSYS, so libc
+            // falls back to clone.
+            assert_eq!(rules_for(&config, "clone"), [("SCMP_ACT_ALLOW".into(), true)]);
+            assert_eq!(rules_for(&config, "clone3"), [("SCMP_ACT_ERRNO".into(), false)]);
+            assert!(
+                config["syscalls"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.get("comment").is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn seccomp_rules_need_every_capability_they_include_and_none_they_exclude() {
+        let profile = serde_json::json!({
+            "defaultAction": "SCMP_ACT_ERRNO",
+            "archMap": [{ "architecture": "SCMP_ARCH_X86_64", "subArchitectures": ["SCMP_ARCH_X86"] }],
+            "syscalls": [
+                { "names": ["both"], "action": "SCMP_ACT_ALLOW", "includes": { "caps": ["CAP_A", "CAP_B"] } },
+                { "names": ["one"], "action": "SCMP_ACT_ALLOW", "includes": { "caps": ["CAP_A"] } },
+                { "names": ["unless"], "action": "SCMP_ACT_ERRNO", "errnoRet": 22,
+                  "excludes": { "caps": ["CAP_C", "CAP_A"] } },
+                { "names": ["not_here"], "action": "SCMP_ACT_ALLOW", "excludes": { "arches": ["amd64"] } },
+                { "names": ["args"], "action": "SCMP_ACT_ALLOW",
+                  "args": [{ "index": 0, "value": 1, "valueTwo": 0, "op": "SCMP_CMP_EQ" }] },
+                { "names": ["new"], "action": "SCMP_ACT_ALLOW", "includes": { "minKernel": "7.0" } },
+            ],
+        });
+        let config = seccomp_config(&profile, "x86_64", &["CAP_A"], (6, 18));
+        let names: Vec<&str> = config["syscalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["names"][0].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["one", "args"]);
+        assert!(config.get("defaultErrnoRet").is_none());
+        let config = seccomp_config(&profile, "x86_64", &[], (7, 1));
+        assert_eq!(config["syscalls"][0]["names"][0], "unless");
+        assert_eq!(config["syscalls"][0]["errnoRet"], 22);
+        assert_eq!(rules_for(&config, "new"), [("SCMP_ACT_ALLOW".into(), false)]);
+        assert_eq!(
+            seccomp_config(&profile, "riscv64", &[], (6, 18))["architectures"],
+            serde_json::json!([])
+        );
+        assert_eq!(kernel_version("6.18.63-oci-hermit-2\n"), Some((6, 18)));
+        assert_eq!(kernel_version("4.8"), Some((4, 8)));
+        assert_eq!(kernel_version("six"), None);
+    }
+
     #[test]
     fn the_container_gets_its_command_and_dockers_defaults() {
-        let config = container_config(&spec(false, None), "/run/oci-hermit");
+        let config = container_config(&spec(false, None), "/run/oci-hermit", serde_json::json!({ "x": 1 }));
+        assert_eq!(config["linux"]["seccomp"], serde_json::json!({ "x": 1 }));
         let process = &config["process"];
         assert_eq!(process["args"], serde_json::json!(["sh", "-c", "id"]));
         assert_eq!(process["env"], serde_json::json!(["PATH=/bin", "HOME=/root"]));
@@ -1563,7 +1756,7 @@ mod tests {
             gid: 1000,
             groups: vec![44, 27],
         };
-        let config = container_config(&spec(true, Some(user)), "/run/oci-hermit");
+        let config = container_config(&spec(true, Some(user)), "/run/oci-hermit", serde_json::Value::Null);
         assert_eq!(
             config["process"]["user"],
             serde_json::json!({ "uid": 1000, "gid": 1000, "additionalGids": [44, 27] })

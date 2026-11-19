@@ -29,6 +29,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
+| `crates/hermit-agent/seccomp` | Docker's default seccomp profile (moby/profiles `seccomp/v0.3.0`, Apache-2.0), vendored with its license and `SOURCES.json` (sha256); `init::seccomp_config` turns it into `linux.seccomp` as Docker does, by our capabilities and the guest arch. To update: replace `default.json`, its sha256 and version in `licenses/SOURCES.json` |
 | `crates/hermit-agent` | guest agent, PID 1 inside the sandbox VM; Linux only. `init.rs` is the testable logic behind a `System` trait (and the containers' OCI `config.json`), `linux.rs` the real calls (nix) |
 | `guest/crun/build.sh` | static crun (with json-c, libseccomp, libcap) per guest architecture, from pinned tarballs |
 | `crates/hermit-proto` | control protocol shared by host and agent: newline-delimited JSON (max 64 KiB a line) over the virtio-serial port `org.oci-hermit.control`, which QEMU wires to its stdin/stdout; the `Framer` both sides use |
@@ -88,8 +89,8 @@ Everything runs through pixi.
   the initramfs under `/rootfs` (about twice its size in RAM). `run` holds its shared store until QEMU has the disks
   open (after the handshake), so `rmi` cannot delete a disk being attached.
 - Commands run in crun containers (#21, protocol 1.4; the host refuses an older agent). The agent writes
-  `/run/oci-hermit/config.json` (`init::container_config`: Docker's namespaces, capabilities, masked paths, devices;
-  no user namespace, no seccomp yet, #102) and spawns `/bin/crun --cgroup-manager=cgroupfs run`. crun's `pivot_root`
+  `/run/oci-hermit/config.json` (`init::container_config`: Docker's namespaces, capabilities, masked paths, devices,
+  and Docker's seccomp profile, #102; no user namespace) and spawns `/bin/crun --cgroup-manager=cgroupfs run`. crun's `pivot_root`
   fails on an initramfs root, so the agent first moves its root onto a tmpfs (`leave_initramfs`, as switch_root
   does), taking `/bin/crun` and binding `/rootfs`; never use `--no-pivot`. With `-t`, crun sends the pty over
   `--console-socket` (`SCM_RIGHTS`; the one `unsafe` in the agent). The agent checks the command exists inside the

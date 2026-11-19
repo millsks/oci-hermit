@@ -10,6 +10,7 @@ Subcommands:
   qemu  <bundle> <qemu-source> [patches-dir]   after qemu/build.sh bundled the libraries QEMU loads
   glibc <dest> <agent-env-prefix>              the static agent's C library, from that environment's sysroot
   crun  <dest> <crun-out>                      crun and the libraries in it, from guest/crun/build.sh's output
+  seccomp <dest> <profile-dir>                 Docker's seccomp profile in the agent (crates/hermit-agent/seccomp)
 
 The Linux kernel's entry is written by guest/kernel/build.sh itself, in the same format. Standard library only: it
 runs under pixi on Linux and macOS and under MSYS2's Python on Windows.
@@ -303,11 +304,11 @@ def glibc(dest: Path, prefix: Path) -> None:
     write_sources(licenses, components)
 
 
-def crun(dest: Path, built: Path) -> None:
-    """crun, json-c, libseccomp and libcap: the license folders and sources ``guest/crun/build.sh`` wrote."""
+def recorded(dest: Path, built: Path, how: str) -> None:
+    """Components that come with their own ``licenses/`` folder: a license folder each and ``SOURCES.json``."""
     found = built / "licenses" / "SOURCES.json"
     if not found.is_file():
-        fail(f"no licenses/SOURCES.json in {built}: run guest/crun/build.sh")
+        fail(f"no licenses/SOURCES.json in {built}: {how}")
     components = json.loads(found.read_text())
     licenses = dest / "licenses"
     for component in components:
@@ -328,7 +329,9 @@ def main(argv: list[str]) -> None:
         case ["glibc", dest, prefix]:
             glibc(Path(dest), Path(prefix))
         case ["crun", dest, built]:
-            crun(Path(dest), Path(built))
+            recorded(Path(dest), Path(built), "run guest/crun/build.sh")
+        case ["seccomp", dest, profile]:
+            recorded(Path(dest), Path(profile), "the profile is vendored in crates/hermit-agent/seccomp")
         case _:
             fail(__doc__ or "bad arguments")
 
