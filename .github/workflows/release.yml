@@ -6,7 +6,9 @@ name: Release
 # from git-cliff. Nothing comes from CI caches or artifacts, so a release never depends on them.
 #
 # Pull requests that change the release build run everything except publishing. A tag whose version is below 1.0.0
-# or has a pre-release suffix (-rc.1) is published as a pre-release. Pushing the tag is the maintainer's decision.
+# or has a pre-release suffix (-rc.1) is published as a pre-release. Pushing the tag is the maintainer's decision, and
+# so is promoting a pre-release to Latest once it has been tried on a managed Windows machine
+# (gh release edit <tag> --prerelease=false --latest).
 on:
   push:
     tags: ["v*"]

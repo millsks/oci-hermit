@@ -32,8 +32,9 @@ silicon.
 | Linux, x86-64 | `oci-hermit-<version>-linux-64.tar.gz` |
 | Linux, arm64 | `oci-hermit-<version>-linux-aarch64.tar.gz` |
 
-Releases below 1.0 are marked as pre-releases. The binaries are not signed yet (#39), so Windows and macOS warn the
-first time; see [If it will not start](#if-it-will-not-start).
+Each release starts as a pre-release. Once it has been tried on a managed Windows machine on a private network, it
+becomes the **Latest** release; take that one unless you want to try the newest. The binaries are not signed yet
+(#39), so Windows and macOS warn the first time; see [If it will not start](#if-it-will-not-start).
 
 ## 1. Download
 
@@ -78,7 +79,8 @@ right-click the `.zip` and choose **Extract All**; on macOS, double-click the `.
     tar -xzf oci-hermit-*-linux-64.tar.gz
     ```
 
-`gh release list` takes the newest release, pre-releases included; `gh release download` alone would skip those.
+`gh release list` takes the newest release, pre-releases included; `gh release download` with no tag takes the
+**Latest** release instead.
 Each tab checks the download against `SHA256SUMS` before unpacking it; anything but `OK` means a damaged or
 different file.
 
