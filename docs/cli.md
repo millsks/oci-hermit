@@ -111,6 +111,11 @@ oci-hermit run --platform linux/amd64 --cpus 2 -m 2g ./app.tar
 oci-hermit itself fails: the image cannot be found or read, a flag is refused, the sandbox does not boot, or the
 command cannot be started. With `-d`, 0 once the command started.
 
+!!! warning "Windows: capture `run -d`'s ID in a file, not with `$(...)`"
+    On Windows, `id=$(oci-hermit run -d …)` does not return while the container runs: the container's monitor
+    inherits the shell's output pipe (#105). Write the ID to a file instead (`oci-hermit run -d … > ticker.id`), or
+    find it later with `oci-hermit ps`.
+
 Set `OCI_HERMIT_TIMINGS=1` to print how long each phase took, on stderr:
 
 ```console

@@ -159,6 +159,9 @@ All of these make `run` exit with 125.
 | `container <name> is running; stop it first …` | `oci-hermit stop <name>`, or `oci-hermit rm -f <name>`. |
 | `could not stop container <name>: cannot reach its monitor: …` | The container's monitor is not answering. Find it (`ps aux \| grep __monitor`, or Task Manager on Windows: an `oci-hermit.exe` whose command line ends with the container's ID), end it, and its QEMU stops with it. The container then shows as `Exited (unknown)` and `rm` removes it. |
 
+On Windows, `id=$(oci-hermit run -d …)` and other pipes from a `run -d` do not finish while the container runs,
+because its monitor inherits the pipe (#105). Redirect the output to a file instead: `oci-hermit run -d … > id.txt`.
+
 A `run` without `-d` takes its container down with it: closing the terminal or killing that `run` stops the
 container, which then shows as `Exited (137)`. Use `-d` for a container that should keep running.
 
