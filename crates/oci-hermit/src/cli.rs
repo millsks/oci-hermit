@@ -86,6 +86,20 @@ pub enum Command {
     },
     /// Stop one or more running containers
     Stop {
+        /// Seconds to wait for it to stop before killing it
+        #[arg(short = 't', long = "time")]
+        time: Option<u64>,
+        /// Signal to send first, instead of the image's stop signal (SIGTERM by default)
+        #[arg(short, long)]
+        signal: Option<String>,
+        #[arg(required = true)]
+        containers: Vec<String>,
+    },
+    /// Send a signal to one or more running containers
+    Kill {
+        /// Signal to send, e.g. TERM, SIGHUP or 9
+        #[arg(short, long, default_value = "KILL")]
+        signal: String,
         #[arg(required = true)]
         containers: Vec<String>,
     },
@@ -137,6 +151,7 @@ impl Command {
             Command::Logs { .. } => "logs",
             Command::Ps { .. } => "ps",
             Command::Stop { .. } => "stop",
+            Command::Kill { .. } => "kill",
             Command::Rm { .. } => "rm",
             Command::Cp { .. } => "cp",
             Command::Pod(_) => "pod",
@@ -484,6 +499,7 @@ mod tests {
             (&["logs", "-f", "web"], "logs"),
             (&["ps", "-a"], "ps"),
             (&["stop", "web"], "stop"),
+            (&["kill", "web"], "kill"),
             (&["rm", "web"], "rm"),
             (&["cp", "web:/a", "."], "cp"),
             (&["pod", "ps"], "pod"),

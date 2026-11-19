@@ -207,6 +207,8 @@ pub enum Input {
     /// Start `Command` in the running container as this process (protocol 1.5); its `layers` and `hostname` are
     /// the container's and are not sent.
     Exec(Process, Command),
+    /// Send a signal to a command (protocol 1.6); an older agent cannot take one, and it is dropped.
+    Signal(Process, i32),
     /// Stop waiting for the command: [`Sandbox::relay`] returns `None` and the caller stops the sandbox.
     Stop,
 }
@@ -458,6 +460,10 @@ impl Sandbox {
                         self.send(&HostMessage::StdinClosed { process })?;
                     }
                     Input::Data(..) | Input::Eof(_) => {}
+                    Input::Signal(process, signal) if self.version >= (1, 6) => {
+                        self.send(&HostMessage::Signal { process, signal })?;
+                    }
+                    Input::Signal(..) => {}
                     Input::Exec(process, _) if process == MAIN => on(Relayed::Failed {
                         process,
                         message: "process 0 is the container's own command".into(),

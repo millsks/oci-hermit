@@ -249,7 +249,8 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
         } => match open_containers(env) {
             Ok(c) => {
                 let data_dir = env.data_dir.as_deref().expect("the container store opened");
-                let stop = |id: &str| monitor::stop(&c, data_dir, id);
+                // As Docker's rm -f: killed at once, with no grace period.
+                let stop = |id: &str| monitor::stop(&c, data_dir, id, Some(0), None);
                 containers::rm(&c, wanted, force.then_some(&stop as containers::Stopper<'_>), out, err)
             }
             Err(e) => {
@@ -257,10 +258,33 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
-        cli::Command::Stop { containers: wanted } => match open_containers(env) {
-            Ok(c) => {
+        cli::Command::Stop {
+            time,
+            signal,
+            containers: wanted,
+        } => match open_containers(env)
+            .map_err(|e| e.to_string())
+            .and_then(|c| signal.as_deref().map(parse_signal).transpose().map(|s| (c, s)))
+        {
+            Ok((c, signal)) => {
                 let data_dir = env.data_dir.as_deref().expect("the container store opened");
-                monitor::stop_command(&c, data_dir, wanted, out, err)
+                monitor::stop_command(&c, data_dir, wanted, *time, signal, out, err)
+            }
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
+        cli::Command::Kill {
+            signal,
+            containers: wanted,
+        } => match open_containers(env)
+            .map_err(|e| e.to_string())
+            .and_then(|c| parse_signal(signal).map(|s| (c, s)))
+        {
+            Ok((c, signal)) => {
+                let data_dir = env.data_dir.as_deref().expect("the container store opened");
+                monitor::kill_command(&c, data_dir, wanted, signal, out, err)
             }
             Err(e) => {
                 let _ = writeln!(err, "oci-hermit: {e}");
@@ -1001,6 +1025,12 @@ fn platform_arch(platform: &str) -> Option<qemu::GuestArch> {
     }
 }
 
+/// A signal as `kill -s`, `stop -s` or an image's `StopSignal` names it.
+fn parse_signal(name: &str) -> Result<i32, String> {
+    hermit_proto::signal_number(name)
+        .ok_or_else(|| format!("{name:?} is not a signal: use a name such as TERM or SIGHUP, or a number from 1 to 64"))
+}
+
 /// The host terminal in raw mode for as long as this lives.
 struct RawTerminal;
 
@@ -1101,6 +1131,10 @@ fn run_in_sandbox(
             (Some(rootfs), identity, accounts)
         }
     };
+    let stop_signal = match image.config.stop_signal.as_deref() {
+        Some(name) => parse_signal(name).map_err(|e| format!("the image's StopSignal: {e}"))?,
+        None => monitor::SIGTERM,
+    };
     let argv = image.config.argv(&args.command);
     if argv.is_empty() {
         return Err("the image has no entrypoint or command, and none was given".into());
@@ -1193,6 +1227,7 @@ fn run_in_sandbox(
             detach: args.detach,
             boot_timeout_secs: 120,
             accounts,
+            stop_signal,
         };
         store::write_atomically(
             &containers.dir(&container.id).join(monitor::LAUNCH),
@@ -1221,8 +1256,48 @@ fn run_in_sandbox(
     attach(args, env, &container, conn, &monitor_log, store, timings, out, err)
 }
 
+/// The writing half of a connection to a monitor, shared by the threads that pass stdin and signals on.
+type ToMonitor = std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>;
+
+fn tell_monitor(to_monitor: &ToMonitor, request: &monitor::Request) -> std::io::Result<()> {
+    let mut writer = to_monitor.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    monitor::send(writer.as_mut(), request)
+}
+
+/// Passes Ctrl-C and SIGTERM sent to this process on to the container's command, as `docker run` does, instead of
+/// ending this process (which would stop the container at once). On Windows, Ctrl-C and Ctrl-Break.
+fn forward_signals(to_monitor: ToMonitor) {
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_io().build() else {
+            return;
+        };
+        let pass_on = |to_monitor: ToMonitor, signal: i32| {
+            move || tell_monitor(&to_monitor, &monitor::Request::Signal { signal }).is_ok()
+        };
+        runtime.block_on(async move {
+            #[cfg(unix)]
+            let (interrupt, terminate) = {
+                use tokio::signal::unix::{SignalKind, signal};
+                (signal(SignalKind::interrupt()), signal(SignalKind::terminate()))
+            };
+            #[cfg(windows)]
+            let (interrupt, terminate) = (tokio::signal::windows::ctrl_c(), tokio::signal::windows::ctrl_break());
+            let (Ok(mut interrupt), Ok(mut terminate)) = (interrupt, terminate) else {
+                return;
+            };
+            let on_terminate = pass_on(to_monitor.clone(), monitor::SIGTERM);
+            tokio::spawn(async move { while terminate.recv().await.is_some() && on_terminate() {} });
+            let on_interrupt = pass_on(to_monitor, SIGINT);
+            while interrupt.recv().await.is_some() && on_interrupt() {}
+        });
+    });
+}
+
+/// SIGINT, what Ctrl-C sends.
+const SIGINT: i32 = 2;
+
 /// Passes this process's stdin to a monitor, on a thread of its own, until it ends.
-fn forward_stdin(mut to_monitor: Box<dyn Write + Send>) {
+fn forward_stdin(to_monitor: ToMonitor) {
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin();
         let mut buf = [0u8; hermit_proto::CHUNK];
@@ -1234,8 +1309,7 @@ fn forward_stdin(mut to_monitor: Box<dyn Write + Send>) {
                 },
             };
             let last = request == monitor::Request::StdinClosed;
-            // Dropping this half leaves the connection open: the notices still come on the other.
-            if monitor::send(to_monitor.as_mut(), &request).is_err() || last {
+            if tell_monitor(&to_monitor, &request).is_err() || last {
                 return;
             }
         }
@@ -1300,7 +1374,7 @@ fn exec_in(
             interactive: args.interactive,
         },
     )?;
-    let mut writer = Some(writer);
+    let writer: ToMonitor = std::sync::Arc::new(std::sync::Mutex::new(writer));
     let mut raw = None;
     let (mut code, mut failure) = (None, None);
     monitor::read_messages(reader, |notice: monitor::Notice| {
@@ -1309,10 +1383,8 @@ fn exec_in(
                 if args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     raw = RawTerminal::enable();
                 }
-                if args.interactive
-                    && let Some(to_monitor) = writer.take()
-                {
-                    forward_stdin(to_monitor);
+                if args.interactive {
+                    forward_stdin(writer.clone());
                 }
             }
             monitor::Notice::Output { stream, data } => {
@@ -1335,7 +1407,7 @@ fn exec_in(
             }
             monitor::Notice::Failed { message } => failure = Some(message),
             monitor::Notice::Done => return false,
-            monitor::Notice::Booted | monitor::Notice::Stopping => {}
+            monitor::Notice::Booted | monitor::Notice::Stopping | monitor::Notice::Signalled => {}
         }
         true
     });
@@ -1369,7 +1441,7 @@ fn attach(
     });
     let mut store = store;
     // Kept open for as long as the run is: the monitor stops a foreground container whose run went away.
-    let mut writer = Some(writer);
+    let writer: ToMonitor = std::sync::Arc::new(std::sync::Mutex::new(writer));
     let mut raw = None;
     let (mut code, mut failure) = (None, None);
     for notice in received {
@@ -1387,10 +1459,9 @@ fn attach(
                 if args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                     raw = RawTerminal::enable();
                 }
-                if args.interactive
-                    && let Some(to_monitor) = writer.take()
-                {
-                    forward_stdin(to_monitor);
+                forward_signals(writer.clone());
+                if args.interactive {
+                    forward_stdin(writer.clone());
                 }
             }
             monitor::Notice::Output { stream, data } => {
@@ -1408,7 +1479,7 @@ fn attach(
                 timings.mark("command");
             }
             monitor::Notice::Failed { message } => failure = Some(message),
-            monitor::Notice::Stopping => {}
+            monitor::Notice::Stopping | monitor::Notice::Signalled => {}
             monitor::Notice::Done => break,
         }
     }
@@ -1511,7 +1582,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.5"));
+        assert!(out.contains("control protocol 1.6"));
         assert!(err.is_empty());
     }
 
@@ -1958,8 +2029,8 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.5)"),
-                "the fake agent speaks 1.5: {out}"
+                out.contains("(control protocol 1.6)"),
+                "the fake agent speaks 1.6: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
         }
@@ -2119,14 +2190,34 @@ mod tests {
         assert_eq!(code, 125);
         assert!(err.contains("no such container: nothere"), "{err}");
 
-        // rm will not remove it while it runs; stop does, and records it as killed.
-        let (code, _, err) = run_with(&env, &["rm", "web"]);
-        assert_eq!(code, 1);
-        assert!(err.contains("container web is running; stop it first"), "{err}");
-        let (code, out, err) = run_with(&env, &["stop", "web"]);
+        // kill passes a signal on; the fake command ignores all but SIGTERM.
+        let (code, out, err) = run_with(&env, &["kill", "-s", "SIGUSR1", "web"]);
         assert_eq!((code, out.as_str()), (0, "web\n"), "{err}");
+        let (code, _, err) = run_with(&env, &["kill", "-s", "NOPE", "web"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("\"NOPE\" is not a signal"), "{err}");
+        assert_eq!(run_with(&env, &["stop", "-s", "BOGUS", "web"]).0, 1);
+        // stop -s with a signal it ignores waits out -t, then kills it.
+        let started = std::time::Instant::now();
+        let (code, out, err) = run_with(&env, &["stop", "-t", "1", "-s", "INT", "web"]);
+        assert_eq!((code, out.as_str()), (0, "web\n"), "{err}");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
         let (_, out, _) = run_with(&env, &["ps", "-a"]);
         assert!(out.contains("Exited (137)"), "{out}");
+        let (code, _, err) = run_with(&env, &["kill", "web"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("container web is not running"), "{err}");
+
+        // rm will not remove a running container; stop sends it SIGTERM, which this one exits on.
+        assert_eq!(detached("calm").0, 0);
+        let (code, _, err) = run_with(&env, &["rm", "calm"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("container calm is running; stop it first"), "{err}");
+        let (code, out, err) = run_with(&env, &["stop", "calm"]);
+        assert_eq!((code, out.as_str()), (0, "calm\n"), "{err}");
+        let (_, out, _) = run_with(&env, &["ps", "-a"]);
+        assert!(out.contains("Exited (143)"), "{out}");
+        assert_eq!(run_with(&env, &["rm", "calm"]).0, 0);
         // Following a stopped container's logs shows them and ends.
         let (code, out, _) = run_with(&env, &["logs", "-f", id]);
         assert_eq!((code, out.as_str()), (0, "hi\n"));

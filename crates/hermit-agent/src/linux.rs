@@ -620,6 +620,21 @@ impl System for Linux {
         started
     }
 
+    fn signal(&mut self, signal: i32) -> io::Result<()> {
+        wait_for(Path::new(CRUN_STATUS), CREATE_TIMEOUT)?;
+        let number = signal.to_string();
+        let args = [CRUN, "--cgroup-manager=cgroupfs", "kill", CONTAINER, number.as_str()];
+        let argv = cstrings(&args.iter().map(|a| (*a).to_string()).collect::<Vec<_>>())?;
+        let envp = cstrings(&["PATH=/bin".to_string()])?;
+        let mut attr = PosixSpawnAttr::init()?;
+        attr.set_sigmask(&SigSet::empty())?;
+        attr.set_flags(PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK)?;
+        // Its output, an error if any, goes to the console with the agent's; the agent reaps it like any child.
+        let actions = PosixSpawnFileActions::init()?;
+        posix_spawn(Path::new(CRUN), &actions, &attr, &argv, &envp).map_err(context("starting crun kill"))?;
+        Ok(())
+    }
+
     fn write_stdin(&mut self, process: Process, data: &[u8]) -> io::Result<()> {
         let stdin = self
             .runs

@@ -49,8 +49,14 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a client waits for a new monitor to listen.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long `stop` waits for a container to stop.
+/// How long `stop` waits for a container to stop once it was killed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `stop` gives a container's command after its stop signal before killing it, as Docker does.
+pub const STOP_GRACE: u64 = 10;
+/// SIGTERM, the stop signal of an image that names none.
+pub const SIGTERM: i32 = 15;
+/// SIGKILL.
+pub const SIGKILL: i32 = 9;
 /// The exit code a stopped container gets: its processes were killed, as with SIGKILL.
 pub const STOPPED: i32 = 137;
 
@@ -70,6 +76,13 @@ pub struct Launch {
     /// The image's `/etc/passwd` and `/etc/group`, for `exec -u`.
     #[serde(default)]
     pub accounts: users::Accounts,
+    /// The signal `stop` sends first: the image's `StopSignal`, or SIGTERM.
+    #[serde(default = "sigterm")]
+    pub stop_signal: i32,
+}
+
+fn sigterm() -> i32 {
+    SIGTERM
 }
 
 /// What a client asks of a monitor. The first one on a connection says what the connection is for.
@@ -83,8 +96,18 @@ pub enum Request {
         data: String,
     },
     StdinClosed,
-    /// Stop the container.
-    Stop,
+    /// Stop the container: send it `signal` (its stop signal when absent), and kill it if it has not stopped after
+    /// `timeout` seconds ([`STOP_GRACE`] when absent; 0 kills it at once).
+    Stop {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<i32>,
+    },
+    /// Send the container's command a signal: `kill`, or Ctrl-C from a foreground `run`.
+    Signal {
+        signal: i32,
+    },
     /// `exec`: start another command in the running container. The connection then carries that command's stdin,
     /// and its notices.
     Exec {
@@ -122,6 +145,8 @@ pub enum Notice {
     Failed { message: String },
     /// The answer to [`Request::Stop`].
     Stopping,
+    /// The answer to [`Request::Signal`] on a connection of its own: the signal was passed on.
+    Signalled,
     /// Everything is recorded (and with `--rm` removed); the monitor exits.
     Done,
 }
@@ -395,17 +420,28 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     let (to_run, input) = mpsc::channel();
     let (attached_tx, attached) = mpsc::channel();
     let finished = Arc::new(AtomicBool::new(false));
+    let old_agent = Arc::new(AtomicBool::new(false));
     let execs = Execs::new();
     let outcome = match ipc::Listener::bind(data_dir, id) {
         Ok(listener) => {
             let accepting = {
                 let (owner, to_run, finished) = (owner.clone(), to_run.clone(), finished.clone());
-                let (launch, execs) = (launch.clone(), execs.clone());
+                let (launch, execs, old_agent) = (launch.clone(), execs.clone(), old_agent.clone());
                 std::thread::spawn(move || {
-                    accept(listener, &owner, attached_tx, &to_run, &finished, &launch, &execs);
+                    let shared = Shared {
+                        launch,
+                        execs,
+                        old_agent,
+                    };
+                    accept(listener, &owner, attached_tx, &to_run, &finished, &shared);
                 })
             };
-            let outcome = run(&launch, &dir, &owner, &execs, &attached, to_run, &input, log);
+            let shared = Shared {
+                launch: launch.clone(),
+                execs: execs.clone(),
+                old_agent,
+            };
+            let outcome = run(&shared, &dir, &owner, &attached, to_run, &input, log);
             lock(&execs).close();
             finished.store(true, Ordering::SeqCst);
             // Wake the accepting thread so it drops the listener, which removes the socket.
@@ -439,16 +475,59 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     Ok(())
 }
 
-/// Takes connections until the monitor is finished: the first `Attach` becomes the owner, a `Stop` is passed on,
-/// an `Exec` starts its command.
+/// What the monitor's threads share.
+#[derive(Clone)]
+struct Shared {
+    launch: Arc<Launch>,
+    execs: SharedExecs,
+    /// The agent answered, and speaks a protocol older than 1.6: it takes no signals.
+    old_agent: Arc<AtomicBool>,
+}
+
+impl Shared {
+    /// Stops the container: its stop signal (or `signal`), then after `timeout` seconds the sandbox is powered off.
+    /// An agent that takes no signals is powered off at once.
+    fn stop(&self, to_run: &mpsc::Sender<Input>, timeout: Option<u64>, signal: Option<i32>) {
+        let grace = timeout.unwrap_or(STOP_GRACE);
+        if grace == 0 || self.old_agent.load(Ordering::SeqCst) {
+            let _ = to_run.send(Input::Stop);
+            return;
+        }
+        let _ = to_run.send(Input::Signal(MAIN, signal.unwrap_or(self.launch.stop_signal)));
+        let to_run = to_run.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(grace));
+            let _ = to_run.send(Input::Stop);
+        });
+    }
+
+    /// Passes `signal` on to the container's command. An agent that takes no signals can still be killed, by
+    /// powering it off; anything else it cannot take is an error.
+    fn signal(&self, to_run: &mpsc::Sender<Input>, signal: i32) -> Result<(), String> {
+        if !self.old_agent.load(Ordering::SeqCst) {
+            let _ = to_run.send(Input::Signal(MAIN, signal));
+        } else if signal == SIGKILL {
+            let _ = to_run.send(Input::Stop);
+        } else {
+            return Err(
+                "the container's guest agent is too old to pass signals on (it needs control protocol 1.6); \
+                        only SIGKILL works, or stop"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Takes connections until the monitor is finished: the first `Attach` becomes the owner, a `Stop` or `Signal` is
+/// passed on, an `Exec` starts its command.
 fn accept(
     mut listener: ipc::Listener,
     owner: &Owner,
     attached: mpsc::Sender<Box<dyn Read + Send>>,
     to_run: &mpsc::Sender<Input>,
     finished: &AtomicBool,
-    launch: &Arc<Launch>,
-    execs: &SharedExecs,
+    shared: &Shared,
 ) {
     let attached = Arc::new(Mutex::new(Some(attached)));
     while let Ok(conn) = listener.accept() {
@@ -456,13 +535,19 @@ fn accept(
             return;
         }
         let (owner, attached, to_run) = (owner.clone(), attached.clone(), to_run.clone());
-        let (launch, execs) = (launch.clone(), execs.clone());
+        let shared = shared.clone();
         // A client that connects and says nothing holds only its own thread.
         std::thread::spawn(move || {
             let ipc::Conn { mut reader, mut writer } = conn;
             match read_one(&mut reader) {
                 Some(request @ Request::Exec { .. }) => {
-                    serve_exec(&request, ipc::Conn { reader, writer }, &launch, &execs, &to_run);
+                    serve_exec(
+                        &request,
+                        ipc::Conn { reader, writer },
+                        &shared.launch,
+                        &shared.execs,
+                        &to_run,
+                    );
                 }
                 Some(Request::Attach) => {
                     let first = attached
@@ -484,9 +569,16 @@ fn accept(
                         }
                     }
                 }
-                Some(Request::Stop) => {
-                    let _ = to_run.send(Input::Stop);
+                Some(Request::Stop { timeout, signal }) => {
+                    shared.stop(&to_run, timeout, signal);
                     let _ = send(writer.as_mut(), &Notice::Stopping);
+                }
+                Some(Request::Signal { signal }) => {
+                    let notice = match shared.signal(&to_run, signal) {
+                        Ok(()) => Notice::Signalled,
+                        Err(message) => Notice::Failed { message },
+                    };
+                    let _ = send(writer.as_mut(), &notice);
                 }
                 _ => {}
             }
@@ -495,12 +587,10 @@ fn accept(
 }
 
 /// Boots the sandbox and runs the command, and any `exec`'s; its exit code, or why it could not run.
-#[allow(clippy::too_many_arguments)]
 fn run(
-    launch: &Launch,
+    shared: &Shared,
     dir: &Path,
     owner: &Owner,
-    execs: &SharedExecs,
     attached: &mpsc::Receiver<Box<dyn Read + Send>>,
     to_run: mpsc::Sender<Input>,
     input: &mpsc::Receiver<Input>,
@@ -509,14 +599,26 @@ fn run(
     let reader = attached
         .recv_timeout(ATTACH_TIMEOUT)
         .map_err(|_| "the oci-hermit that started the container went away before it attached".to_string())?;
+    let (launch, execs) = (shared.launch.as_ref(), &shared.execs);
     let detach = launch.detach;
+    let owned = shared.clone();
     std::thread::spawn(move || {
         read_messages(reader, |request: Request| match request {
             Request::Stdin { data } => {
                 b64::decode(&data).is_some_and(|bytes| to_run.send(Input::Data(MAIN, bytes)).is_ok())
             }
             Request::StdinClosed => to_run.send(Input::Eof(MAIN)).is_ok(),
-            Request::Stop => to_run.send(Input::Stop).is_ok(),
+            Request::Stop { timeout, signal } => {
+                owned.stop(&to_run, timeout, signal);
+                true
+            }
+            // Ctrl-C at a foreground run: an agent that takes no signals is stopped, as before 1.6.
+            Request::Signal { signal } => {
+                if owned.signal(&to_run, signal).is_err() {
+                    let _ = to_run.send(Input::Stop);
+                }
+                true
+            }
             Request::Attach | Request::Exec { .. } => true,
         });
         // A foreground run whose oci-hermit went away stops with it.
@@ -537,6 +639,7 @@ fn run(
         .handshake(Duration::from_secs(launch.boot_timeout_secs))
         .map_err(see_logs)?;
     notify(owner, &Notice::Booted);
+    shared.old_agent.store(version < (1, 6), Ordering::SeqCst);
     // An agent older than 1.4 would run the command outside a container (and before 1.3 not find the layer disks,
     // before 1.2 run it as root).
     if version < (1, 4) {
@@ -690,45 +793,111 @@ pub fn connect_new(data_dir: &Path, id: &str, process: &mut Process, log: &Path)
     }
 }
 
-/// Stops running container `id`: asks its monitor, then waits until it no longer runs.
-pub fn stop(containers: &Containers, data_dir: &Path, id: &str) -> Result<(), String> {
+/// Stops running container `id`: asks its monitor, then waits until it no longer runs. `timeout` and `signal` are
+/// as in [`Request::Stop`].
+pub fn stop(
+    containers: &Containers,
+    data_dir: &Path,
+    id: &str,
+    timeout: Option<u64>,
+    signal: Option<i32>,
+) -> Result<(), String> {
     let mut conn = match ipc::connect(data_dir, id) {
         Ok(conn) => conn,
         // It may have stopped by itself in the meantime.
         Err(_) if !containers.is_running(id).map_err(|e| e.to_string())? => return Ok(()),
         Err(e) => return Err(format!("cannot reach its monitor: {e}")),
     };
-    send(conn.writer.as_mut(), &Request::Stop).map_err(|e| format!("asking its monitor: {e}"))?;
+    send(conn.writer.as_mut(), &Request::Stop { timeout, signal }).map_err(|e| format!("asking its monitor: {e}"))?;
     read_messages(conn.reader, |notice: Notice| notice != Notice::Stopping);
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    let limit = STOP_TIMEOUT + Duration::from_secs(timeout.unwrap_or(STOP_GRACE));
+    let deadline = Instant::now() + limit;
     while containers.is_running(id).map_err(|e| e.to_string())? {
         if Instant::now() >= deadline {
-            return Err(format!("it did not stop within {}s", STOP_TIMEOUT.as_secs()));
+            return Err(format!("it did not stop within {}s", limit.as_secs()));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
 }
 
-/// `stop`: stops each running container, printing what was asked for; 1 if any could not be stopped.
+/// `stop`: stops the running containers, all at once, printing each as it was asked for, in order; 1 if any could
+/// not be stopped. `timeout` and `signal` are as in [`Request::Stop`].
 pub fn stop_command(
     containers: &Containers,
     data_dir: &Path,
     wanted: &[String],
+    timeout: Option<u64>,
+    signal: Option<i32>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> u8 {
+    let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+        let stopping: Vec<_> = wanted
+            .iter()
+            .map(|name| {
+                scope.spawn(move || {
+                    containers.find(name).map_err(|e| e.to_string()).and_then(|l| {
+                        if l.running {
+                            stop(containers, data_dir, &l.container.id, timeout, signal)
+                                .map_err(|reason| format!("could not stop container {}: {reason}", l.container.name))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+            })
+            .collect();
+        stopping
+            .into_iter()
+            .map(|t| t.join().unwrap_or_else(|_| Err("stopping it failed".into())))
+            .collect()
+    });
+    let mut code = 0;
+    for (name, stopped) in wanted.iter().zip(results) {
+        match stopped {
+            Ok(()) => {
+                let _ = writeln!(out, "{name}");
+            }
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                code = 1;
+            }
+        }
+    }
+    code
+}
+
+/// `kill`: sends `signal` to each running container's command, printing each as it was asked for; 1 if any is not
+/// running or could not be signalled. What the signal does is up to the command.
+pub fn kill_command(
+    containers: &Containers,
+    data_dir: &Path,
+    wanted: &[String],
+    signal: i32,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> u8 {
     let mut code = 0;
     for name in wanted {
-        let stopped = containers.find(name).map_err(|e| e.to_string()).and_then(|l| {
-            if l.running {
-                stop(containers, data_dir, &l.container.id)
-                    .map_err(|reason| format!("could not stop container {}: {reason}", l.container.name))
-            } else {
-                Ok(())
+        let sent = containers.find(name).map_err(|e| e.to_string()).and_then(|l| {
+            let container = &l.container.name;
+            if !l.running {
+                return Err(format!("container {container} is not running"));
+            }
+            let mut conn = ipc::connect(data_dir, &l.container.id)
+                .map_err(|e| format!("could not signal container {container}: cannot reach its monitor: {e}"))?;
+            send(conn.writer.as_mut(), &Request::Signal { signal })
+                .map_err(|e| format!("could not signal container {container}: {e}"))?;
+            match read_one(conn.reader.as_mut()) {
+                Some(Notice::Signalled) => Ok(()),
+                Some(Notice::Failed { message }) => Err(format!("could not signal container {container}: {message}")),
+                _ => Err(format!(
+                    "could not signal container {container}: its monitor did not answer"
+                )),
             }
         });
-        match stopped {
+        match sent {
             Ok(()) => {
                 let _ = writeln!(out, "{name}");
             }
@@ -808,8 +977,29 @@ mod tests {
     #[test]
     fn requests_and_notices_are_tagged_lines() {
         let mut line = Vec::new();
-        send(&mut line, &Request::Stop).unwrap();
+        send(
+            &mut line,
+            &Request::Stop {
+                timeout: None,
+                signal: None,
+            },
+        )
+        .unwrap();
         assert_eq!(line, b"{\"type\":\"stop\"}\n");
+        assert_eq!(
+            hermit_proto::decode::<Request>(r#"{"type":"stop","timeout":0}"#).unwrap(),
+            Request::Stop {
+                timeout: Some(0),
+                signal: None
+            }
+        );
+        let launch: Launch = serde_json::from_str(
+            r#"{"qemu":"q","args":[],"qemu_log":"l","console_log":"c","interactive":false,"detach":true,
+            "boot_timeout_secs":1,"command":{"argv":["x"],"env":[],"cwd":"/","tty":false,"size":null,"user":null,
+            "layers":[],"hostname":null}}"#,
+        )
+        .unwrap();
+        assert_eq!(launch.stop_signal, SIGTERM, "a launch.json from before #25");
         let mut lines = Vec::new();
         for notice in [Notice::Booted, Notice::Exited { code: 3 }, Notice::Done] {
             send(&mut lines, &notice).unwrap();
@@ -941,7 +1131,98 @@ mod tests {
                 passwd: "root:x:0:0::/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n".into(),
                 group: "root:x:0:\napp:x:1000:\nvideo:x:44:app\n".into(),
             },
+            stop_signal: SIGTERM,
         }
+    }
+
+    /// A detached container with the fake agent, speaking `version` and stopped with `stop_signal`, running under a
+    /// monitor on a thread.
+    #[cfg(unix)]
+    fn detached(name: &str, version: &str, stop_signal: i32) -> (PathBuf, Containers, String, Process) {
+        use crate::qemu::GuestArch;
+        let dir = scratch(name);
+        crate::qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        std::fs::write(dir.join("agent.version"), version).unwrap();
+        let containers = Containers::open(&dir).unwrap();
+        let made = containers.create(containers::Spec::default(), 0).unwrap();
+        let mut launch = launch_with(&[], None);
+        launch.qemu = dir.join("bin").join(GuestArch::X86_64.binary_name());
+        launch.qemu_log = dir.join("qemu.log");
+        launch.console_log = dir.join("console.log");
+        launch.command.argv = vec!["wait".into()];
+        launch.command.layers.clear();
+        launch.stop_signal = stop_signal;
+        launch.boot_timeout_secs = 10;
+        std::fs::write(
+            containers.dir(&made.id).join(LAUNCH),
+            serde_json::to_vec(&launch).unwrap(),
+        )
+        .unwrap();
+        let log = dir.join(MONITOR_LOG);
+        let mut process = testing::in_thread(Path::new("/unused"), &dir, &made.id, &log).unwrap();
+        let mut conn = connect_new(&dir, &made.id, &mut process, &log).unwrap();
+        send(conn.writer.as_mut(), &Request::Attach).unwrap();
+        assert_eq!(next(&mut conn), Notice::Booted);
+        assert_eq!(next(&mut conn), Notice::Started);
+        (dir, containers, made.id, process)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_sends_the_stop_signal_then_kills_after_the_grace_period() {
+        let _guard = crate::qemu::testing::exec_lock();
+        // A command that ends on SIGTERM ends with 143, well within its grace period.
+        let (dir, containers, id, _process) = detached("monitor-stop-term", "1,6", SIGTERM);
+        let started = Instant::now();
+        assert_eq!(stop(&containers, &dir, &id, Some(30), None), Ok(()));
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+        assert_eq!(containers.find(&id).unwrap().state.exit_code, Some(143));
+
+        // One that ignores its stop signal is killed once the grace period is over; kill passes signals on.
+        let (dir, containers, id, _process) = detached("monitor-stop-int", "1,6", 2);
+        let wanted = [id.clone()];
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(kill_command(&containers, &dir, &wanted, 10, &mut out, &mut err), 0);
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{id}\n"));
+        assert!(containers.find(&id).unwrap().running, "SIGUSR1 is ignored");
+        let started = Instant::now();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            stop_command(&containers, &dir, &wanted, Some(1), None, &mut out, &mut err),
+            0
+        );
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert_eq!(containers.find(&id).unwrap().state.exit_code, Some(STOPPED));
+        // Its stop signal can be chosen instead.
+        let (dir, containers, id, _process) = detached("monitor-stop-signal", "1,6", 2);
+        assert_eq!(stop(&containers, &dir, &id, Some(30), Some(SIGTERM)), Ok(()));
+        assert_eq!(containers.find(&id).unwrap().state.exit_code, Some(143));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_guest_without_signals_is_stopped_at_once_and_only_killed() {
+        let _guard = crate::qemu::testing::exec_lock();
+        let (dir, containers, id, _process) = detached("monitor-old-agent", "1,5", SIGTERM);
+        let wanted = [id.clone()];
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(kill_command(&containers, &dir, &wanted, SIGTERM, &mut out, &mut err), 1);
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("too old to pass signals on"), "{err}");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(kill_command(&containers, &dir, &wanted, SIGKILL, &mut out, &mut err), 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while containers.find(&id).unwrap().running {
+            assert!(Instant::now() < deadline, "SIGKILL did not stop it");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(containers.find(&id).unwrap().state.exit_code, Some(STOPPED));
+        // stop does not wait out a grace period it cannot use.
+        let (dir, containers, id, _process) = detached("monitor-old-agent-stop", "1,5", SIGTERM);
+        let started = Instant::now();
+        assert_eq!(stop(&containers, &dir, &id, Some(30), None), Ok(()));
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(containers.find(&id).unwrap().state.exit_code, Some(STOPPED));
     }
 
     #[test]
@@ -982,7 +1263,7 @@ mod tests {
         assert_eq!(command.env, ["PATH=/usr/bin", "EXTRA=1"]);
         let as_root = exec_command(&launch, &exec_request(&["id"], false, Some("0"))).unwrap();
         assert_eq!(as_root.user, None);
-        assert!(exec_command(&launch, &Request::Stop).is_err());
+        assert!(exec_command(&launch, &Request::Signal { signal: 9 }).is_err());
     }
 
     #[cfg(unix)]
@@ -1013,6 +1294,7 @@ mod tests {
             detach: false,
             boot_timeout_secs: 10,
             accounts: users::Accounts::default(),
+            stop_signal: SIGTERM,
         };
         std::fs::write(
             containers.dir(&made.id).join(LAUNCH),
@@ -1106,10 +1388,13 @@ mod tests {
         let dir = scratch("monitor-stop-idle");
         let containers = Containers::open(&dir).unwrap();
         let made = containers.create(containers::Spec::default(), 0).unwrap();
-        assert_eq!(stop(&containers, &dir, &made.id), Ok(()));
+        assert_eq!(stop(&containers, &dir, &made.id, None, None), Ok(()));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let wanted = [made.name.clone(), "ghost".into()];
-        assert_eq!(stop_command(&containers, &dir, &wanted, &mut out, &mut err), 1);
+        assert_eq!(
+            stop_command(&containers, &dir, &wanted, None, None, &mut out, &mut err),
+            1
+        );
         assert_eq!(String::from_utf8(out).unwrap(), format!("{}\n", made.name));
         assert_eq!(
             String::from_utf8(err).unwrap(),
@@ -1117,8 +1402,19 @@ mod tests {
         );
         // A running container whose monitor cannot be reached is reported.
         let running = containers.start(&made.id, 0).unwrap();
-        let err = stop(&containers, &dir, &made.id).unwrap_err();
+        let err = stop(&containers, &dir, &made.id, None, None).unwrap_err();
         assert!(err.starts_with("cannot reach its monitor"), "{err}");
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(kill_command(&containers, &dir, &wanted, SIGKILL, &mut out, &mut err), 1);
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("cannot reach its monitor"), "{err}");
+        assert!(err.contains("no such container: ghost"), "{err}");
         drop(running);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            kill_command(&containers, &dir, &wanted[..1], SIGKILL, &mut out, &mut err),
+            1
+        );
+        assert!(String::from_utf8(err).unwrap().contains("is not running"));
     }
 }

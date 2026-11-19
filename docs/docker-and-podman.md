@@ -27,7 +27,8 @@ nothing out.
 | `--network` (planned) | `bridge`, `host`, user networks. | Only `none` and a pod's shared network. |
 | `--privileged`, `--cap-add`, `--device`, `--pid host`, `--ipc host` (planned) | Accepted. | Refused. |
 | `--cpus`, `--memory` | Limits for the container. | The size of the emulated VM. |
-| `stop` | `SIGTERM`, then `SIGKILL` after 10 seconds. | Powers the sandbox off at once: exit code 137 (a grace period comes with #25). |
+| `stop` | The stop signal (`SIGTERM`), then `SIGKILL` after 10 seconds. | The same; the kill is powering the sandbox off, exit code 137. |
+| `kill`, Ctrl-C | `kill` sends any signal; `run` passes on the signals it gets. | The same, to the container's command only (not to `exec`'s, as with Docker). |
 | Running containers | Kept by a daemon (`dockerd`) or, in Podman, by a `conmon` process per container. | Kept by a monitor process per container, as Podman's `conmon`; no daemon. A `run` without `-d` takes its container down with it if it is killed. |
 | `exec -u <name>` | Looks the name up in the container's current `/etc/passwd`. | Looks it up in the image's: a user added inside the running container needs its number. `exec -d` is not supported yet. |
 | Containers | Kept after they stop, until `rm`, with their files. | Kept after they stop, until `rm` (`--rm` removes them at once), but only as a record and the output: name, image, command, exit code and `logs`. The files a command changed go with its sandbox. |

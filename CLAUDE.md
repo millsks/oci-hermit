@@ -108,8 +108,10 @@ Everything runs through pixi.
   monitor stop the VM; only `-d` survives its `run`. `monitor.log` lives in the run dir, not the container dir, so
   `--rm` cannot delete the reason a monitor failed. Unix socket paths must fit in 103 bytes: tests use `/tmp` scratch
   folders (`qemu::testing::scratch`), since macOS's `$TMPDIR` is too deep. Tests run the monitor on a thread
-  (`Env::start_monitor` = `monitor::testing::in_thread`). `stop` powers the sandbox off at once (137); SIGTERM first
-  is #25. `exec` (protocol 1.5) is another connection to the monitor: it sends `Exec` with a process number from 1
+  (`Env::start_monitor` = `monitor::testing::in_thread`). `stop` sends the image's `StopSignal` (SIGTERM) through
+  `Signal` (protocol 1.6, `crun kill` in the guest), then powers the sandbox off after `-t` (10 s; 137); `kill` and
+  Ctrl-C at a foreground `run` (tokio `signal`) send `Signal` too. A container's command is PID 1 of its namespace,
+  so signals it has no handler for are ignored: `stop` on `sleep` takes the full grace period, as in Docker. `exec` (protocol 1.5) is another connection to the monitor: it sends `Exec` with a process number from 1
   (`run`'s command is 0, and `process` is left out of messages about it, so 1.4 peers are unaffected); the agent
   runs it with `crun exec --process`, and `relay` routes its I/O to that client only, never to `container.log`.
   `exec -u` resolves against the image's `/etc/passwd` and `/etc/group`, which `run` saves in `launch.json`
