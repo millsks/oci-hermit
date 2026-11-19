@@ -1615,10 +1615,6 @@ refused with the issue that adds them, rather than ignored:</p>
 <td><a href="https://github.com/millsks/oci-hermit/issues/22">#22</a></td>
 </tr>
 <tr>
-<td><code>--name</code></td>
-<td><a href="https://github.com/millsks/oci-hermit/issues/20">#20</a></td>
-</tr>
-<tr>
 <td><code>-p</code>, <code>--publish</code></td>
 <td><a href="https://github.com/millsks/oci-hermit/issues/27">#27</a></td>
 </tr>
@@ -1632,7 +1628,8 @@ refused with the issue that adds them, rather than ignored:</p>
 </tr>
 </tbody>
 </table>
-<p><code>--rm</code> is accepted and changes nothing, because nothing is kept after a <code>run</code> anyway. The sandbox has no network,
+<p>Each <code>run</code> is kept as a container that <code>oci-hermit ps -a</code> lists with its exit code, until <code>oci-hermit rm</code> removes
+it; <code>--rm</code> removes it as soon as the command ends. Give it a name with <code>--name</code>. The sandbox has no network,
 so a command that downloads something fails (see <a href="../../how-it-works/#no-network-on-purpose">How it works</a>).</p>
 
 

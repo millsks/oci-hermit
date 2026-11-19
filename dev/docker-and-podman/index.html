@@ -1541,8 +1541,8 @@ nothing out.</p>
 </tr>
 <tr>
 <td>Containers</td>
-<td>Kept after they stop, until <code>rm</code>.</td>
-<td>A <code>run</code> leaves nothing behind; detached, named containers come with <a href="https://github.com/millsks/oci-hermit/issues/20">#20</a> and <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>. <code>--rm</code> is accepted and changes nothing.</td>
+<td>Kept after they stop, until <code>rm</code>, with their files.</td>
+<td>Kept after they stop, until <code>rm</code> (<code>--rm</code> removes them at once), but only as a record: name, image, command and exit code. The files a command changed go with its sandbox. Detached containers come with <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>.</td>
 </tr>
 <tr>
 <td>Building images</td>

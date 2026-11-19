@@ -1462,7 +1462,7 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 <tbody>
 <tr>
 <td><code>OCI_HERMIT_DATA_DIR</code></td>
-<td>Where the image store lives (in <code>images/</code> under it).</td>
+<td>Where the image store (<code>images/</code>) and the containers (<code>containers/</code>) live.</td>
 <td>The platform's per-user data folder: see <a href="#where-things-are-kept">Where things are kept</a>.</td>
 </tr>
 <tr>
@@ -1566,6 +1566,12 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 <td><code>$XDG_DATA_HOME/oci-hermit/images</code>, or <code>~/.local/share/oci-hermit/images</code></td>
 </tr>
 <tr>
+<td>Containers</td>
+<td><code>%LOCALAPPDATA%\oci-hermit\containers</code></td>
+<td><code>~/Library/Application Support/oci-hermit/containers</code></td>
+<td><code>$XDG_DATA_HOME/oci-hermit/containers</code>, or <code>~/.local/share/oci-hermit/containers</code></td>
+</tr>
+<tr>
 <td>Each sandbox's initramfs and logs</td>
 <td><code>%TMP%\oci-hermit\sandbox-*</code></td>
 <td><code>$TMPDIR/oci-hermit/sandbox-*</code></td>
@@ -1585,6 +1591,9 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 </tr>
 </tbody>
 </table>
+<p>Each container is a folder named by its ID in <code>containers/</code>: <code>container.json</code> (what it runs, from which image, its
+name) and <code>state.json</code> (running or exited, its exit code). <code>oci-hermit rm</code> removes it; <code>run --rm</code> removes it when
+the command ends.</p>
 <p>oci-hermit never writes beside itself, so its folder can be read-only. It does not delete old <code>sandbox-*</code> folders:
 each holds the initramfs (about the image's size) and the logs of one <code>run</code> or <code>machine boot</code>. Delete them when you
 no longer need the logs.</p>

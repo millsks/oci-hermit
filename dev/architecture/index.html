@@ -1484,6 +1484,10 @@
 <td><code>load -i</code>: OCI layouts and <code>docker save</code> archives (old and Docker 25+) into the store; unnamed images go by ID.</td>
 </tr>
 <tr>
+<td><code>crates/oci-hermit/src/containers.rs</code></td>
+<td>The container store: one folder per container in the user's data folder (<code>container.json</code>, <code>state.json</code>), names kept unique under a lock, and a lock held by the process running each container, so a crashed <code>run</code> is not shown as running; <code>ps</code> and <code>rm</code>.</td>
+</tr>
+<tr>
 <td><code>crates/oci-hermit/src/images.rs</code></td>
 <td>The image commands over the store: <code>images</code>, <code>rmi</code>, <code>inspect</code>, <code>tag</code>, <code>save</code>, <code>image prune</code>, <code>image history</code>, <code>image exists</code>, <code>system df</code>.</td>
 </tr>

@@ -1767,7 +1767,11 @@ store does not have also leads to a pull.</p>
 </tr>
 <tr>
 <td><code>-d/--detach is not supported yet (#22); run it without -d/--detach</code></td>
-<td>The flag is planned, not implemented; the same for <code>--name</code>, <code>-p</code>, <code>-v</code> and <code>--pod</code>.</td>
+<td>The flag is planned, not implemented; the same for <code>-p</code>, <code>-v</code> and <code>--pod</code>.</td>
+</tr>
+<tr>
+<td><code>the container name "&lt;name&gt;" is already in use by container …</code></td>
+<td>A kept container has that name. Remove it (<code>oci-hermit rm &lt;name&gt;</code>), or choose another name; <code>--rm</code> stops runs from keeping their containers.</td>
 </tr>
 <tr>
 <td><code>--memory 10m: use e.g. 512m or 2g, at least 64m</code></td>
