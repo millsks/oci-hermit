@@ -111,17 +111,17 @@ See [Performance and limits](../performance.md) for what to expect from emulatio
 
 ## What it cannot do yet
 
-Every `run` is a fresh sandbox, gone when the command ends; there are no containers to come back to. These flags are
-refused with the issue that adds them, rather than ignored:
+Every `run` is a fresh sandbox, and the files a command changed are gone when it ends. `run -d` keeps a container
+running in the background (follow it with `oci-hermit logs -f`, end it with `oci-hermit stop`), but nothing can be
+run inside it yet (`exec`, #22). These flags are refused with the issue that adds them, rather than ignored:
 
 ```console
-$ oci-hermit run -d public.ecr.aws/docker/library/alpine:3.20
-oci-hermit: -d/--detach is not supported yet (#22); run it without -d/--detach
+$ oci-hermit run -p 8080:80 public.ecr.aws/docker/library/nginx:alpine
+oci-hermit: -p/--publish is not supported yet (#27); run it without -p/--publish
 ```
 
 | Flag | Issue |
 | --- | --- |
-| `-d`, `--detach` | #22 |
 | `-p`, `--publish` | #27 |
 | `-v`, `--volume` | #33 |
 | `--pod` | #35 |

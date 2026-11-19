@@ -101,6 +101,11 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
   started with `-accel tcg -nodefaults -no-user-config -display none -no-reboot`, the console on a log file, and no
   network yet. It exits with the host tool: `-run-with exit-with-parent=on` on Linux and macOS, a kill-on-close Job
   Object on Windows. `oci-hermit machine boot` boots one sandbox until the agent is ready, as a self-check.
+- Container monitor (#22): each container's sandbox belongs to a background `oci-hermit __monitor` process of its own,
+  like Podman's `conmon`, with no daemon. It holds the container's running lock, owns QEMU, writes the output to the
+  container's log and records the exit code. Other commands reach it over an owner-only local channel (a Unix
+  socket in the data folder; a named pipe on Windows): `run` attaches to it, `stop` asks it to stop. A foreground
+  `run` that goes away takes its container with it; `run -d` leaves it running.
 - Control client: talks to the guest agent over the virtio-serial port `org.oci-hermit.control`. QEMU wires that port to its own stdin and stdout, which the host tool holds as an anonymous pipe pair, so nothing on the filesystem or network can reach it. Messages are newline-delimited JSON (`hermit-proto`), at most 64 KiB a line; a session opens with `Hello`/`Ready` (major versions must match) and ends with `Shutdown`/`ShuttingDown`. Anything else from either side gets an error reply, and the host never trusts the guest to behave.
 - 9P file server: serves bind-mounted folders and enforces the mount policy.
 - Port publisher: listens on 127.0.0.1 and relays connections into the guest.

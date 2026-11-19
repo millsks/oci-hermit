@@ -14,6 +14,10 @@ the `qemu/` and `guest/` folders beside the real file.
 | Command | What it does |
 | --- | --- |
 | [`run`](#run) | Run a command from an image in a new sandbox |
+| [`ps`](#ps) | List containers |
+| [`logs`](#logs) | Show a container's output |
+| [`stop`](#stop) | Stop running containers |
+| [`rm`](#rm) | Remove containers |
 | [`pull`](#pull) | Pull an image from a registry |
 | [`manifest inspect`](#manifest-inspect) | Show an image's platforms and digests in a registry, without pulling |
 | [`load`](#load) | Load images from a `docker save` archive or an OCI layout |
@@ -71,7 +75,7 @@ oci-hermit run [OPTIONS] <IMAGE> [COMMAND]...
 | `-m`, `--memory <MEMORY>` | Memory for the sandbox: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix, as Docker. At least `64m`. Default: 512 MiB for a stored image, which runs from its layer disks; for an image run from a file, twice its size plus 256 MiB. |
 | `--name <NAME>` | The container's name: a letter or digit, then letters, digits, `_`, `.` or `-`. Without one, a name such as `quiet_nautilus` is made up. A name stays taken until the container is removed. |
 | `--rm` | Remove the container when the command ends. Without it the container is kept, exited, for `ps -a`, until `rm`. |
-| `-d`, `--detach` | Planned (#22). Refused today. |
+| `-d`, `--detach` | Run in the background: print the container's ID once its command started, and leave it running until it exits or is stopped. See [logs](#logs) and [stop](#stop). With `-i`, its stdin stays open (nothing writes to it yet), so `-dit … sh` keeps a shell waiting. |
 | `-p`, `--publish <PUBLISH>` | Planned (#27): `[127.0.0.1:]HOST:CONTAINER`, always bound to 127.0.0.1. Refused today. |
 | `-v`, `--volume <VOLUME>` | Planned (#33): `SRC:DST`, with `:ro` or `:rw`; read-only by default. Refused today. |
 | `--pod <POD>` | Planned (#35). Refused today. |
@@ -80,16 +84,22 @@ The command runs in the image's working directory, with the image's environment,
 `/etc/passwd` entry if the image does not set it.
 
 Every `run` is recorded as a container (see [ps](#ps)), with its exit code, or with 125 and the reason if
-oci-hermit could not run it. Only the record is kept: the files the command changed are thrown away with the
-sandbox.
+oci-hermit could not run it. Only the record and the output (see [logs](#logs)) are kept: the files the command
+changed are thrown away with the sandbox.
+
+Each container's sandbox belongs to a small background `oci-hermit` process of its own, its monitor, which keeps
+QEMU, writes the output to the container's log and records how it ended. A `run` without `-d` stays attached to it:
+if that `run` goes away (the terminal closes, the process is killed, Ctrl-C without `-t`), the monitor stops the
+container. With `-d` the container runs on after `run` returns. There is no daemon: nothing runs when no container
+does.
 
 ```console
 $ oci-hermit run public.ecr.aws/docker/library/alpine:3.20 cat /etc/alpine-release
 3.20.10
 $ oci-hermit run -u nobody public.ecr.aws/docker/library/alpine:3.20 id
 uid=65534(nobody) gid=65534(nobody)
-$ oci-hermit run -d public.ecr.aws/docker/library/alpine:3.20
-oci-hermit: -d/--detach is not supported yet (#22); run it without -d/--detach
+$ oci-hermit run -d --name ticker public.ecr.aws/docker/library/alpine:3.20 sh -c 'while true; do date; sleep 5; done'
+b472a05e48e7c828a74996b9a0c363491ec4e605b00c42ff03bf933847940407
 ```
 
 ```bash
@@ -99,7 +109,12 @@ oci-hermit run --platform linux/amd64 --cpus 2 -m 2g ./app.tar
 
 **Exit codes:** the command's own exit code (128 plus the signal number if a signal ended it), or **125** when
 oci-hermit itself fails: the image cannot be found or read, a flag is refused, the sandbox does not boot, or the
-command cannot be started.
+command cannot be started. With `-d`, 0 once the command started.
+
+!!! warning "Windows: capture `run -d`'s ID in a file, not with `$(...)`"
+    On Windows, `id=$(oci-hermit run -d …)` does not return while the container runs: the container's monitor
+    inherits the shell's output pipe (#105). Write the ID to a file instead (`oci-hermit run -d … > ticker.id`), or
+    find it later with `oci-hermit ps`.
 
 Set `OCI_HERMIT_TIMINGS=1` to print how long each phase took, on stderr:
 
@@ -129,24 +144,60 @@ CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS   
 8c3d5e0a1b2f   alpine:3.20   "cat /etc/alpine-rel…"   2 hours ago      Exited (0) 2 hours ago              quiet_nautilus
 ```
 
-A container is running while the `run` that started it is. If that `run` was killed, the container shows as
-`Exited (unknown)`.
+A container is running while its monitor is (see [run](#run)). If the monitor was killed, the container shows as
+`Exited (unknown)`; one that was stopped shows `Exited (137)`.
+
+## logs
+
+Show what a container's command printed, its stdout on stdout and its stderr on stderr, as it printed it.
+
+```
+oci-hermit logs [-f] <CONTAINER>
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-f`, `--follow` | Keep showing new output until the container stops. |
+
+Every container keeps its output, whether it ran with `-d` or not, until it is removed. The log grows for as long
+as the container runs; there is no size limit yet.
+
+```console
+$ oci-hermit logs -f ticker
+Thu Nov 19 14:02:10 UTC 2026
+Thu Nov 19 14:02:15 UTC 2026
+```
+
+## stop
+
+Stop running containers. Prints each one as it was given, once it has stopped; exits 1 if any could not be stopped.
+A container that is not running is left as it is, and printed too.
+
+```
+oci-hermit stop <CONTAINERS>...
+```
+
+The sandbox is powered off at once, so the container's processes are killed and it is recorded with exit code
+137. Sending `SIGTERM` first and waiting, as `docker stop` does, comes with #25.
 
 ## rm
 
-Remove containers that are not running. Prints each one as it was given; exits 1 if any could not be removed.
+Remove containers that are not running, with their logs. Prints each one as it was given; exits 1 if any could not
+be removed.
 
 ```
 oci-hermit rm [-f] <CONTAINERS>...
 ```
 
-A container is named by its name, its ID, or the start of its ID. `-f` is accepted; stopping a running container
-first is planned (#22), so a running one is refused either way.
+A container is named by its name, its ID, or the start of its ID. A running container is refused unless `-f`
+(`--force`) is given, which [stops](#stop) it first.
 
 ```console
 $ oci-hermit rm quiet_nautilus 1f0c
 quiet_nautilus
-oci-hermit: container job is running; let its `run` finish first (stop and rm -f are planned, #22)
+oci-hermit: container job is running; stop it first (oci-hermit stop job), or remove it with rm -f
+$ oci-hermit rm -f job
+job
 ```
 
 ## pull
@@ -479,7 +530,7 @@ oci-hermit 0.2.0 (control protocol 1.4)
 | Code | When |
 | --- | --- |
 | 0 | Success. |
-| 1 | The command failed: a pull, load or image command failed, `image exists` found nothing, `machine info` found no usable QEMU, `machine boot` did not boot. |
+| 1 | The command failed: a pull, load, image or container command (`logs`, `stop`, `rm`) failed, `image exists` found nothing, `machine info` found no usable QEMU, `machine boot` did not boot. |
 | 2 | The command is not implemented yet, or the command line is wrong (clap's usage errors). |
 | 125 | `run`: oci-hermit itself failed before or around the command. |
 | other | `run`: the command's own exit code. |
@@ -490,20 +541,18 @@ These are part of the command line already, so `--help` lists them, but they do 
 `oci-hermit: `<command>` is not implemented yet; see …/ROADMAP.md` and exits 2:
 
 ```console
-$ oci-hermit logs web
-oci-hermit: `logs` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
+$ oci-hermit exec web sh
+oci-hermit: `exec` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
 ```
 
 | Command | Will | Issue |
 | --- | --- | --- |
 | `exec [-i] [-t] <CONTAINER> <COMMAND>...` | run a command in a running container | #22 |
-| `logs [-f] <CONTAINER>` | show a container's logs | #22 |
-| `stop <CONTAINERS>...` | stop containers | #22 |
 | `cp <SOURCE> <DESTINATION>` | copy files between a container and the host | #23 |
 | `pod create --name <NAME> [-p <PUBLISH>]`, `pod rm <POD>`, `pod ps` | pods: containers that share localhost | #35 |
 | `compose up [-d] [-f <FILE>]`, `compose down [-f <FILE>]` | a Compose subset | #36, #37 |
 
-`run -d`, `-p`, `-v` and `--pod` are refused, with their issue, rather than ignored (see [run](#run)).
+`run -p`, `-v` and `--pod` are refused, with their issue, rather than ignored (see [run](#run)).
 
 Not in the command line yet, and planned:
 

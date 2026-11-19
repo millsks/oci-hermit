@@ -46,16 +46,22 @@ Set a variable for one command or for the session:
 | --- | --- | --- | --- |
 | Image store | `%LOCALAPPDATA%\oci-hermit\images` | `~/Library/Application Support/oci-hermit/images` | `$XDG_DATA_HOME/oci-hermit/images`, or `~/.local/share/oci-hermit/images` |
 | Containers | `%LOCALAPPDATA%\oci-hermit\containers` | `~/Library/Application Support/oci-hermit/containers` | `$XDG_DATA_HOME/oci-hermit/containers`, or `~/.local/share/oci-hermit/containers` |
+| Containers' control sockets | named pipes, `\\.\pipe\oci-hermit-<id>` | `~/Library/Application Support/oci-hermit/sockets` | `$XDG_DATA_HOME/oci-hermit/sockets`, or `~/.local/share/oci-hermit/sockets` |
 | Each sandbox's initramfs and logs | `%TMP%\oci-hermit\sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*`, or `/tmp/oci-hermit/sandbox-*` |
 | QEMU, kernel and agent | the `qemu/` and `guest/` folders beside `oci-hermit` | the same | the same |
 | A registry's own CAs and client certificate | `~\.config\containers\certs.d\<host><port>\`, or Docker's | `~/.config/containers/certs.d/<host:port>/`, or `/etc/containers/certs.d`, or Docker's | the same as macOS |
 
 Each container is a folder named by its ID in `containers/`: `container.json` (what it runs, from which image, its
-name) and `state.json` (running or exited, its exit code). `oci-hermit rm` removes it; `run --rm` removes it when
-the command ends.
+name), `state.json` (running or exited, its exit code), `container.log` (its output, for `logs`) and `launch.json`
+(how its monitor starts the sandbox). `oci-hermit rm` removes it; `run --rm` removes it when the command ends.
+
+A running container's monitor listens for `stop` on a Unix socket in `sockets/`, a folder only you can open, or on
+Windows on a named pipe that refuses other machines. A socket's path must fit in 103 bytes, so on Linux and macOS
+`OCI_HERMIT_DATA_DIR` cannot be a very deep folder: `run` says so if it is.
 
 oci-hermit never writes beside itself, so its folder can be read-only. It does not delete old `sandbox-*` folders:
-each holds the initramfs (about the image's size) and the logs of one `run` or `machine boot`. Delete them when you
+each holds the initramfs (about the image's size) and the logs of one `run` or `machine boot` (`console.log`,
+`qemu.log`, and for a `run` the monitor's `monitor.log`). Delete them when you
 no longer need the logs.
 
 The image store is an [OCI image layout](https://github.com/opencontainers/image-spec/blob/main/image-layout.md):

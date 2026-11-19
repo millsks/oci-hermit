@@ -182,7 +182,7 @@ pub fn run_dir(base: &Path) -> io::Result<PathBuf> {
 }
 
 /// A command to run in the guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Command {
     pub argv: Vec<String>,
     pub env: Vec<String>,
@@ -196,6 +196,15 @@ pub struct Command {
     pub layers: Vec<String>,
     /// The container's hostname; the agent picks one when `None`.
     pub hostname: Option<String>,
+}
+
+/// What [`Sandbox::run`] takes while a command runs: bytes for its stdin, the end of that, or a request to stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    Data(Vec<u8>),
+    Eof,
+    /// Stop waiting for the command: [`Sandbox::run`] returns `None` and the caller stops the sandbox.
+    Stop,
 }
 
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
@@ -367,17 +376,8 @@ impl Sandbox {
         }
     }
 
-    /// Run one command in the guest and relay it: output to `stdout` and `stderr`, input from `stdin` (chunks,
-    /// then `None` at end of file). Returns the command's exit code. There is no overall timeout: an interactive
-    /// shell may sit idle. A QEMU that exits ends the session with an error.
-    pub fn run(
-        &mut self,
-        command: &Command,
-        stdin: Option<&Receiver<Option<Vec<u8>>>>,
-        stdout: &mut impl Write,
-        stderr: &mut impl Write,
-        start_timeout: Duration,
-    ) -> Result<i32, SupervisorError> {
+    /// Start one command in the guest, waiting up to `start_timeout` for the agent to say it started.
+    pub fn start(&mut self, command: &Command, start_timeout: Duration) -> Result<(), SupervisorError> {
         self.send(&HostMessage::Run {
             argv: command.argv.clone(),
             env: command.env.clone(),
@@ -391,31 +391,43 @@ impl Sandbox {
         })?;
         let deadline = Instant::now() + start_timeout;
         match self.receive(deadline, start_timeout)? {
-            GuestMessage::Started { .. } => {}
-            GuestMessage::Error { message } => return Err(SupervisorError::Refused { message }),
-            other => return Err(SupervisorError::Protocol(format!("{other:?} instead of started"))),
+            GuestMessage::Started { .. } => Ok(()),
+            GuestMessage::Error { message } => Err(SupervisorError::Refused { message }),
+            other => Err(SupervisorError::Protocol(format!("{other:?} instead of started"))),
         }
-        if stdin.is_none() {
+    }
+
+    /// Relay the command [`Sandbox::start`] started: its output to `stdout` and `stderr`, and from `input` its
+    /// stdin when `interactive` (otherwise stdin is closed at once) and any request to stop. Returns the command's
+    /// exit code, or `None` when asked to stop first. There is no overall timeout: an interactive shell may sit
+    /// idle. A QEMU that exits ends the session with an error.
+    pub fn relay(
+        &mut self,
+        input: &Receiver<Input>,
+        interactive: bool,
+        stdout: &mut impl Write,
+        stderr: &mut impl Write,
+    ) -> Result<Option<i32>, SupervisorError> {
+        if !interactive {
             self.send(&HostMessage::StdinClosed)?;
         }
-        let mut stdin_open = stdin.is_some();
+        let mut stdin_open = interactive;
         loop {
-            if let (true, Some(input)) = (stdin_open, stdin) {
-                while let Ok(chunk) = input.try_recv() {
-                    match chunk {
-                        Some(bytes) => {
-                            for piece in bytes.chunks(hermit_proto::CHUNK) {
-                                self.send(&HostMessage::Stdin {
-                                    data: hermit_proto::b64::encode(piece),
-                                })?;
-                            }
-                        }
-                        None => {
-                            self.send(&HostMessage::StdinClosed)?;
-                            stdin_open = false;
-                            break;
+            while let Ok(next) = input.try_recv() {
+                match next {
+                    Input::Stop => return Ok(None),
+                    Input::Data(bytes) if stdin_open => {
+                        for piece in bytes.chunks(hermit_proto::CHUNK) {
+                            self.send(&HostMessage::Stdin {
+                                data: hermit_proto::b64::encode(piece),
+                            })?;
                         }
                     }
+                    Input::Eof if stdin_open => {
+                        self.send(&HostMessage::StdinClosed)?;
+                        stdin_open = false;
+                    }
+                    Input::Data(_) | Input::Eof => {}
                 }
             }
             let message = match self.from_agent.recv_timeout(Duration::from_millis(20)) {
@@ -455,7 +467,7 @@ impl Sandbox {
                     sink.write_all(&bytes)?;
                     sink.flush()?;
                 }
-                GuestMessage::Exited { code } => return Ok(code),
+                GuestMessage::Exited { code } => return Ok(Some(code)),
                 GuestMessage::Error { message } => return Err(SupervisorError::Refused { message }),
                 other => return Err(SupervisorError::Protocol(format!("{other:?} during a run"))),
             }

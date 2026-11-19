@@ -125,10 +125,18 @@ impl Listed {
 pub enum ContainerError {
     Io(std::io::Error),
     BadName(String),
-    NameInUse { name: String, id: String },
+    NameInUse {
+        name: String,
+        id: String,
+    },
     NotFound(String),
     Ambiguous(String),
     Running(String),
+    /// `rm -f` could not stop a running container.
+    Stop {
+        name: String,
+        reason: String,
+    },
     Invalid(String),
 }
 
@@ -156,8 +164,9 @@ impl std::fmt::Display for ContainerError {
             }
             ContainerError::Running(name) => write!(
                 f,
-                "container {name} is running; let its `run` finish first (stop and rm -f are planned, #22)"
+                "container {name} is running; stop it first (oci-hermit stop {name}), or remove it with rm -f"
             ),
+            ContainerError::Stop { name, reason } => write!(f, "could not stop container {name}: {reason}"),
             ContainerError::Invalid(what) => write!(f, "the container store: {what}"),
         }
     }
@@ -187,6 +196,16 @@ impl Containers {
         let dir = data_dir.join("containers");
         std::fs::create_dir_all(&dir)?;
         Ok(Containers { dir })
+    }
+
+    /// The folder that holds container `id`'s files.
+    pub fn dir(&self, id: &str) -> PathBuf {
+        self.dir.join(id)
+    }
+
+    /// Whether a process is running container `id` now.
+    pub fn is_running(&self, id: &str) -> std::io::Result<bool> {
+        held(&self.dir.join(id).join(RUNNING))
     }
 
     /// Holds `containers/lock` until dropped.
@@ -421,16 +440,29 @@ pub fn ps(
     Ok(())
 }
 
-/// `rm`: removes each container that is not running, printing what was asked for; 1 if any could not go.
-pub fn rm(containers: &Containers, wanted: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
+/// Stops a running container, given its ID, for `rm -f`.
+pub type Stopper<'a> = &'a dyn Fn(&str) -> Result<(), String>;
+
+/// `rm`: removes each container, printing what was asked for; 1 if any could not go. A running container is
+/// refused, or with `stop` (`rm -f`) stopped first.
+pub fn rm(
+    containers: &Containers,
+    wanted: &[String],
+    stop: Option<Stopper<'_>>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> u8 {
     let mut code = 0;
     for name in wanted {
         let removed = containers.find(name).and_then(|l| {
             if l.running {
-                Err(ContainerError::Running(l.container.name))
-            } else {
-                containers.remove(&l.container.id)
+                let stop = stop.ok_or_else(|| ContainerError::Running(l.container.name.clone()))?;
+                stop(&l.container.id).map_err(|reason| ContainerError::Stop {
+                    name: l.container.name.clone(),
+                    reason,
+                })?;
             }
+            containers.remove(&l.container.id)
         });
         match removed {
             Ok(()) => {
@@ -749,8 +781,16 @@ mod tests {
         ));
         assert!(matches!(containers.remove(&made.id), Err(ContainerError::Running(_))));
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(rm(&containers, &["job".into()], &mut out, &mut err), 1);
+        assert_eq!(rm(&containers, &["job".into()], None, &mut out, &mut err), 1);
         assert!(String::from_utf8(err).unwrap().contains("container job is running"));
+        // rm -f stops it first; a stop that fails leaves it.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let refuse = |_: &str| Err("the monitor is not answering".to_string());
+        assert_eq!(rm(&containers, &["job".into()], Some(&refuse), &mut out, &mut err), 1);
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "oci-hermit: could not stop container job: the monitor is not answering\n"
+        );
 
         running.exited(Some(3), None, 1400).unwrap();
         let seen = containers.find("job").unwrap();
@@ -769,7 +809,7 @@ mod tests {
 
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(
-            rm(&containers, &["job".into(), "nothing".into()], &mut out, &mut err),
+            rm(&containers, &["job".into(), "nothing".into()], None, &mut out, &mut err),
             1
         );
         assert_eq!(String::from_utf8(out).unwrap(), "job\n");
@@ -778,6 +818,29 @@ mod tests {
             "oci-hermit: no such container: nothing\n"
         );
         assert!(containers.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rm_force_stops_a_running_container_then_removes_it() {
+        let containers = Containers::open(&scratch("containers-rm-force")).unwrap();
+        let made = containers.create(spec(Some("job")), 0).unwrap();
+        let running = std::sync::Mutex::new(Some(containers.start(&made.id, 0).unwrap()));
+        assert!(containers.is_running(&made.id).unwrap());
+        let stop = |id: &str| {
+            assert_eq!(id, made.id);
+            let ran = running.lock().unwrap().take().unwrap();
+            ran.exited(Some(137), None, 1).map_err(|e| e.to_string())
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(rm(&containers, &["job".into()], Some(&stop), &mut out, &mut err), 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "job\n");
+        assert!(containers.list().unwrap().is_empty());
+        assert!(!containers.is_running(&made.id).unwrap());
+        assert!(
+            containers
+                .dir(&made.id)
+                .ends_with(Path::new("containers").join(&made.id))
+        );
     }
 
     #[test]

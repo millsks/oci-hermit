@@ -23,6 +23,8 @@ Each `run` and `machine boot` gets its own folder under the run dir that `machin
 - `console.log`: the guest's console, the kernel's boot messages and the agent's `hermit-agent: …` lines. It shows
   how far the guest got.
 - `qemu.log`: QEMU's own messages.
+- `monitor.log`: for a `run`, what the container's monitor (the background `oci-hermit` that keeps its sandbox)
+  could not do, such as listen for commands or record how the container ended.
 
 `machine boot` prints the console log's path as it starts, and an error from a sandbox names both files. The
 newest folder is the last run. oci-hermit does not delete these folders; remove old ones when you no longer need
@@ -141,12 +143,27 @@ store does not have also leads to a pull.
 | `the agent refused: starting <cmd>: executable file not found in $PATH` | The image has no such program. Small images have `sh`, not `bash`. |
 | `user "<name>" is not in the image's /etc/passwd` | The image's `User`, or `-u`, names a user the image does not have. Use a number (`-u 1000:1000`) or a user it does have. |
 | `the image has no entrypoint or command, and none was given` | Give a command after the image name. |
-| `-d/--detach is not supported yet (#22); run it without -d/--detach` | The flag is planned, not implemented; the same for `-p`, `-v` and `--pod`. |
+| `-p/--publish is not supported yet (#27); run it without -p/--publish` | The flag is planned, not implemented; the same for `-v` and `--pod`. |
+| `the container's control socket … would be longer than the 103 bytes a socket path may have` | Linux and macOS: the data folder is too deep for the socket a container's monitor listens on. Set `OCI_HERMIT_DATA_DIR` to a shorter folder. |
+| `the container's monitor stopped before it was ready: …` | The background `oci-hermit` that runs the container could not start it; the rest of the message, or `monitor.log`, says why. |
 | `the container name "<name>" is already in use by container …` | A kept container has that name. Remove it (`oci-hermit rm <name>`), or choose another name; `--rm` stops runs from keeping their containers. |
 | `--memory 10m: use e.g. 512m or 2g, at least 64m` | `-m` needs a size with a unit, at least 64 MiB. |
 | `unsupported --platform …` | Only `linux/amd64` and `linux/arm64` run. |
 
 All of these make `run` exit with 125.
+
+## A container will not stop or go away
+
+| Message | What to do |
+| --- | --- |
+| `container <name> is running; stop it first …` | `oci-hermit stop <name>`, or `oci-hermit rm -f <name>`. |
+| `could not stop container <name>: cannot reach its monitor: …` | The container's monitor is not answering. Find it (`ps aux \| grep __monitor`, or Task Manager on Windows: an `oci-hermit.exe` whose command line ends with the container's ID), end it, and its QEMU stops with it. The container then shows as `Exited (unknown)` and `rm` removes it. |
+
+On Windows, `id=$(oci-hermit run -d …)` and other pipes from a `run -d` do not finish while the container runs,
+because its monitor inherits the pipe (#105). Redirect the output to a file instead: `oci-hermit run -d … > id.txt`.
+
+A `run` without `-d` takes its container down with it: closing the terminal or killing that `run` stops the
+container, which then shows as `Exited (137)`. Use `-d` for a container that should keep running.
 
 ## The image store is busy
 
