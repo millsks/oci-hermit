@@ -23,7 +23,9 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/reference.rs` | image references as Docker reads them (`debian` is `docker.io/library/debian:latest`) |
 | `crates/oci-hermit/src/login.rs` | `login`/`logout`: checks credentials with the registry (reqwest: `/v2/` with Basic, or its token server for a Bearer challenge), then writes Podman's `auth.json` (0600); never prints secrets |
 | `crates/oci-hermit/src/erofs.rs` | a layer tarball as a read-only EROFS image, in user space (#16): whiteouts as 0:0 devices, opaque dirs as `trusted.overlay.opaque`, the layer's own `trusted.*` xattrs dropped; `Store::layer_disk` caches one per layer digest under `erofs/<FORMAT>/`. Bump `erofs::FORMAT` whenever the output changes |
-| `crates/oci-hermit/src/containers.rs` | the container state store (#20): `<data>/containers/<id>/{container.json,state.json}`; `ps`, `rm`; `run` records each container and `--rm` removes it |
+| `crates/oci-hermit/src/containers.rs` | the container state store (#20): `<data>/containers/<id>/{container.json,state.json}`; `ps`, `rm` (`-f` stops first); `run` records each container and `--rm` removes it |
+| `crates/oci-hermit/src/monitor.rs` | the per-container monitor (#22): hidden `__monitor` process that owns QEMU, `container.log`, the exit code; `run` (attach, `-d`), `logs [-f]`, `stop` talk to it |
+| `crates/oci-hermit/src/ipc.rs` | the monitor's channel: Unix socket in `<data>/sockets/` (0700), or a named pipe on Windows (tokio, blocked on from threads) |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
@@ -98,7 +100,16 @@ Everything runs through pixi.
   `state.json`; "running" means that lock is held, never what `state.json` says, so a run that crashed shows as
   `Exited (unknown)`. Readers probe with a shared `try_lock`, so writers wait up to 1 s (`containers::PATIENCE`)
   before taking the lock as held. `container.json` is written last and removed first: a folder without it is not a
-  container. `run` holds the lock itself until #22 moves that into a per-container monitor process.
+  container.
+- Every `run` goes through a monitor (#22): `run` prepares everything, writes `<id>/launch.json`, spawns
+  `oci-hermit __monitor <data> <id>` (own process group on Unix; `DETACHED_PROCESS`, and job breakaway when allowed,
+  on Windows) and attaches over `ipc`. The monitor holds `running.lock`, owns QEMU (so `exit-with-parent` and the Job
+  Object tie QEMU to the monitor, not to `run`) and records the exit. A foreground `run` that disconnects makes the
+  monitor stop the VM; only `-d` survives its `run`. `monitor.log` lives in the run dir, not the container dir, so
+  `--rm` cannot delete the reason a monitor failed. Unix socket paths must fit in 103 bytes: tests use `/tmp` scratch
+  folders (`qemu::testing::scratch`), since macOS's `$TMPDIR` is too deep. Tests run the monitor on a thread
+  (`Env::start_monitor` = `monitor::testing::in_thread`). `stop` powers the sandbox off at once (137); SIGTERM first
+  is #25.
 - The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
   store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs. It waits up to 2 s, then fails with
   `Busy`: on Unix a child process holds an inherited lock between `fork` and `exec`, so a zero wait is flaky. A pull writes blobs before naming them, so garbage collection without the exclusive lock would

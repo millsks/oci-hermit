@@ -38,7 +38,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <div class="oh-scroll">
 <svg viewBox="0 0 1000 760" role="img" aria-labelledby="oh-comp-title oh-comp-desc">
 <title id="oh-comp-title">oci-hermit components</title>
-<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: detached containers, a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
+<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: exec, a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
 <defs>
 <marker id="oh-ah" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="oh-ah-acc" class="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
@@ -143,7 +143,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <text x="902" y="408" text-anchor="end" class="mono small">Run</text>
 <rect class="r-plan" x="500" y="556" width="470" height="176" rx="8"/>
 <text x="514" y="578" class="b lbl-plan small">PLANNED &#183; not in the code yet</text>
-<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  run -d, exec, logs, stop: a monitor per container (#22)</text>
+<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  exec: more commands in a running container (#22)</text>
 <text x="514" y="624" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
 <text x="514" y="646" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
 <text x="514" y="668" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
@@ -273,6 +273,15 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <figcaption>Green: host to guest. Blue: guest to host. Without <code>-i</code>, the host sends <code>StdinClosed</code> right after <code>Started</code>; with <code>-i</code> it sends it when your stdin reaches end of file. With a terminal (<code>-t</code>), all output arrives as stdout and the terminal stays open. The terminal size is sent once, in <code>Run</code>; resizing the window afterwards is not passed on yet. Set <code>OCI_HERMIT_TIMINGS=1</code> to print how long prepare, boot, command and stop took.</figcaption>
 </figure>
 
+The host side of this is split in two processes. `run` does the preparing, then starts the container's **monitor**,
+a background `oci-hermit __monitor` of its own (as Podman's `conmon`; there is no daemon). The monitor takes the
+container's running lock, starts QEMU (whose lifetime is tied to the monitor's), does the handshake, `Run` and
+`Shutdown`, appends the output to the container's log and records the exit code. `run` talks to it over a local
+channel, a Unix socket in the data folder that only you can open or a named pipe on Windows, in the same kind of
+JSON lines: it attaches, gets `Booted`, `Started`, the output and `Exited`, and sends your stdin. Without `-d` the
+monitor stops the sandbox if `run` goes away; with `-d`, `run` prints the container's ID after `Started` and returns,
+and `logs` reads the log while `stop` asks the monitor over the same channel to power the sandbox off.
+
 ## Isolation
 
 The security boundary is the emulator process. Guest code never runs directly on your CPU: QEMU translates every
@@ -359,7 +368,7 @@ command as root. `oci-hermit version` prints the protocol version the host speak
 
 ## What changes later
 
-- **Containers that outlive a command** (#22): `run -d`, `exec`, `logs`, `stop`, each with a monitor process.
+- **More commands in a running container** (#22): `exec`, through the container's monitor.
 - **A seccomp profile** (#102), as Docker applies by default.
 - **Networking** (#26 to #29) and **bind mounts** (#30 to #34), with the defaults described in
   [oci-hermit, Docker and Podman](docker-and-podman.md).

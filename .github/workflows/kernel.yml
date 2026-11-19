@@ -167,6 +167,18 @@ jobs:
           cat missing.err
           [ "$code" = 125 ] || { echo "::error::exit code $code for a missing command, expected 125"; exit 1; }
           grep -q 'executable file not found' missing.err
+
+          # run -d returns once the command started; logs -f follows its output until it exits, and ps records how.
+          # shellcheck disable=SC2016 # expands in the guest's shell
+          "$hermit" run -d --name counter debian.tar sh -c 'for i in 1 2 3; do echo "n$i"; sleep 1; done; exit 4' > /dev/null
+          followed=$("$hermit" logs -f counter)
+          [ "$followed" = $'n1\nn2\nn3' ] || { echo "::error::logs -f showed '$followed'"; exit 1; }
+          "$hermit" ps -a | grep ' counter$' | grep -q 'Exited (4)'
+          # rm -f stops a running container and removes it.
+          "$hermit" run -d --name idle debian.tar sleep 1000 > /dev/null
+          "$hermit" ps | grep -q ' idle$'
+          "$hermit" rm -f idle
+          if "$hermit" ps -a | grep -q ' idle$'; then echo "::error::rm -f left idle"; exit 1; fi
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true
@@ -313,6 +325,21 @@ jobs:
           echo "$who"
           expected=$'uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)\nHOME=/nonexistent'
           [ "$who" = "$expected" ] || { echo "::error::-u nobody ran as '$who'"; exit 1; }
+
+          # -d leaves the container running after run returns, under its own monitor; logs shows its output and
+          # stop ends it (exit code 137).
+          # shellcheck disable=SC2016 # expands in the guest's shell
+          id=$("$hermit" run -d --name ticker --platform "$platform" debian.tar sh -c 'echo started; while true; do sleep 1; done' | tr -d '\r')
+          [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::run -d printed '$id'"; exit 1; }
+          "$hermit" ps | grep -q ' ticker$' || { echo "::error::ticker is not running"; "$hermit" ps -a; exit 1; }
+          for _ in $(seq 120); do
+            [ "$("$hermit" logs ticker | tr -d '\r')" = started ] && break
+            sleep 1
+          done
+          [ "$("$hermit" logs ticker | tr -d '\r')" = started ] || { echo "::error::logs: $("$hermit" logs ticker)"; exit 1; }
+          "$hermit" stop ticker
+          "$hermit" ps -a | grep ' ticker$' | grep -q 'Exited (137)' || { "$hermit" ps -a; exit 1; }
+          "$hermit" rm ticker
 
           {
             echo "## ${{ matrix.host }} host, ${{ matrix.arch }} guest"

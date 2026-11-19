@@ -219,9 +219,15 @@ pub fn verify(bundle: &Path, arch: GuestArch) -> Result<Emulator, QemuError> {
 pub(crate) mod testing {
     use super::*;
 
-    /// An empty directory with a `bin/` in it, unique to this test process.
+    /// An empty directory with a `bin/` in it, unique to this test process. On Unix it is under `/tmp`, which keeps
+    /// the containers' socket paths short (macOS's own temporary folders are too deep for them).
     pub(crate) fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("oci-hermit-qemu-{name}-{}", std::process::id()));
+        let base = if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base.join(format!("oci-hermit-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         dir
@@ -239,7 +245,8 @@ pub(crate) mod testing {
     /// Shell scripts standing in for both emulators. They answer `--version` and `-accel help`; launched as a
     /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, with protocol 1.4 unless
     /// `<bundle>/agent.version` says otherwise (as `1,1`); for a `Run`, `Started`, `hi` on stdout, `oops` on stderr and
-    /// exit code 3 (the `Run` line is saved to `<bundle>/run.seen`); then `ShuttingDown` and exit.
+    /// exit code 3 (the `Run` line is saved to `<bundle>/run.seen`); then `ShuttingDown` and exit. A command with a
+    /// `wait` argument prints `hi`, echoes its stdin and runs until the host shuts the guest down.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -253,8 +260,11 @@ pub(crate) mod testing {
              case \"$next\" in *'\"run\"'*) echo \"$next\" > \"$(dirname \"$0\")/../run.seen\"; \
              echo '{{\"type\":\"started\",\"pid\":7}}'; \
              echo '{{\"type\":\"output\",\"stream\":\"stdout\",\"data\":\"aGkK\"}}'; \
-             echo '{{\"type\":\"output\",\"stream\":\"stderr\",\"data\":\"b29wcwo=\"}}'; \
-             echo '{{\"type\":\"exited\",\"code\":3}}'; read closed; read bye ;; esac; \
+             case \"$next\" in *'\"wait\"'*) while read l; do case \"$l\" in \
+             *'\"stdin\"'*) echo \"$l\" | sed 's/\"type\":\"stdin\"/\"type\":\"output\",\"stream\":\"stdout\"/' ;; \
+             *shutdown*) break ;; esac; done ;; \
+             *) echo '{{\"type\":\"output\",\"stream\":\"stderr\",\"data\":\"b29wcwo=\"}}'; \
+             echo '{{\"type\":\"exited\",\"code\":3}}'; read closed; read bye ;; esac ;; esac; \
              echo '{{\"type\":\"shutting_down\"}}'; exit 0 ;;\n\
              esac\n"
         );

@@ -82,8 +82,8 @@ command runs out of memory, raise `-m`. More CPUs help commands that use several
 
 ## Limits
 
-- **One command per sandbox.** Each `run` boots, runs one command and powers off. There are no detached or named
-  containers yet (#20, #22).
+- **One command per sandbox.** Each `run` boots, runs one command and powers off, in the foreground or with `-d` in
+  the background. Running more commands in a running container (`exec`) comes with #22.
 - **No network.** No outbound access at all, by design, and no published ports yet (#27).
 - **No bind mounts yet** (#33). Put what the command needs in the image, or pass it on stdin with `-i`.
 - **Image size.** A stored image's layers become disks, once each, so the first `run` of a large image takes a moment

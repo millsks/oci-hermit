@@ -67,9 +67,10 @@ pub enum Command {
     Exec(ExecArgs),
     /// Show a container's logs
     Logs {
-        container: String,
+        /// Keep showing new output until the container stops
         #[arg(short, long)]
         follow: bool,
+        container: String,
     },
     /// List containers
     Ps {
@@ -83,14 +84,14 @@ pub enum Command {
         #[arg(long)]
         no_trunc: bool,
     },
-    /// Stop one or more containers
+    /// Stop one or more running containers
     Stop {
         #[arg(required = true)]
         containers: Vec<String>,
     },
     /// Remove one or more containers
     Rm {
-        /// Stop running containers first (planned, #22)
+        /// Stop running containers first
         #[arg(short, long)]
         force: bool,
         #[arg(required = true)]
@@ -109,6 +110,9 @@ pub enum Command {
     Machine(MachineCommand),
     /// Print version information
     Version,
+    /// Run one container's sandbox (started by `run`, not by people)
+    #[command(name = "__monitor", hide = true)]
+    Monitor { data_dir: std::path::PathBuf, id: String },
 }
 
 impl Command {
@@ -139,6 +143,7 @@ impl Command {
             Command::Compose(_) => "compose",
             Command::Machine(_) => "machine",
             Command::Version => "version",
+            Command::Monitor { .. } => "__monitor",
         }
     }
 }

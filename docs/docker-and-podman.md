@@ -27,7 +27,9 @@ nothing out.
 | `--network` (planned) | `bridge`, `host`, user networks. | Only `none` and a pod's shared network. |
 | `--privileged`, `--cap-add`, `--device`, `--pid host`, `--ipc host` (planned) | Accepted. | Refused. |
 | `--cpus`, `--memory` | Limits for the container. | The size of the emulated VM. |
-| Containers | Kept after they stop, until `rm`, with their files. | Kept after they stop, until `rm` (`--rm` removes them at once), but only as a record: name, image, command and exit code. The files a command changed go with its sandbox. Detached containers come with #22. |
+| `stop` | `SIGTERM`, then `SIGKILL` after 10 seconds. | Powers the sandbox off at once: exit code 137 (a grace period comes with #25). |
+| Running containers | Kept by a daemon (`dockerd`) or, in Podman, by a `conmon` process per container. | Kept by a monitor process per container, as Podman's `conmon`; no daemon. A `run` without `-d` takes its container down with it if it is killed. |
+| Containers | Kept after they stop, until `rm`, with their files. | Kept after they stop, until `rm` (`--rm` removes them at once), but only as a record and the output: name, image, command, exit code and `logs`. The files a command changed go with its sandbox. |
 | Building images | `build` | Not supported; build elsewhere (#50 discusses it). |
 | Compose (planned in #36, #37) | Full Compose. | A subset: `services`, `image`, `ports`, `environment`, `command`, `depends_on`, `healthcheck`, `volumes`. `build:` is refused. |
 

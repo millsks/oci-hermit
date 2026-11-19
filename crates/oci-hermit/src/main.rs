@@ -11,8 +11,10 @@ mod guest;
 mod image;
 mod images;
 mod initramfs;
+mod ipc;
 mod load;
 mod login;
+mod monitor;
 mod qemu;
 mod reference;
 mod registry;
@@ -58,6 +60,8 @@ struct Env {
     confirm: fn() -> bool,
     /// Asks the user for something `login` needs.
     ask: fn(Ask) -> std::io::Result<String>,
+    /// Starts a container's monitor: this executable, the data folder, the container's ID, its log.
+    start_monitor: fn(&std::path::Path, &std::path::Path, &str, &std::path::Path) -> std::io::Result<monitor::Process>,
 }
 
 /// What `login` asks for when it is not on the command line.
@@ -201,6 +205,7 @@ fn main() -> ExitCode {
         registry: registry::Settings::from_env(|name| std::env::var_os(name)),
         confirm: confirm_on_stdin,
         ask: ask_on_terminal,
+        start_monitor: monitor::spawn,
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
 }
@@ -238,13 +243,41 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
-        cli::Command::Rm { containers: wanted, .. } => match open_containers(env) {
-            Ok(c) => containers::rm(&c, wanted, out, err),
+        cli::Command::Rm {
+            containers: wanted,
+            force,
+        } => match open_containers(env) {
+            Ok(c) => {
+                let data_dir = env.data_dir.as_deref().expect("the container store opened");
+                let stop = |id: &str| monitor::stop(&c, data_dir, id);
+                containers::rm(&c, wanted, force.then_some(&stop as containers::Stopper<'_>), out, err)
+            }
             Err(e) => {
                 let _ = writeln!(err, "oci-hermit: {e}");
                 1
             }
         },
+        cli::Command::Stop { containers: wanted } => match open_containers(env) {
+            Ok(c) => {
+                let data_dir = env.data_dir.as_deref().expect("the container store opened");
+                monitor::stop_command(&c, data_dir, wanted, out, err)
+            }
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
+        cli::Command::Logs { container, follow } => match open_containers(env)
+            .map_err(Into::into)
+            .and_then(|c| monitor::logs(&c, container, *follow, out, err))
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
+        cli::Command::Monitor { data_dir, id } => monitor::serve(data_dir, id, err),
         cli::Command::Load { input } => match open_store(env).map_err(Into::into).and_then(|store| {
             load::load(std::path::Path::new(input), &store, out).map_err(Box::<dyn std::error::Error>::from)
         }) {
@@ -996,7 +1029,6 @@ fn run_container(args: &cli::RunArgs, env: &Env, out: &mut impl Write, err: &mut
 /// The first `run` flag given that is accepted but not implemented yet, as an error naming the issue that adds it.
 fn not_supported_yet(args: &cli::RunArgs) -> Option<String> {
     let given = [
-        (args.detach, "-d/--detach", 22),
         (!args.publish.is_empty(), "-p/--publish", 27),
         (!args.volume.is_empty(), "-v/--volume", 33),
         (args.pod.is_some(), "--pod", 35),
@@ -1071,35 +1103,24 @@ fn run_in_sandbox(
         return Err("the image has no entrypoint or command, and none was given".into());
     }
     // The container is recorded once its image is known, and says how it ended whatever happens next.
-    let record = match &env.data_dir {
-        Some(dir) => {
-            let containers = containers::Containers::open(dir)
-                .map_err(|e| format!("the container store in {}: {e}", dir.display()))?;
-            let container = containers.create(
-                containers::Spec {
-                    name: args.name.clone(),
-                    image: args.image.clone(),
-                    image_id: image.id().to_string(),
-                    platform: format!("linux/{}", image::oci_arch(arch)),
-                    command: argv.clone(),
-                    tty: args.tty,
-                    interactive: args.interactive,
-                    user: args.user.clone(),
-                    auto_remove: args.rm,
-                },
-                images::now(),
-            )?;
-            let running = containers.start(&container.id, images::now())?;
-            Some((containers, container, running))
-        }
-        None if args.name.is_some() => return Err(no_data_dir().into()),
-        None => None,
-    };
-    // As Docker names it: the container's short ID.
-    let hostname = record.as_ref().map(|(_, c, _)| containers::short(&c.id).to_string());
-    let (out_, err_) = (&mut *out, &mut *err);
-    let result = (move || -> Result<i32, Box<dyn std::error::Error>> {
-        let (out, err) = (out_, err_);
+    let data_dir = env.data_dir.as_deref().ok_or_else(no_data_dir)?;
+    let containers = containers::Containers::open(data_dir)
+        .map_err(|e| format!("the container store in {}: {e}", data_dir.display()))?;
+    let container = containers.create(
+        containers::Spec {
+            name: args.name.clone(),
+            image: args.image.clone(),
+            image_id: image.id().to_string(),
+            platform: format!("linux/{}", image::oci_arch(arch)),
+            command: argv.clone(),
+            tty: args.tty,
+            interactive: args.interactive,
+            user: args.user.clone(),
+            auto_remove: args.rm,
+        },
+        images::now(),
+    )?;
+    let started = (|| -> Result<(monitor::Process, ipc::Conn, PathBuf), Box<dyn std::error::Error>> {
         let memory = memory.unwrap_or_else(|| memory_for(rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes)));
         let dir = supervisor::run_dir(&env.run_base)?;
         let initrd = dir.join("initrd.cpio");
@@ -1111,14 +1132,13 @@ fn run_in_sandbox(
                 None => initramfs::build(&agent, &crun),
             },
         )?;
-        drop(rootfs);
-        let console = dir.join("console.log");
+        let console_log = dir.join("console.log");
         let qemu_log = dir.join("qemu.log");
-        let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
+        let (qemu, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
             bundle: &bundle,
             kernel: &guest.kernel,
             initrd: &initrd,
-            console_log: &console,
+            console_log: &console_log,
             spec: supervisor::MachineSpec {
                 arch,
                 memory_mib: memory,
@@ -1126,25 +1146,6 @@ fn run_in_sandbox(
             },
             disks: disks.as_deref().unwrap_or_default(),
         })?;
-        let see_logs =
-            |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
-        timings.mark("prepare");
-        let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
-        let (_, version) = sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
-        timings.mark("boot");
-        // QEMU has the layer disks open now, so the store may let `rmi` go ahead.
-        drop(store);
-        // An agent older than 1.4 would run the command outside a container (and before 1.3 not find the layer
-        // disks, before 1.2 run it as root).
-        if version < (1, 4) {
-            return Err(format!(
-                "the guest agent speaks control protocol {}.{} and cannot run containers; it needs 1.4 or later \
-                 (use the guest that came with this oci-hermit)",
-                version.0, version.1
-            )
-            .into());
-        }
-
         let mut command_env = image.config.env.clone().unwrap_or_default();
         if !command_env.iter().any(|e| e.starts_with("HOME=")) {
             command_env.push(format!("HOME={}", identity.home));
@@ -1176,62 +1177,143 @@ fn run_in_sandbox(
                 .enumerate()
                 .map(|(i, _)| supervisor::disk_serial(i))
                 .collect(),
-            hostname,
+            // As Docker names it: the container's short ID.
+            hostname: Some(containers::short(&container.id).to_string()),
         };
-        let stdin = args.interactive.then(|| {
-            let (chunks, input) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let mut stdin = std::io::stdin();
-                let mut buf = [0u8; 4096];
-                loop {
-                    match std::io::Read::read(&mut stdin, &mut buf) {
-                        Ok(0) | Err(_) => {
-                            let _ = chunks.send(None);
-                            return;
-                        }
-                        Ok(n) => {
-                            if chunks.send(Some(buf[..n].to_vec())).is_err() {
+        let launch = monitor::Launch {
+            qemu,
+            args: qemu_args,
+            qemu_log,
+            console_log,
+            command,
+            interactive: args.interactive,
+            detach: args.detach,
+            boot_timeout_secs: 120,
+        };
+        store::write_atomically(
+            &containers.dir(&container.id).join(monitor::LAUNCH),
+            &serde_json::to_vec_pretty(&launch)?,
+        )?;
+        timings.mark("prepare");
+        let monitor_log = dir.join(monitor::MONITOR_LOG);
+        let mut process = (env.start_monitor)(&env.exe, data_dir, &container.id, &monitor_log)?;
+        let conn = monitor::connect_new(data_dir, &container.id, &mut process, &monitor_log)?;
+        Ok((process, conn, monitor_log))
+    })();
+    drop(rootfs);
+    let (_process, conn, monitor_log) = match started {
+        Ok(started) => started,
+        Err(e) => {
+            // No monitor ran it, so this records how it ended.
+            if let Ok(running) = containers.start(&container.id, images::now()) {
+                let _ = running.exited(Some(125), Some(e.to_string()), images::now());
+            }
+            if args.rm {
+                let _ = containers.remove(&container.id);
+            }
+            return Err(e);
+        }
+    };
+    attach(args, env, &container, conn, &monitor_log, store, timings, out, err)
+}
+
+/// Follows the container `run` started, through its monitor: drops `store` once QEMU has the layer disks open, and
+/// with `-d` prints the container's ID once its command started; otherwise relays the command's stdin and output
+/// and returns its exit code.
+#[allow(clippy::too_many_arguments)]
+fn attach(
+    args: &cli::RunArgs,
+    env: &Env,
+    container: &containers::Container,
+    conn: ipc::Conn,
+    monitor_log: &std::path::Path,
+    store: Option<store::Store>,
+    mut timings: Timings,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let ipc::Conn { reader, mut writer } = conn;
+    monitor::send(writer.as_mut(), &monitor::Request::Attach)?;
+    let (notices, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        monitor::read_messages(reader, |notice: monitor::Notice| notices.send(notice).is_ok());
+    });
+    let mut store = store;
+    // Kept open for as long as the run is: the monitor stops a foreground container whose run went away.
+    let mut writer = Some(writer);
+    let mut raw = None;
+    let (mut code, mut failure) = (None, None);
+    for notice in received {
+        match notice {
+            monitor::Notice::Booted => {
+                // QEMU has the layer disks open now, so the store may let `rmi` go ahead.
+                drop(store.take());
+                timings.mark("boot");
+            }
+            monitor::Notice::Started if args.detach => {
+                writeln!(out, "{}", container.id)?;
+                return Ok(0);
+            }
+            monitor::Notice::Started => {
+                if args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    raw = RawTerminal::enable();
+                }
+                if args.interactive
+                    && let Some(mut to_monitor) = writer.take()
+                {
+                    std::thread::spawn(move || {
+                        let mut stdin = std::io::stdin();
+                        let mut buf = [0u8; hermit_proto::CHUNK];
+                        loop {
+                            let request = match std::io::Read::read(&mut stdin, &mut buf) {
+                                Ok(0) | Err(_) => monitor::Request::StdinClosed,
+                                Ok(n) => monitor::Request::Stdin {
+                                    data: hermit_proto::b64::encode(&buf[..n]),
+                                },
+                            };
+                            let last = request == monitor::Request::StdinClosed;
+                            // Dropping this half leaves the connection open: the notices still come on the other.
+                            if monitor::send(to_monitor.as_mut(), &request).is_err() || last {
                                 return;
                             }
                         }
-                    }
+                    });
                 }
-            });
-            input
-        });
-        let raw = (args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()))
-            .then(RawTerminal::enable)
-            .flatten();
-        let code = sandbox.run(&command, stdin.as_ref(), out, err, Duration::from_secs(60));
-        drop(raw);
-        let code = code.map_err(see_logs)?;
-        timings.mark("command");
-        sandbox.shutdown(Duration::from_secs(30)).map_err(see_logs)?;
-        timings.mark("stop");
-        if env.timings {
-            let _ = writeln!(err, "{}", timings.report());
-        }
-        Ok(code)
-    })();
-    if let Some((containers, container, running)) = record {
-        let ended = match &result {
-            Ok(code) => running.exited(Some(*code), None, images::now()),
-            Err(e) => running.exited(Some(125), Some(e.to_string()), images::now()),
-        };
-        if let Err(e) = ended {
-            let _ = writeln!(
-                err,
-                "WARNING: could not record how container {} ended: {e}",
-                container.name
-            );
-        }
-        if args.rm
-            && let Err(e) = containers.remove(&container.id)
-        {
-            let _ = writeln!(err, "WARNING: could not remove container {}: {e}", container.name);
+            }
+            monitor::Notice::Output { stream, data } => {
+                let bytes = hermit_proto::b64::decode(&data).ok_or("the monitor sent output that is not base64")?;
+                let sink: &mut dyn Write = match stream {
+                    hermit_proto::Stream::Stdout => out,
+                    hermit_proto::Stream::Stderr => err,
+                };
+                sink.write_all(&bytes)?;
+                sink.flush()?;
+            }
+            monitor::Notice::Exited { code: ended } => {
+                drop(raw.take());
+                code = Some(ended);
+                timings.mark("command");
+            }
+            monitor::Notice::Failed { message } => failure = Some(message),
+            monitor::Notice::Stopping => {}
+            monitor::Notice::Done => break,
         }
     }
-    result
+    drop(raw);
+    if let Some(message) = failure {
+        return Err(message.into());
+    }
+    let code = code.ok_or_else(|| {
+        format!(
+            "the container's monitor stopped without saying how it ended; see {}",
+            monitor_log.display()
+        )
+    })?;
+    timings.mark("stop");
+    if env.timings {
+        let _ = writeln!(err, "{}", timings.report());
+    }
+    Ok(code)
 }
 
 #[cfg(test)]
@@ -1260,6 +1342,7 @@ mod tests {
             registry: registry::Settings::default(),
             confirm: || false,
             ask: |_| Err(std::io::Error::other("no terminal in tests")),
+            start_monitor: monitor::testing::in_thread,
         }
     }
 
@@ -1277,6 +1360,7 @@ mod tests {
             registry: registry::Settings::default(),
             confirm: || false,
             ask: |_| Err(std::io::Error::other("no terminal in tests")),
+            start_monitor: monitor::testing::in_thread,
         }
     }
 
@@ -1320,10 +1404,10 @@ mod tests {
 
     #[test]
     fn stub_commands_exit_not_implemented() {
-        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["logs", "web"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["cp", "web:/a", "b"]);
         assert_eq!(code, NOT_IMPLEMENTED);
         assert!(out.is_empty());
-        assert!(err.contains("`logs` is not implemented yet"));
+        assert!(err.contains("`cp` is not implemented yet"));
         assert!(err.contains(ROADMAP));
     }
 
@@ -1876,6 +1960,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_detached_container_runs_until_it_is_stopped() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-detach");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-detach-guest");
+        let layout = image::testing::layout(
+            &qemu::testing::scratch("main-detach-image"),
+            &[("amd64", image::testing::layer())],
+            r#"{"architecture":"ARCH","config":{"Cmd":["true"]}}"#,
+        );
+        let env = with_bundle(&bundle, Some(&guest));
+        let image = layout.to_str().unwrap();
+        let detached = |name: &str| {
+            run_with(
+                &env,
+                &["run", "-d", "--name", name, "--platform", "linux/amd64", image, "wait"],
+            )
+        };
+
+        // `run -d` prints the container's ID once its command started, and the container goes on without it.
+        let (code, out, err) = detached("web");
+        assert_eq!((code, err.as_str()), (0, ""));
+        let id = out.trim_end();
+        assert!(id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()), "{out}");
+        let (_, out, _) = run_with(&env, &["ps"]);
+        let row = out.lines().nth(1).unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            row.contains(" Up ") && row.ends_with("web") && row.starts_with(&id[..12]),
+            "{out}"
+        );
+        let (code, out, err) = run_with(&env, &["logs", "web"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "hi\n", ""));
+
+        // rm will not remove it while it runs; stop does, and records it as killed.
+        let (code, _, err) = run_with(&env, &["rm", "web"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("container web is running; stop it first"), "{err}");
+        let (code, out, err) = run_with(&env, &["stop", "web"]);
+        assert_eq!((code, out.as_str()), (0, "web\n"), "{err}");
+        let (_, out, _) = run_with(&env, &["ps", "-a"]);
+        assert!(out.contains("Exited (137)"), "{out}");
+        // Following a stopped container's logs shows them and ends.
+        let (code, out, _) = run_with(&env, &["logs", "-f", id]);
+        assert_eq!((code, out.as_str()), (0, "hi\n"));
+        // Stopping it again is fine, as with Docker.
+        assert_eq!(run_with(&env, &["stop", "web"]).0, 0);
+
+        // rm -f stops a running container and removes it.
+        let (code, _, err) = detached("job");
+        assert_eq!(code, 0, "{err}");
+        let (code, out, err) = run_with(&env, &["rm", "-f", "job", "web"]);
+        assert_eq!((code, out.as_str()), (0, "job\nweb\n"), "{err}");
+        assert_eq!(run_with(&env, &["ps", "-aq"]).1, "");
+
+        // A detached container that cannot run says why, and is kept as having failed.
+        std::fs::write(bundle.join("agent.version"), "1,3").unwrap();
+        let (code, out, err) = detached("old");
+        assert_eq!((code, out.as_str()), (125, ""));
+        assert!(err.contains("it needs 1.4 or later"), "{err}");
+        let c = containers::Containers::open(&bundle.join("data")).unwrap();
+        assert_eq!(c.find("old").unwrap().state.exit_code, Some(125));
+        let (code, _, err) = run_with(&env, &["logs", "ghost"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no such container: ghost"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_records_each_container_for_ps_and_rm() {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-run-record");
@@ -1958,8 +2110,7 @@ mod tests {
     fn run_refuses_flags_it_does_not_implement_yet() {
         let env = no_qemu("main-run-flags");
         for (args, flag, issue) in [
-            (&["-d"][..], "-d/--detach", "#22"),
-            (&["-p", "8080:80"], "-p/--publish", "#27"),
+            (&["-p", "8080:80"][..], "-p/--publish", "#27"),
             (&["-v", "./src:/src"], "-v/--volume", "#33"),
             (&["--pod", "dev"], "--pod", "#35"),
         ] {
