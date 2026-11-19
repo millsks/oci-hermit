@@ -407,7 +407,7 @@ fn lock_file(dir: &Path) -> std::io::Result<std::fs::File> {
 }
 
 /// Writes `bytes` to a temporary file beside `path`, then renames it into place, so a reader never sees half a file.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);

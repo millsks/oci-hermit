@@ -281,7 +281,7 @@ oci-hermit pull registry.example.com/team/app:1.4
 Set `OCI_HERMIT_TIMINGS=1` to see how long each phase of a `run` took. Booting dominates; on CI hosts a shell is
 ready in 1 to 6 seconds (see [Performance and limits](performance.md)).
 
-`run` refuses the flags that are not implemented yet (`-d`, `--name`, `-p`, `-v`, `--pod`) instead of ignoring them.
+`run` refuses the flags that are not implemented yet (`-d`, `-p`, `-v`, `--pod`) instead of ignoring them.
 The [roadmap](../ROADMAP.md) says when they come.
 
 ## Managing images

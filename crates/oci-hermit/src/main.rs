@@ -5,6 +5,7 @@
 
 mod certs;
 mod cli;
+mod containers;
 mod erofs;
 mod guest;
 mod image;
@@ -227,6 +228,23 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
         },
         cli::Command::Machine(cli::MachineCommand::Boot(args)) => machine_boot(args, env, out, err),
         cli::Command::Run(args) => run_container(args, env, out, err),
+        cli::Command::Ps { all, quiet, no_trunc } => match open_containers(env)
+            .map_err(containers::ContainerError::Invalid)
+            .and_then(|c| containers::ps(&c, *all, *quiet, *no_trunc, images::now(), out))
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
+        cli::Command::Rm { containers: wanted, .. } => match open_containers(env) {
+            Ok(c) => containers::rm(&c, wanted, out, err),
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         cli::Command::Load { input } => match open_store(env).map_err(Into::into).and_then(|store| {
             load::load(std::path::Path::new(input), &store, out).map_err(Box::<dyn std::error::Error>::from)
         }) {
@@ -788,6 +806,11 @@ fn no_data_dir() -> String {
     )
 }
 
+fn open_containers(env: &Env) -> Result<containers::Containers, String> {
+    let dir = env.data_dir.as_ref().ok_or_else(no_data_dir)?;
+    containers::Containers::open(dir).map_err(|e| format!("the container store in {}: {e}", dir.display()))
+}
+
 fn open_store(env: &Env) -> Result<store::Store, String> {
     let dir = env.data_dir.as_ref().ok_or_else(no_data_dir)?;
     store::Store::open(dir).map_err(|e| format!("the image store in {}: {e}", dir.display()))
@@ -971,7 +994,6 @@ fn run_container(args: &cli::RunArgs, env: &Env, out: &mut impl Write, err: &mut
 fn not_supported_yet(args: &cli::RunArgs) -> Option<String> {
     let given = [
         (args.detach, "-d/--detach", 22),
-        (args.name.is_some(), "--name", 20),
         (!args.publish.is_empty(), "-p/--publish", 27),
         (!args.volume.is_empty(), "-v/--volume", 33),
         (args.pod.is_some(), "--pod", 35),
@@ -992,6 +1014,15 @@ fn run_in_sandbox(
     if let Some(refusal) = not_supported_yet(args) {
         return Err(refusal.into());
     }
+    if let Some(name) = &args.name {
+        containers::check_name(name)?;
+    }
+    let memory = match &args.memory {
+        Some(text) => {
+            Some(parse_memory(text).ok_or_else(|| format!("--memory {text}: use e.g. 512m or 2g, at least 64m"))?)
+        }
+        None => None,
+    };
     let requested = match args.platform.as_deref() {
         Some(platform) => Some(guest_arch(Some(platform))?),
         None => None,
@@ -1036,127 +1067,170 @@ fn run_in_sandbox(
     if argv.is_empty() {
         return Err("the image has no entrypoint or command, and none was given".into());
     }
-    let memory = match &args.memory {
-        Some(text) => {
-            parse_memory(text).ok_or_else(|| format!("--memory {text}: use e.g. 512m or 2g, at least 64m"))?
+    // The container is recorded once its image is known, and says how it ended whatever happens next.
+    let record = match &env.data_dir {
+        Some(dir) => {
+            let containers = containers::Containers::open(dir)
+                .map_err(|e| format!("the container store in {}: {e}", dir.display()))?;
+            let container = containers.create(
+                containers::Spec {
+                    name: args.name.clone(),
+                    image: args.image.clone(),
+                    image_id: image.id().to_string(),
+                    platform: format!("linux/{}", image::oci_arch(arch)),
+                    command: argv.clone(),
+                    tty: args.tty,
+                    interactive: args.interactive,
+                    user: args.user.clone(),
+                    auto_remove: args.rm,
+                },
+                images::now(),
+            )?;
+            let running = containers.start(&container.id, images::now())?;
+            Some((containers, container, running))
         }
-        None => memory_for(rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes)),
+        None if args.name.is_some() => return Err(no_data_dir().into()),
+        None => None,
     };
-    let dir = supervisor::run_dir(&env.run_base)?;
-    let initrd = dir.join("initrd.cpio");
-    let agent = std::fs::read(&guest.agent)?;
-    std::fs::write(
-        &initrd,
-        match &rootfs {
-            Some(rootfs) => initramfs::build_with_rootfs(&agent, rootfs),
-            None => initramfs::build(&agent),
-        },
-    )?;
-    drop(rootfs);
-    let console = dir.join("console.log");
-    let qemu_log = dir.join("qemu.log");
-    let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
-        bundle: &bundle,
-        kernel: &guest.kernel,
-        initrd: &initrd,
-        console_log: &console,
-        spec: supervisor::MachineSpec {
-            arch,
-            memory_mib: memory,
-            cpus: args.cpus.unwrap_or(1),
-        },
-        disks: disks.as_deref().unwrap_or_default(),
-    })?;
-    let see_logs =
-        |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
-    timings.mark("prepare");
-    let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
-    let (_, version) = sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
-    timings.mark("boot");
-    // QEMU has the layer disks open now, so the store may let `rmi` go ahead.
-    drop(store);
-    if disks.is_some() && version < (1, 3) {
-        return Err(format!(
-            "the guest agent speaks control protocol {}.{} and cannot mount layer disks; it needs 1.3 or later",
-            version.0, version.1
-        )
-        .into());
-    }
-    // An agent older than 1.2 ignores the user and would run the command as root.
-    if !identity.is_root() && version < (1, 2) {
-        return Err(format!(
-            "the guest agent speaks control protocol {}.{} and cannot run a command as a user; it needs 1.2 or later",
-            version.0, version.1
-        )
-        .into());
-    }
+    let (out_, err_) = (&mut *out, &mut *err);
+    let result = (move || -> Result<i32, Box<dyn std::error::Error>> {
+        let (out, err) = (out_, err_);
+        let memory = memory.unwrap_or_else(|| memory_for(rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes)));
+        let dir = supervisor::run_dir(&env.run_base)?;
+        let initrd = dir.join("initrd.cpio");
+        let agent = std::fs::read(&guest.agent)?;
+        std::fs::write(
+            &initrd,
+            match &rootfs {
+                Some(rootfs) => initramfs::build_with_rootfs(&agent, rootfs),
+                None => initramfs::build(&agent),
+            },
+        )?;
+        drop(rootfs);
+        let console = dir.join("console.log");
+        let qemu_log = dir.join("qemu.log");
+        let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
+            bundle: &bundle,
+            kernel: &guest.kernel,
+            initrd: &initrd,
+            console_log: &console,
+            spec: supervisor::MachineSpec {
+                arch,
+                memory_mib: memory,
+                cpus: args.cpus.unwrap_or(1),
+            },
+            disks: disks.as_deref().unwrap_or_default(),
+        })?;
+        let see_logs =
+            |e: supervisor::SupervisorError| format!("{e}; see {} and {}", console.display(), qemu_log.display());
+        timings.mark("prepare");
+        let mut sandbox = supervisor::Sandbox::spawn(&binary, &qemu_args, &qemu_log)?;
+        let (_, version) = sandbox.handshake(Duration::from_secs(120)).map_err(see_logs)?;
+        timings.mark("boot");
+        // QEMU has the layer disks open now, so the store may let `rmi` go ahead.
+        drop(store);
+        if disks.is_some() && version < (1, 3) {
+            return Err(format!(
+                "the guest agent speaks control protocol {}.{} and cannot mount layer disks; it needs 1.3 or later",
+                version.0, version.1
+            )
+            .into());
+        }
+        // An agent older than 1.2 ignores the user and would run the command as root.
+        if !identity.is_root() && version < (1, 2) {
+            return Err(format!(
+                "the guest agent speaks control protocol {}.{} and cannot run a command as a user; it needs 1.2 or later",
+                version.0, version.1
+            )
+            .into());
+        }
 
-    let mut command_env = image.config.env.clone().unwrap_or_default();
-    if !command_env.iter().any(|e| e.starts_with("HOME=")) {
-        command_env.push(format!("HOME={}", identity.home));
-    }
-    if args.tty && !command_env.iter().any(|e| e.starts_with("TERM=")) {
-        command_env.push(format!(
-            "TERM={}",
-            std::env::var("TERM").unwrap_or_else(|_| "xterm".into())
-        ));
-    }
-    let command = supervisor::Command {
-        argv,
-        env: command_env,
-        cwd: image.config.working_dir(),
-        tty: args.tty,
-        size: args
-            .tty
-            .then(crossterm::terminal::size)
-            .and_then(Result::ok)
-            .map(|(cols, rows)| (rows, cols)),
-        user: (!identity.is_root()).then(|| hermit_proto::User {
-            uid: identity.uid,
-            gid: identity.gid,
-            groups: identity.groups.clone(),
-        }),
-        layers: disks
-            .iter()
-            .flatten()
-            .enumerate()
-            .map(|(i, _)| supervisor::disk_serial(i))
-            .collect(),
-    };
-    let stdin = args.interactive.then(|| {
-        let (chunks, input) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 4096];
-            loop {
-                match std::io::Read::read(&mut stdin, &mut buf) {
-                    Ok(0) | Err(_) => {
-                        let _ = chunks.send(None);
-                        return;
-                    }
-                    Ok(n) => {
-                        if chunks.send(Some(buf[..n].to_vec())).is_err() {
+        let mut command_env = image.config.env.clone().unwrap_or_default();
+        if !command_env.iter().any(|e| e.starts_with("HOME=")) {
+            command_env.push(format!("HOME={}", identity.home));
+        }
+        if args.tty && !command_env.iter().any(|e| e.starts_with("TERM=")) {
+            command_env.push(format!(
+                "TERM={}",
+                std::env::var("TERM").unwrap_or_else(|_| "xterm".into())
+            ));
+        }
+        let command = supervisor::Command {
+            argv,
+            env: command_env,
+            cwd: image.config.working_dir(),
+            tty: args.tty,
+            size: args
+                .tty
+                .then(crossterm::terminal::size)
+                .and_then(Result::ok)
+                .map(|(cols, rows)| (rows, cols)),
+            user: (!identity.is_root()).then(|| hermit_proto::User {
+                uid: identity.uid,
+                gid: identity.gid,
+                groups: identity.groups.clone(),
+            }),
+            layers: disks
+                .iter()
+                .flatten()
+                .enumerate()
+                .map(|(i, _)| supervisor::disk_serial(i))
+                .collect(),
+        };
+        let stdin = args.interactive.then(|| {
+            let (chunks, input) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut stdin = std::io::stdin();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match std::io::Read::read(&mut stdin, &mut buf) {
+                        Ok(0) | Err(_) => {
+                            let _ = chunks.send(None);
                             return;
+                        }
+                        Ok(n) => {
+                            if chunks.send(Some(buf[..n].to_vec())).is_err() {
+                                return;
+                            }
                         }
                     }
                 }
-            }
+            });
+            input
         });
-        input
-    });
-    let raw = (args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()))
-        .then(RawTerminal::enable)
-        .flatten();
-    let code = sandbox.run(&command, stdin.as_ref(), out, err, Duration::from_secs(60));
-    drop(raw);
-    let code = code.map_err(see_logs)?;
-    timings.mark("command");
-    sandbox.shutdown(Duration::from_secs(30)).map_err(see_logs)?;
-    timings.mark("stop");
-    if env.timings {
-        let _ = writeln!(err, "{}", timings.report());
+        let raw = (args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()))
+            .then(RawTerminal::enable)
+            .flatten();
+        let code = sandbox.run(&command, stdin.as_ref(), out, err, Duration::from_secs(60));
+        drop(raw);
+        let code = code.map_err(see_logs)?;
+        timings.mark("command");
+        sandbox.shutdown(Duration::from_secs(30)).map_err(see_logs)?;
+        timings.mark("stop");
+        if env.timings {
+            let _ = writeln!(err, "{}", timings.report());
+        }
+        Ok(code)
+    })();
+    if let Some((containers, container, running)) = record {
+        let ended = match &result {
+            Ok(code) => running.exited(Some(*code), None, images::now()),
+            Err(e) => running.exited(Some(125), Some(e.to_string()), images::now()),
+        };
+        if let Err(e) = ended {
+            let _ = writeln!(
+                err,
+                "WARNING: could not record how container {} ended: {e}",
+                container.name
+            );
+        }
+        if args.rm
+            && let Err(e) = containers.remove(&container.id)
+        {
+            let _ = writeln!(err, "WARNING: could not remove container {}: {e}", container.name);
+        }
     }
-    Ok(code)
+    result
 }
 
 #[cfg(test)]
@@ -1245,10 +1319,10 @@ mod tests {
 
     #[test]
     fn stub_commands_exit_not_implemented() {
-        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["ps", "-a"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["logs", "web"]);
         assert_eq!(code, NOT_IMPLEMENTED);
         assert!(out.is_empty());
-        assert!(err.contains("`ps` is not implemented yet"));
+        assert!(err.contains("`logs` is not implemented yet"));
         assert!(err.contains(ROADMAP));
     }
 
@@ -1791,6 +1865,72 @@ mod tests {
         assert!(names.contains(&"rootfs/bin/sh".to_string()), "{names:?}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_records_each_container_for_ps_and_rm() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-run-record");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-run-record-guest");
+        let layout = image::testing::layout(
+            &qemu::testing::scratch("main-run-record-image"),
+            &[("amd64", image::testing::layer())],
+            r#"{"architecture":"ARCH","config":{"Cmd":["true"]}}"#,
+        );
+        let env = with_bundle(&bundle, Some(&guest));
+        let image = layout.to_str().unwrap();
+        let run = |extra: &[&str]| {
+            let argv: Vec<&str> = ["run", "--platform", "linux/amd64"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .chain([image])
+                .collect();
+            run_with(&env, &argv)
+        };
+
+        let (code, _, err) = run(&["--name", "job"]);
+        assert_eq!(code, 3, "{err}");
+        let (code, out, _) = run_with(&env, &["ps"]);
+        assert_eq!(
+            (code, out.lines().count()),
+            (0, 1),
+            "only the header: nothing is running\n{out}"
+        );
+        let (code, out, _) = run_with(&env, &["ps", "-a"]);
+        assert_eq!(code, 0);
+        let row = out.lines().nth(1).unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            row.contains("\"true\"") && row.contains("Exited (3)") && row.ends_with("job"),
+            "{out}"
+        );
+
+        // The name stays taken until the container is removed.
+        let (code, _, err) = run(&["--name", "job"]);
+        assert_eq!(code, 125);
+        assert!(err.contains("the container name \"job\" is already in use"), "{err}");
+        let (code, out, err) = run_with(&env, &["rm", "job"]);
+        assert_eq!((code, out.as_str()), (0, "job\n"), "{err}");
+
+        // --rm leaves nothing behind; neither does a failed run with it.
+        let (code, _, err) = run(&["--rm"]);
+        assert_eq!(code, 3, "{err}");
+        let (_, out, _) = run_with(&env, &["ps", "-aq"]);
+        assert_eq!(out, "");
+
+        // A run oci-hermit could not finish is kept with exit code 125 and the reason.
+        std::fs::write(bundle.join("agent.version"), "0,9").unwrap();
+        let (code, _, _) = run(&["--name", "old-agent"]);
+        assert_eq!(code, 125);
+        let c = containers::Containers::open(&bundle.join("data")).unwrap();
+        let failed = c.find("old-agent").unwrap();
+        assert_eq!(failed.state.exit_code, Some(125));
+        assert!(failed.state.error.is_some());
+        let (code, _, err) = run_with(&env, &["rm", "-f", "old-agent", "missing"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no such container: missing"), "{err}");
+        assert!(c.list().unwrap().is_empty());
+    }
+
     #[test]
     fn run_explains_what_it_cannot_do_yet() {
         let env = no_qemu("main-run-none");
@@ -1810,7 +1950,6 @@ mod tests {
         let env = no_qemu("main-run-flags");
         for (args, flag, issue) in [
             (&["-d"][..], "-d/--detach", "#22"),
-            (&["--name", "web"], "--name", "#20"),
             (&["-p", "8080:80"], "-p/--publish", "#27"),
             (&["-v", "./src:/src"], "-v/--volume", "#33"),
             (&["--pod", "dev"], "--pod", "#35"),
@@ -1827,10 +1966,19 @@ mod tests {
                 format!("oci-hermit: {flag} is not supported yet ({issue}); run it without {flag}\n")
             );
         }
-        // --rm is what every run does already; it gets as far as looking for QEMU.
-        let (code, _, err) = run_with(&env, &["run", "--rm", "--platform", "linux/arm64", "."]);
+        // --rm and --name are taken; a name is checked before anything else happens.
+        let (code, _, err) = run_with(
+            &env,
+            &["run", "--rm", "--name", "web", "--platform", "linux/arm64", "."],
+        );
         assert_eq!(code, 125);
         assert!(err.contains("no bundled QEMU found"), "{err}");
+        let (code, _, err) = run_with(&env, &["run", "--name=-web", "."]);
+        assert_eq!(code, 125);
+        assert!(err.contains("invalid container name \"-web\""), "{err}");
+        let (code, _, err) = run_with(&env, &["run", "-m", "lots", "."]);
+        assert_eq!(code, 125);
+        assert!(err.contains("--memory lots"), "{err}");
     }
 
     /// Runs `args` against an image whose config sets `User` to `image_user`, with a fake agent speaking `agent`;

@@ -69,15 +69,19 @@ oci-hermit run [OPTIONS] <IMAGE> [COMMAND]...
 | `--platform <PLATFORM>` | The image platform. Without it, the host's, or the other one with a warning if the image has only that. |
 | `--cpus <CPUS>` | Number of emulated CPUs. Default 1. |
 | `-m`, `--memory <MEMORY>` | Memory for the sandbox: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix, as Docker. At least `64m`. Default: 512 MiB for a stored image, which runs from its layer disks; for an image run from a file, twice its size plus 256 MiB. |
-| `--rm` | Accepted for Docker compatibility. Changes nothing: a sandbox is always thrown away when its command ends. |
+| `--name <NAME>` | The container's name: a letter or digit, then letters, digits, `_`, `.` or `-`. Without one, a name such as `quiet_nautilus` is made up. A name stays taken until the container is removed. |
+| `--rm` | Remove the container when the command ends. Without it the container is kept, exited, for `ps -a`, until `rm`. |
 | `-d`, `--detach` | Planned (#22). Refused today. |
-| `--name <NAME>` | Planned (#20). Refused today. |
 | `-p`, `--publish <PUBLISH>` | Planned (#27): `[127.0.0.1:]HOST:CONTAINER`, always bound to 127.0.0.1. Refused today. |
 | `-v`, `--volume <VOLUME>` | Planned (#33): `SRC:DST`, with `:ro` or `:rw`; read-only by default. Refused today. |
 | `--pod <POD>` | Planned (#35). Refused today. |
 
 The command runs in the image's working directory, with the image's environment, plus `HOME` from the user's
 `/etc/passwd` entry if the image does not set it.
+
+Every `run` is recorded as a container (see [ps](#ps)), with its exit code, or with 125 and the reason if
+oci-hermit could not run it. Only the record is kept: the files the command changed are thrown away with the
+sandbox.
 
 ```console
 $ oci-hermit run public.ecr.aws/docker/library/alpine:3.20 cat /etc/alpine-release
@@ -102,6 +106,47 @@ Set `OCI_HERMIT_TIMINGS=1` to print how long each phase took, on stderr:
 ```console
 $ OCI_HERMIT_TIMINGS=1 oci-hermit run public.ecr.aws/docker/library/alpine:3.20 true
 timings: prepare 0.04s, boot 0.33s, command 0.01s, stop 0.02s, total 0.41s
+```
+
+## ps
+
+List containers: the running ones, or every one with `-a`. Newest first.
+
+```
+oci-hermit ps [-a] [-q] [--no-trunc]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-a`, `--all` | Include containers that are not running. |
+| `-q`, `--quiet` | Only the IDs. |
+| `--no-trunc` | Whole IDs and commands. |
+
+```console
+$ oci-hermit ps -a
+CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS                      PORTS   NAMES
+1f0c2a9e4b7d   alpine:3.20   "sh -c 'sleep 60'"       10 seconds ago   Up 9 seconds                        job
+8c3d5e0a1b2f   alpine:3.20   "cat /etc/alpine-rel…"   2 hours ago      Exited (0) 2 hours ago              quiet_nautilus
+```
+
+A container is running while the `run` that started it is. If that `run` was killed, the container shows as
+`Exited (unknown)`.
+
+## rm
+
+Remove containers that are not running. Prints each one as it was given; exits 1 if any could not be removed.
+
+```
+oci-hermit rm [-f] <CONTAINERS>...
+```
+
+A container is named by its name, its ID, or the start of its ID. `-f` is accepted; stopping a running container
+first is planned (#22), so a running one is refused either way.
+
+```console
+$ oci-hermit rm quiet_nautilus 1f0c
+quiet_nautilus
+oci-hermit: container job is running; let its `run` finish first (stop and rm -f are planned, #22)
 ```
 
 ## pull
@@ -445,22 +490,20 @@ These are part of the command line already, so `--help` lists them, but they do 
 `oci-hermit: `<command>` is not implemented yet; see …/ROADMAP.md` and exits 2:
 
 ```console
-$ oci-hermit ps
-oci-hermit: `ps` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
+$ oci-hermit logs web
+oci-hermit: `logs` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
 ```
 
 | Command | Will | Issue |
 | --- | --- | --- |
 | `exec [-i] [-t] <CONTAINER> <COMMAND>...` | run a command in a running container | #22 |
 | `logs [-f] <CONTAINER>` | show a container's logs | #22 |
-| `ps [-a]` | list containers | #22 |
 | `stop <CONTAINERS>...` | stop containers | #22 |
-| `rm <CONTAINERS>...` | remove containers | #22 |
 | `cp <SOURCE> <DESTINATION>` | copy files between a container and the host | #23 |
 | `pod create --name <NAME> [-p <PUBLISH>]`, `pod rm <POD>`, `pod ps` | pods: containers that share localhost | #35 |
 | `compose up [-d] [-f <FILE>]`, `compose down [-f <FILE>]` | a Compose subset | #36, #37 |
 
-`run -d`, `--name`, `-p`, `-v` and `--pod` are refused, with their issue, rather than ignored (see [run](#run)).
+`run -d`, `-p`, `-v` and `--pod` are refused, with their issue, rather than ignored (see [run](#run)).
 
 Not in the command line yet, and planned:
 

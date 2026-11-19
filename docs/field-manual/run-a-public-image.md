@@ -122,10 +122,10 @@ oci-hermit: -d/--detach is not supported yet (#22); run it without -d/--detach
 | Flag | Issue |
 | --- | --- |
 | `-d`, `--detach` | #22 |
-| `--name` | #20 |
 | `-p`, `--publish` | #27 |
 | `-v`, `--volume` | #33 |
 | `--pod` | #35 |
 
-`--rm` is accepted and changes nothing, because nothing is kept after a `run` anyway. The sandbox has no network,
+Each `run` is kept as a container that `oci-hermit ps -a` lists with its exit code, until `oci-hermit rm` removes
+it; `--rm` removes it as soon as the command ends. Give it a name with `--name`. The sandbox has no network,
 so a command that downloads something fails (see [How it works](../how-it-works.md#no-network-on-purpose)).

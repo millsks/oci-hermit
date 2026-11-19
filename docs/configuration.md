@@ -7,7 +7,7 @@ reads a few environment variables. `oci-hermit machine info` shows the result.
 
 | Variable | What it does | Default |
 | --- | --- | --- |
-| `OCI_HERMIT_DATA_DIR` | Where the image store lives (in `images/` under it). | The platform's per-user data folder: see [Where things are kept](#where-things-are-kept). |
+| `OCI_HERMIT_DATA_DIR` | Where the image store (`images/`) and the containers (`containers/`) live. | The platform's per-user data folder: see [Where things are kept](#where-things-are-kept). |
 | `OCI_HERMIT_QEMU_DIR` | A QEMU bundle to use, a folder with `bin/qemu-system-x86_64` and `bin/qemu-system-aarch64`. Searched first. | `qemu/` beside `oci-hermit`, or `<prefix>/libexec/oci-hermit/qemu` for a prefix install. |
 | `OCI_HERMIT_GUEST_DIR` | A guest to use, a folder with `x86_64/kernel`, `x86_64/hermit-agent`, `aarch64/kernel` and `aarch64/hermit-agent`. Searched first. | `guest/` beside `oci-hermit`, or `<prefix>/libexec/oci-hermit/guest`. |
 | `OCI_HERMIT_INSECURE_REGISTRIES` | Registries to reach over plain HTTP, as `host:port`, comma separated. | None: every registry needs HTTPS. |
@@ -45,9 +45,14 @@ Set a variable for one command or for the session:
 | What | Windows | macOS | Linux |
 | --- | --- | --- | --- |
 | Image store | `%LOCALAPPDATA%\oci-hermit\images` | `~/Library/Application Support/oci-hermit/images` | `$XDG_DATA_HOME/oci-hermit/images`, or `~/.local/share/oci-hermit/images` |
+| Containers | `%LOCALAPPDATA%\oci-hermit\containers` | `~/Library/Application Support/oci-hermit/containers` | `$XDG_DATA_HOME/oci-hermit/containers`, or `~/.local/share/oci-hermit/containers` |
 | Each sandbox's initramfs and logs | `%TMP%\oci-hermit\sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*` | `$TMPDIR/oci-hermit/sandbox-*`, or `/tmp/oci-hermit/sandbox-*` |
 | QEMU, kernel and agent | the `qemu/` and `guest/` folders beside `oci-hermit` | the same | the same |
 | A registry's own CAs and client certificate | `~\.config\containers\certs.d\<host><port>\`, or Docker's | `~/.config/containers/certs.d/<host:port>/`, or `/etc/containers/certs.d`, or Docker's | the same as macOS |
+
+Each container is a folder named by its ID in `containers/`: `container.json` (what it runs, from which image, its
+name) and `state.json` (running or exited, its exit code). `oci-hermit rm` removes it; `run --rm` removes it when
+the command ends.
 
 oci-hermit never writes beside itself, so its folder can be read-only. It does not delete old `sandbox-*` folders:
 each holds the initramfs (about the image's size) and the logs of one `run` or `machine boot`. Delete them when you

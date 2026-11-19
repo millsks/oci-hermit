@@ -279,6 +279,7 @@ fn json<T: for<'a> Deserialize<'a>>(what: &str, bytes: &[u8]) -> Result<T, Image
 /// An image opened for one architecture.
 pub struct Image {
     source: Source,
+    id: String,
     layers: Vec<Descriptor>,
     pub config: RunConfig,
 }
@@ -315,6 +316,7 @@ impl Image {
         }
         Ok(Image {
             source,
+            id: manifest.config.digest,
             layers: manifest.layers,
             config: config_file.config,
         })
@@ -350,6 +352,11 @@ impl Image {
             return Image::manifest_for(source, json("index", &bytes)?, arch, depth + 1);
         }
         json("manifest", &bytes)
+    }
+
+    /// The config's digest, which Docker and Podman call the image ID.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// The layers, bottom first, as `(digest, media type)`.

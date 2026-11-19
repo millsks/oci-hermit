@@ -18,6 +18,7 @@ oci-hermit is a Cargo workspace of three crates, plus the build scripts for the 
 | `crates/oci-hermit/src/certs.rs` | Per-registry CA certificates and client certificates from the `certs.d` folders Podman and Docker use, or `--cert-dir`. |
 | `crates/oci-hermit/src/reference.rs` | Image references as Docker reads them: `debian` is `docker.io/library/debian:latest`. |
 | `crates/oci-hermit/src/load.rs` | `load -i`: OCI layouts and `docker save` archives (old and Docker 25+) into the store; unnamed images go by ID. |
+| `crates/oci-hermit/src/containers.rs` | The container store: one folder per container in the user's data folder (`container.json`, `state.json`), names kept unique under a lock, and a lock held by the process running each container, so a crashed `run` is not shown as running; `ps` and `rm`. |
 | `crates/oci-hermit/src/images.rs` | The image commands over the store: `images`, `rmi`, `inspect`, `tag`, `save`, `image prune`, `image history`, `image exists`, `system df`. |
 | `crates/oci-hermit/src/erofs.rs` | Writes each layer as a read-only EROFS image without mounting anything, the way overlayfs reads a lower layer; cached by layer digest in the image store. |
 | `crates/oci-hermit/src/rootfs.rs` | Applies layers in memory: whiteouts, opaque directories, hard links; refuses paths that climb out with `..`. |

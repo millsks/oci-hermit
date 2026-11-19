@@ -139,7 +139,8 @@ store does not have also leads to a pull.
 | `the agent refused: starting <cmd>: executable file not found in $PATH` | The image has no such program. Small images have `sh`, not `bash`. |
 | `user "<name>" is not in the image's /etc/passwd` | The image's `User`, or `-u`, names a user the image does not have. Use a number (`-u 1000:1000`) or a user it does have. |
 | `the image has no entrypoint or command, and none was given` | Give a command after the image name. |
-| `-d/--detach is not supported yet (#22); run it without -d/--detach` | The flag is planned, not implemented; the same for `--name`, `-p`, `-v` and `--pod`. |
+| `-d/--detach is not supported yet (#22); run it without -d/--detach` | The flag is planned, not implemented; the same for `-p`, `-v` and `--pod`. |
+| `the container name "<name>" is already in use by container …` | A kept container has that name. Remove it (`oci-hermit rm <name>`), or choose another name; `--rm` stops runs from keeping their containers. |
 | `--memory 10m: use e.g. 512m or 2g, at least 64m` | `-m` needs a size with a unit, at least 64 MiB. |
 | `unsupported --platform …` | Only `linux/amd64` and `linux/arm64` run. |
 

@@ -76,6 +76,12 @@ pub enum Command {
         /// Include stopped containers
         #[arg(short, long)]
         all: bool,
+        /// Only show container IDs
+        #[arg(short, long)]
+        quiet: bool,
+        /// Show whole IDs and commands
+        #[arg(long)]
+        no_trunc: bool,
     },
     /// Stop one or more containers
     Stop {
@@ -84,6 +90,9 @@ pub enum Command {
     },
     /// Remove one or more containers
     Rm {
+        /// Stop running containers first (planned, #22)
+        #[arg(short, long)]
+        force: bool,
         #[arg(required = true)]
         containers: Vec<String>,
     },
