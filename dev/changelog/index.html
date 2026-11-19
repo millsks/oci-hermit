@@ -1299,15 +1299,15 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#010-2026-11-17" class="md-nav__link">
+  <a href="#020-2026-11-18" class="md-nav__link">
     <span class="md-ellipsis">
       
-        0.1.0 (2026-11-17)
+        0.2.0 (2026-11-18)
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="0.1.0 (2026-11-17)">
+    <nav class="md-nav" aria-label="0.2.0 (2026-11-18)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1334,6 +1334,67 @@
         
           <li class="md-nav__item">
   <a href="#documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documentation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#refactoring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refactoring
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#010-2026-11-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.1.0 (2026-11-17)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.1.0 (2026-11-17)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#features_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Features
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bug-fixes_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bug fixes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#documentation_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Documentation
@@ -1394,15 +1455,15 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#010-2026-11-17" class="md-nav__link">
+  <a href="#020-2026-11-18" class="md-nav__link">
     <span class="md-ellipsis">
       
-        0.1.0 (2026-11-17)
+        0.2.0 (2026-11-18)
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="0.1.0 (2026-11-17)">
+    <nav class="md-nav" aria-label="0.2.0 (2026-11-18)">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1429,6 +1490,67 @@
         
           <li class="md-nav__item">
   <a href="#documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documentation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#refactoring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Refactoring
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#010-2026-11-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.1.0 (2026-11-17)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.1.0 (2026-11-17)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#features_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Features
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#bug-fixes_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bug fixes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#documentation_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Documentation
@@ -1473,9 +1595,41 @@
 
 <h1 id="changelog">Changelog<a class="headerlink" href="#changelog" title="Permanent link">&para;</a></h1>
 <p>Each release's downloads are on its <a href="https://github.com/millsks/oci-hermit/releases">GitHub release page</a>.</p>
+<h2 id="020-2026-11-18">0.2.0 (2026-11-18)<a class="headerlink" href="#020-2026-11-18" title="Permanent link">&para;</a></h2>
+<p>The host and guest now speak control protocol 1.3, and <code>oci-hermit</code> refuses an older guest agent. Replace the whole
+<code>oci-hermit</code> folder; do not copy the new <code>oci-hermit</code> or <code>hrmt</code> over a 0.1.0 install. The image store from 0.1.0
+keeps working; layer disks are built into it the first time each image runs.</p>
+<h3 id="features">Features<a class="headerlink" href="#features" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>run</code> runs a pulled or loaded image from its layer disks, stacked with overlayfs under a writable layer that is
+  thrown away when the run ends, so an image of any size runs in 512 MiB instead of twice its size in memory. An
+  image run straight from a path, or one with more than 20 layers, still goes into memory (<a href="https://github.com/millsks/oci-hermit/issues/98">#98</a>, <a href="https://github.com/millsks/oci-hermit/issues/17">#17</a>)</li>
+<li>Each image layer is built once into a read-only EROFS disk and kept in the store; <code>rmi</code> and <code>image prune</code> remove
+  the disks with their layers, and <code>system df</code> counts them (<a href="https://github.com/millsks/oci-hermit/issues/97">#97</a>, <a href="https://github.com/millsks/oci-hermit/issues/16">#16</a>)</li>
+<li><code>manifest inspect</code> shows an image's platforms and digests without pulling it (<a href="https://github.com/millsks/oci-hermit/issues/95">#95</a>, <a href="https://github.com/millsks/oci-hermit/issues/76">#76</a>)</li>
+<li>Per-registry CA certificates and client certificates for <code>pull</code>, <code>login</code> and <code>manifest inspect</code>, from Podman's
+  and Docker's <code>certs.d</code> folders or <code>--cert-dir</code>, without admin rights; <code>machine info</code> lists the folders it reads
+  (<a href="https://github.com/millsks/oci-hermit/issues/94">#94</a>, <a href="https://github.com/millsks/oci-hermit/issues/86">#86</a>)</li>
+</ul>
+<h3 id="bug-fixes">Bug fixes<a class="headerlink" href="#bug-fixes" title="Permanent link">&para;</a></h3>
+<ul>
+<li>The release's source archive falls back to verified mirrors when a download host fails (<a href="https://github.com/millsks/oci-hermit/issues/92">#92</a>)</li>
+<li>The Windows CI package step no longer fails with "Permission denied" (<a href="https://github.com/millsks/oci-hermit/issues/96">#96</a>)</li>
+</ul>
+<h3 id="documentation">Documentation<a class="headerlink" href="#documentation" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Getting started shows how to check the Windows download and what to do when a browser download never finishes
+  (<a href="https://github.com/millsks/oci-hermit/issues/92">#92</a>)</li>
+<li>The private registry field manual covers registries with their own CA or client certificates (<a href="https://github.com/millsks/oci-hermit/issues/94">#94</a>)</li>
+</ul>
+<h3 id="refactoring">Refactoring<a class="headerlink" href="#refactoring" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>pull</code> uses oci-hermit's own registry client on reqwest instead of oci-client, which drops the unmaintained
+  <code>chrono</code> dependency and its advisory exception (<a href="https://github.com/millsks/oci-hermit/issues/93">#93</a>, <a href="https://github.com/millsks/oci-hermit/issues/91">#91</a>)</li>
+</ul>
 <h2 id="010-2026-11-17">0.1.0 (2026-11-17)<a class="headerlink" href="#010-2026-11-17" title="Permanent link">&para;</a></h2>
 <p>The first pre-release.</p>
-<h3 id="features">Features<a class="headerlink" href="#features" title="Permanent link">&para;</a></h3>
+<h3 id="features_1">Features<a class="headerlink" href="#features_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Releases: one download per host with <code>oci-hermit</code>, the <code>hrmt</code> alias, QEMU and both guests, their licenses, and a
   separate archive with the source of every GPL and LGPL component (<a href="https://github.com/millsks/oci-hermit/issues/89">#89</a>)</li>
@@ -1497,13 +1651,13 @@
 <li>The guest agent runs as PID 1, with early mounts, console logging and a clean power-off (<a href="https://github.com/millsks/oci-hermit/issues/51">#51</a>)</li>
 <li>A minimal TCG-only QEMU bundle, and a host tool that refuses any other QEMU (<a href="https://github.com/millsks/oci-hermit/issues/47">#47</a>)</li>
 </ul>
-<h3 id="bug-fixes">Bug fixes<a class="headerlink" href="#bug-fixes" title="Permanent link">&para;</a></h3>
+<h3 id="bug-fixes_1">Bug fixes<a class="headerlink" href="#bug-fixes_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li><code>run</code> refuses the flags that are not implemented yet instead of ignoring them (<a href="https://github.com/millsks/oci-hermit/issues/67">#67</a>)</li>
 <li>The x86_64 agent boots under <code>microvm</code> (<a href="https://github.com/millsks/oci-hermit/issues/56">#56</a>)</li>
 <li>The QEMU bundle keeps the option ROM <code>microvm</code>'s SeaBIOS needs to boot a kernel (<a href="https://github.com/millsks/oci-hermit/issues/53">#53</a>)</li>
 </ul>
-<h3 id="documentation">Documentation<a class="headerlink" href="#documentation" title="Permanent link">&para;</a></h3>
+<h3 id="documentation_1">Documentation<a class="headerlink" href="#documentation_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li>A documentation site (<a href="https://github.com/millsks/oci-hermit/issues/43">#43</a>)</li>
 <li>Getting started on Windows, macOS and Linux (<a href="https://github.com/millsks/oci-hermit/issues/73">#73</a>)</li>
