@@ -1076,6 +1076,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-container-will-not-stop-or-go-away" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A container will not stop or go away
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-image-store-is-busy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1534,6 +1545,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-container-will-not-stop-or-go-away" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A container will not stop or go away
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-image-store-is-busy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1626,6 +1648,8 @@ work, the problem is with the image or the command. Every error oci-hermit print
 <li><code>console.log</code>: the guest's console, the kernel's boot messages and the agent's <code>hermit-agent: …</code> lines. It shows
   how far the guest got.</li>
 <li><code>qemu.log</code>: QEMU's own messages.</li>
+<li><code>monitor.log</code>: for a <code>run</code>, what the container's monitor (the background <code>oci-hermit</code> that keeps its sandbox)
+  could not do, such as listen for commands or record how the container ended.</li>
 </ul>
 <p><code>machine boot</code> prints the console log's path as it starts, and an error from a sandbox names both files. The
 newest folder is the last run. oci-hermit does not delete these folders; remove old ones when you no longer need
@@ -1768,8 +1792,16 @@ store does not have also leads to a pull.</p>
 <td>Give a command after the image name.</td>
 </tr>
 <tr>
-<td><code>-d/--detach is not supported yet (#22); run it without -d/--detach</code></td>
-<td>The flag is planned, not implemented; the same for <code>-p</code>, <code>-v</code> and <code>--pod</code>.</td>
+<td><code>-p/--publish is not supported yet (#27); run it without -p/--publish</code></td>
+<td>The flag is planned, not implemented; the same for <code>-v</code> and <code>--pod</code>.</td>
+</tr>
+<tr>
+<td><code>the container's control socket … would be longer than the 103 bytes a socket path may have</code></td>
+<td>Linux and macOS: the data folder is too deep for the socket a container's monitor listens on. Set <code>OCI_HERMIT_DATA_DIR</code> to a shorter folder.</td>
+</tr>
+<tr>
+<td><code>the container's monitor stopped before it was ready: …</code></td>
+<td>The background <code>oci-hermit</code> that runs the container could not start it; the rest of the message, or <code>monitor.log</code>, says why.</td>
 </tr>
 <tr>
 <td><code>the container name "&lt;name&gt;" is already in use by container …</code></td>
@@ -1786,6 +1818,29 @@ store does not have also leads to a pull.</p>
 </tbody>
 </table>
 <p>All of these make <code>run</code> exit with 125.</p>
+<h2 id="a-container-will-not-stop-or-go-away">A container will not stop or go away<a class="headerlink" href="#a-container-will-not-stop-or-go-away" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Message</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>container &lt;name&gt; is running; stop it first …</code></td>
+<td><code>oci-hermit stop &lt;name&gt;</code>, or <code>oci-hermit rm -f &lt;name&gt;</code>.</td>
+</tr>
+<tr>
+<td><code>could not stop container &lt;name&gt;: cannot reach its monitor: …</code></td>
+<td>The container's monitor is not answering. Find it (<code>ps aux \| grep __monitor</code>, or Task Manager on Windows: an <code>oci-hermit.exe</code> whose command line ends with the container's ID), end it, and its QEMU stops with it. The container then shows as <code>Exited (unknown)</code> and <code>rm</code> removes it.</td>
+</tr>
+</tbody>
+</table>
+<p>On Windows, <code>id=$(oci-hermit run -d …)</code> and other pipes from a <code>run -d</code> do not finish while the container runs,
+because its monitor inherits the pipe (<a href="https://github.com/millsks/oci-hermit/issues/105">#105</a>). Redirect the output to a file instead: <code>oci-hermit run -d … &gt; id.txt</code>.</p>
+<p>A <code>run</code> without <code>-d</code> takes its container down with it: closing the terminal or killing that <code>run</code> stops the
+container, which then shows as <code>Exited (137)</code>. Use <code>-d</code> for a container that should keep running.</p>
 <h2 id="the-image-store-is-busy">The image store is busy<a class="headerlink" href="#the-image-store-is-busy" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>oci-hermit: the image store is in use by another oci-hermit (a pull, load or run); try again when it has finished
 </code></pre></div>

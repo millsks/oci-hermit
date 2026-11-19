@@ -1540,9 +1540,19 @@ nothing out.</p>
 <td>The size of the emulated VM.</td>
 </tr>
 <tr>
+<td><code>stop</code></td>
+<td><code>SIGTERM</code>, then <code>SIGKILL</code> after 10 seconds.</td>
+<td>Powers the sandbox off at once: exit code 137 (a grace period comes with <a href="https://github.com/millsks/oci-hermit/issues/25">#25</a>).</td>
+</tr>
+<tr>
+<td>Running containers</td>
+<td>Kept by a daemon (<code>dockerd</code>) or, in Podman, by a <code>conmon</code> process per container.</td>
+<td>Kept by a monitor process per container, as Podman's <code>conmon</code>; no daemon. A <code>run</code> without <code>-d</code> takes its container down with it if it is killed.</td>
+</tr>
+<tr>
 <td>Containers</td>
 <td>Kept after they stop, until <code>rm</code>, with their files.</td>
-<td>Kept after they stop, until <code>rm</code> (<code>--rm</code> removes them at once), but only as a record: name, image, command and exit code. The files a command changed go with its sandbox. Detached containers come with <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>.</td>
+<td>Kept after they stop, until <code>rm</code> (<code>--rm</code> removes them at once), but only as a record and the output: name, image, command, exit code and <code>logs</code>. The files a command changed go with its sandbox.</td>
 </tr>
 <tr>
 <td>Building images</td>

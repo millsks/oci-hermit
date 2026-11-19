@@ -1572,6 +1572,12 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 <td><code>$XDG_DATA_HOME/oci-hermit/containers</code>, or <code>~/.local/share/oci-hermit/containers</code></td>
 </tr>
 <tr>
+<td>Containers' control sockets</td>
+<td>named pipes, <code>\\.\pipe\oci-hermit-&lt;id&gt;</code></td>
+<td><code>~/Library/Application Support/oci-hermit/sockets</code></td>
+<td><code>$XDG_DATA_HOME/oci-hermit/sockets</code>, or <code>~/.local/share/oci-hermit/sockets</code></td>
+</tr>
+<tr>
 <td>Each sandbox's initramfs and logs</td>
 <td><code>%TMP%\oci-hermit\sandbox-*</code></td>
 <td><code>$TMPDIR/oci-hermit/sandbox-*</code></td>
@@ -1592,10 +1598,14 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 </tbody>
 </table>
 <p>Each container is a folder named by its ID in <code>containers/</code>: <code>container.json</code> (what it runs, from which image, its
-name) and <code>state.json</code> (running or exited, its exit code). <code>oci-hermit rm</code> removes it; <code>run --rm</code> removes it when
-the command ends.</p>
+name), <code>state.json</code> (running or exited, its exit code), <code>container.log</code> (its output, for <code>logs</code>) and <code>launch.json</code>
+(how its monitor starts the sandbox). <code>oci-hermit rm</code> removes it; <code>run --rm</code> removes it when the command ends.</p>
+<p>A running container's monitor listens for <code>stop</code> on a Unix socket in <code>sockets/</code>, a folder only you can open, or on
+Windows on a named pipe that refuses other machines. A socket's path must fit in 103 bytes, so on Linux and macOS
+<code>OCI_HERMIT_DATA_DIR</code> cannot be a very deep folder: <code>run</code> says so if it is.</p>
 <p>oci-hermit never writes beside itself, so its folder can be read-only. It does not delete old <code>sandbox-*</code> folders:
-each holds the initramfs (about the image's size) and the logs of one <code>run</code> or <code>machine boot</code>. Delete them when you
+each holds the initramfs (about the image's size) and the logs of one <code>run</code> or <code>machine boot</code> (<code>console.log</code>,
+<code>qemu.log</code>, and for a <code>run</code> the monitor's <code>monitor.log</code>). Delete them when you
 no longer need the logs.</p>
 <p>The image store is an <a href="https://github.com/opencontainers/image-spec/blob/main/image-layout.md">OCI image layout</a>:
 <code>index.json</code> names the images, <code>blobs/sha256/</code> holds their contents, and <code>lock</code> and <code>index.lock</code> coordinate several

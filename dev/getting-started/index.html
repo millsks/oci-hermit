@@ -1869,7 +1869,9 @@ file).</p>
 </ul>
 <p>Set <code>OCI_HERMIT_TIMINGS=1</code> to see how long each phase of a <code>run</code> took. Booting dominates; on CI hosts a shell is
 ready in 1 to 6 seconds (see <a href="../performance/">Performance and limits</a>).</p>
-<p><code>run</code> refuses the flags that are not implemented yet (<code>-d</code>, <code>-p</code>, <code>-v</code>, <code>--pod</code>) instead of ignoring them.
+<p><code>run -d</code> starts a container in the background and prints its ID; <code>oci-hermit logs -f &lt;name&gt;</code> follows its output
+and <code>oci-hermit stop &lt;name&gt;</code> stops it. <code>run</code> refuses the flags that are not implemented yet (<code>-p</code>, <code>-v</code>, <code>--pod</code>)
+instead of ignoring them.
 The <a href="../roadmap/">roadmap</a> says when they come.</p>
 <h2 id="managing-images">Managing images<a class="headerlink" href="#managing-images" title="Permanent link">&para;</a></h2>
 <p>The image commands work as in Podman and Docker. They only touch the image store, so they need no sandbox:</p>
