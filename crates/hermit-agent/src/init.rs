@@ -8,9 +8,12 @@
 //!
 //! Before anything else it moves its root off the initramfs onto a tmpfs ([`System::leave_initramfs`]): crun's
 //! `pivot_root` refuses an initramfs root. The command runs in a container (protocol 1.4): the agent writes an OCI
-//! runtime bundle whose `config.json` comes from [`container_config`], and crun runs it.
+//! runtime bundle whose `config.json` comes from [`container_config`], and crun runs it. While it runs, the host
+//! can start more commands in it (protocol 1.5, `oci-hermit exec`), which `crun exec` joins to the container; each is
+//! known by the process number the host gave it, and the first command is process 0.
 
-use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, PROTOCOL_VERSION, Stream, b64};
+use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, MAIN, PROTOCOL_VERSION, Process, Stream, b64};
+use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Write};
 
 /// A signal the agent waits for.
@@ -43,7 +46,7 @@ pub struct Reaped {
     pub status: String,
 }
 
-/// The command a `Run` asks for.
+/// The command a `Run` or an `Exec` asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunSpec {
     pub argv: Vec<String>,
@@ -53,6 +56,7 @@ pub struct RunSpec {
     pub size: Option<(u16, u16)>,
     /// Who the command runs as; root when `None`.
     pub user: Option<hermit_proto::User>,
+    /// The container's hostname; an `Exec` joins the container `Run` named.
     pub hostname: String,
 }
 
@@ -145,8 +149,8 @@ pub enum Event {
     Control(Frame),
     /// The host's end of the control channel went away.
     ControlClosed,
-    /// The running command wrote this.
-    Output(Stream, Vec<u8>),
+    /// A running command wrote this.
+    Output(Process, Stream, Vec<u8>),
 }
 
 /// The system calls PID 1 needs.
@@ -168,14 +172,16 @@ pub trait System {
     /// Mount the image's layer disks (by serial number, bottom first) read-only and stack them with overlayfs on
     /// the image root, under a throwaway writable layer in memory (1.3).
     fn mount_root(&mut self, layers: &[String]) -> io::Result<()>;
-    /// Start the command in the image's root filesystem, and return its process ID.
+    /// Start the container and its command in the image's root filesystem, as process 0, and return its process ID.
     fn start(&mut self, spec: &RunSpec) -> io::Result<i32>;
-    /// Pass bytes to the running command's stdin.
-    fn write_stdin(&mut self, data: &[u8]) -> io::Result<()>;
-    /// Close the running command's stdin (a terminal is left open).
-    fn close_stdin(&mut self);
-    /// Whatever output the command left unread, once it has exited.
-    fn drain_output(&mut self) -> Vec<(Stream, Vec<u8>)>;
+    /// Start another command in the running container, as `process`, and return its process ID (1.5).
+    fn exec(&mut self, process: Process, spec: &RunSpec) -> io::Result<i32>;
+    /// Pass bytes to a running command's stdin.
+    fn write_stdin(&mut self, process: Process, data: &[u8]) -> io::Result<()>;
+    /// Close a running command's stdin (a terminal is left open).
+    fn close_stdin(&mut self, process: Process);
+    /// Whatever output a command left unread, once it has exited; it is forgotten after that.
+    fn drain_output(&mut self, process: Process) -> Vec<(Stream, Vec<u8>)>;
     /// Reap every child that has exited, without blocking.
     fn reap(&mut self) -> io::Result<Vec<Reaped>>;
     /// Flush filesystem buffers.
@@ -256,11 +262,9 @@ pub fn hosts_file(hostname: &str) -> String {
     format!("127.0.0.1\tlocalhost {hostname}\n::1\tlocalhost ip6-localhost ip6-loopback\n")
 }
 
-/// The OCI runtime configuration (`config.json`) for `spec`, as Docker would make it: new PID, mount, IPC, UTS,
-/// network and cgroup namespaces (no user namespace: the VM is the boundary, and its root is the container's),
-/// Docker's default capabilities, masked and read-only kernel paths, and only the usual devices. `etc` is the
-/// folder with the container's `hosts` and `hostname`.
-pub fn container_config(spec: &RunSpec, etc: &str) -> serde_json::Value {
+/// The `process` of an OCI runtime configuration for `spec`: its command, user, terminal and Docker's default
+/// capabilities. `crun exec --process` takes the same object.
+pub fn process_config(spec: &RunSpec) -> serde_json::Value {
     use serde_json::json;
     let (uid, gid, groups) = spec
         .user
@@ -282,6 +286,16 @@ pub fn container_config(spec: &RunSpec, etc: &str) -> serde_json::Value {
     if let (true, Some((rows, cols))) = (spec.tty, spec.size) {
         process["consoleSize"] = json!({ "height": rows, "width": cols });
     }
+    process
+}
+
+/// The OCI runtime configuration (`config.json`) for `spec`, as Docker would make it: new PID, mount, IPC, UTS,
+/// network and cgroup namespaces (no user namespace: the VM is the boundary, and its root is the container's),
+/// Docker's default capabilities, masked and read-only kernel paths, and only the usual devices. `etc` is the
+/// folder with the container's `hosts` and `hostname`.
+pub fn container_config(spec: &RunSpec, etc: &str) -> serde_json::Value {
+    use serde_json::json;
+    let process = process_config(spec);
     // Docker's device rules: anything may be created (`m`), only these opened.
     // A missing major or minor is a wildcard; crun reads null as an error.
     let device = |kind: &str, major: Option<i64>, minor: Option<i64>, access: &str| {
@@ -404,25 +418,38 @@ fn setup(sys: &mut impl System, out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// The commands the host started, while they run.
+#[derive(Debug, Default)]
+struct Commands {
+    /// Each running command's process ID, and the number the host knows it by.
+    running: BTreeMap<i32, Process>,
+    /// The container's hostname, once `Run` started it: one container per sandbox.
+    container: Option<String>,
+}
+
+impl Commands {
+    fn is_running(&self, process: Process) -> bool {
+        self.running.values().any(|&p| p == process)
+    }
+}
+
 /// Handle events until one asks the agent to stop.
 fn serve(sys: &mut impl System, out: &mut impl Write) {
-    // The process ID of the command a `Run` started, until it is reaped.
-    let mut running: Option<i32> = None;
-    let mut ran = false;
+    let mut commands = Commands::default();
     loop {
         match sys.next_event() {
-            Ok(Event::Signal(Signal::Child)) => reap(sys, out, &mut running),
+            Ok(Event::Signal(Signal::Child)) => reap(sys, out, &mut commands),
             Ok(Event::Signal(sig)) => {
                 log(out, format_args!("received {}, shutting down", sig.name()));
                 return;
             }
             Ok(Event::Control(frame)) => {
-                if answer(sys, out, frame, &mut running, &mut ran).is_break() {
+                if answer(sys, out, frame, &mut commands).is_break() {
                     return;
                 }
             }
             Ok(Event::ControlClosed) => log(out, format_args!("control channel closed by the host")),
-            Ok(Event::Output(stream, bytes)) => send_output(sys, out, stream, &bytes),
+            Ok(Event::Output(process, stream, bytes)) => send_output(sys, out, process, stream, &bytes),
             Err(e) => {
                 log(out, format_args!("fatal: waiting for events: {e}"));
                 return;
@@ -442,12 +469,13 @@ fn send(sys: &mut impl System, out: &mut impl Write, reply: &GuestMessage) {
     }
 }
 
-fn send_output(sys: &mut impl System, out: &mut impl Write, stream: Stream, bytes: &[u8]) {
+fn send_output(sys: &mut impl System, out: &mut impl Write, process: Process, stream: Stream, bytes: &[u8]) {
     for chunk in bytes.chunks(hermit_proto::CHUNK) {
         send(
             sys,
             out,
             &GuestMessage::Output {
+                process,
                 stream,
                 data: b64::encode(chunk),
             },
@@ -456,7 +484,12 @@ fn send_output(sys: &mut impl System, out: &mut impl Write, stream: Stream, byte
 }
 
 fn error(message: impl Into<String>) -> GuestMessage {
+    failed(MAIN, message)
+}
+
+fn failed(process: Process, message: impl Into<String>) -> GuestMessage {
     GuestMessage::Error {
+        process,
         message: message.into(),
     }
 }
@@ -466,8 +499,7 @@ fn answer(
     sys: &mut impl System,
     out: &mut impl Write,
     frame: Frame,
-    running: &mut Option<i32>,
-    ran: &mut bool,
+    commands: &mut Commands,
 ) -> std::ops::ControlFlow<()> {
     use std::ops::ControlFlow;
     let message = match frame {
@@ -526,7 +558,7 @@ fn answer(
             hostname,
         } => {
             let hostname = hostname.unwrap_or_else(|| DEFAULT_HOSTNAME.to_string());
-            if *ran {
+            if commands.container.is_some() {
                 error("a command already ran in this sandbox")
             } else if argv.is_empty() {
                 error("no command to run")
@@ -560,11 +592,11 @@ fn answer(
                 };
                 match sys.start(&spec) {
                     Ok(pid) => {
-                        *ran = true;
-                        *running = Some(pid);
+                        commands.container = Some(spec.hostname.clone());
+                        commands.running.insert(pid, MAIN);
                         let uid = spec.user.as_ref().map_or(0, |u| u.uid);
                         log(out, format_args!("started {:?} as pid {pid}, uid {uid}", spec.argv));
-                        GuestMessage::Started { pid }
+                        GuestMessage::Started { process: MAIN, pid }
                     }
                     Err(e) => {
                         log(out, format_args!("starting {:?} failed: {e}", spec.argv));
@@ -573,18 +605,66 @@ fn answer(
                 }
             }
         }
-        HostMessage::Stdin { data } => match (b64::decode(&data), running.is_some()) {
-            (None, _) => error("stdin data is not base64"),
-            (Some(_), false) => error("no command is running"),
+        HostMessage::Exec {
+            process,
+            argv,
+            env,
+            cwd,
+            tty,
+            rows,
+            cols,
+            user,
+        } => match &commands.container {
+            _ if process == MAIN || commands.is_running(process) => {
+                failed(process, format!("process {process} is already in use"))
+            }
+            _ if argv.is_empty() => failed(process, "no command to run"),
+            Some(hostname) if commands.is_running(MAIN) => {
+                let spec = RunSpec {
+                    argv,
+                    env,
+                    cwd,
+                    tty,
+                    size: rows.zip(cols),
+                    user,
+                    hostname: hostname.clone(),
+                };
+                match sys.exec(process, &spec) {
+                    Ok(pid) => {
+                        commands.running.insert(pid, process);
+                        let uid = spec.user.as_ref().map_or(0, |u| u.uid);
+                        log(
+                            out,
+                            format_args!("exec {process}: started {:?} as pid {pid}, uid {uid}", spec.argv),
+                        );
+                        GuestMessage::Started { process, pid }
+                    }
+                    Err(e) => {
+                        log(
+                            out,
+                            format_args!("exec {process}: starting {:?} failed: {e}", spec.argv),
+                        );
+                        failed(process, format!("starting {}: {e}", spec.argv[0]))
+                    }
+                }
+            }
+            _ => failed(process, "the container is not running"),
+        },
+        HostMessage::Stdin { process, data } => match (b64::decode(&data), commands.is_running(process)) {
+            (None, _) => failed(process, "stdin data is not base64"),
+            (Some(_), false) => failed(process, "no command is running"),
             (Some(bytes), true) => {
-                if let Err(e) = sys.write_stdin(&bytes) {
-                    log(out, format_args!("writing to the command's stdin failed: {e}"));
+                if let Err(e) = sys.write_stdin(process, &bytes) {
+                    log(
+                        out,
+                        format_args!("writing to the stdin of process {process} failed: {e}"),
+                    );
                 }
                 return ControlFlow::Continue(());
             }
         },
-        HostMessage::StdinClosed => {
-            sys.close_stdin();
+        HostMessage::StdinClosed { process } => {
+            sys.close_stdin(process);
             return ControlFlow::Continue(());
         }
     };
@@ -592,17 +672,16 @@ fn answer(
     ControlFlow::Continue(())
 }
 
-fn reap(sys: &mut impl System, out: &mut impl Write, running: &mut Option<i32>) {
+fn reap(sys: &mut impl System, out: &mut impl Write, commands: &mut Commands) {
     match sys.reap() {
         Ok(children) => {
             for c in children {
                 log(out, format_args!("reaped pid {}: {}", c.pid, c.status));
-                if *running == Some(c.pid) {
-                    *running = None;
-                    for (stream, bytes) in sys.drain_output() {
-                        send_output(sys, out, stream, &bytes);
+                if let Some(process) = commands.running.remove(&c.pid) {
+                    for (stream, bytes) in sys.drain_output(process) {
+                        send_output(sys, out, process, stream, &bytes);
                     }
-                    send(sys, out, &GuestMessage::Exited { code: c.code });
+                    send(sys, out, &GuestMessage::Exited { process, code: c.code });
                 }
             }
         }
@@ -640,9 +719,11 @@ mod tests {
         started: Vec<RunSpec>,
         mounted_root: Vec<Vec<String>>,
         mount_root_error: bool,
-        stdin: Vec<u8>,
-        stdin_closed: bool,
+        stdin: Vec<(Process, Vec<u8>)>,
+        stdin_closed: Vec<Process>,
         leftover: Vec<(Stream, Vec<u8>)>,
+        execs: Vec<(Process, RunSpec)>,
+        exec_error: bool,
     }
 
     impl System for Fake {
@@ -714,14 +795,29 @@ mod tests {
             self.started.push(spec.clone());
             Ok(42)
         }
-        fn write_stdin(&mut self, data: &[u8]) -> io::Result<()> {
-            self.stdin.extend_from_slice(data);
+        fn exec(&mut self, process: Process, spec: &RunSpec) -> io::Result<i32> {
+            if self.exec_error {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    "executable file not found in $PATH",
+                ));
+            }
+            self.calls.push(format!("exec {process}"));
+            self.execs.push((process, spec.clone()));
+            Ok(100 + i32::try_from(process).unwrap())
+        }
+        fn write_stdin(&mut self, process: Process, data: &[u8]) -> io::Result<()> {
+            match self.stdin.last_mut() {
+                Some((p, bytes)) if *p == process => bytes.extend_from_slice(data),
+                _ => self.stdin.push((process, data.to_vec())),
+            }
             Ok(())
         }
-        fn close_stdin(&mut self) {
-            self.stdin_closed = true;
+        fn close_stdin(&mut self, process: Process) {
+            self.stdin_closed.push(process);
         }
-        fn drain_output(&mut self) -> Vec<(Stream, Vec<u8>)> {
+        fn drain_output(&mut self, process: Process) -> Vec<(Stream, Vec<u8>)> {
+            self.calls.push(format!("drain {process}"));
             std::mem::take(&mut self.leftover)
         }
         fn reap(&mut self) -> io::Result<Vec<Reaped>> {
@@ -781,7 +877,7 @@ mod tests {
         );
         assert!(log.contains("moved the root onto a tmpfs"));
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.4)"));
+        assert!(log.contains("ready (control protocol 1.5)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -823,7 +919,7 @@ mod tests {
         let (_, log) = run_fake(&mut sys);
         let got = replies(&sys);
         assert!(
-            matches!(&got[0], GuestMessage::Error { message } if message.contains("9.0 is not supported")),
+            matches!(&got[0], GuestMessage::Error { message, .. } if message.contains("9.0 is not supported")),
             "{got:?}"
         );
         assert!(matches!(got[1], GuestMessage::Ready { .. }));
@@ -855,7 +951,7 @@ mod tests {
         let errors: Vec<_> = got[..4]
             .iter()
             .map(|m| match m {
-                GuestMessage::Error { message } => message.clone(),
+                GuestMessage::Error { message, .. } => message.clone(),
                 other => panic!("{other:?}"),
             })
             .collect();
@@ -882,7 +978,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.4)"));
+        assert!(log.contains("ready (control protocol 1.5)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -923,6 +1019,101 @@ mod tests {
             code,
             status: format!("exited with status {code}"),
         }])
+    }
+
+    fn exec_line(process: Process, argv: &[&str]) -> io::Result<Event> {
+        line(&HostMessage::Exec {
+            process,
+            argv: argv.iter().map(|a| a.to_string()).collect(),
+            env: vec!["PATH=/bin".into()],
+            cwd: "/srv".into(),
+            tty: false,
+            rows: None,
+            cols: None,
+            user: None,
+        })
+    }
+
+    #[test]
+    fn execs_more_commands_in_the_running_container_and_tells_them_apart() {
+        let reaped = |pid, code| Reaped {
+            pid,
+            code,
+            status: format!("exited with status {code}"),
+        };
+        let mut sys = Fake {
+            events: VecDeque::from([
+                // Nothing runs yet.
+                exec_line(1, &["ls"]),
+                run_line(&["sleep", "1d"], false),
+                exec_line(1, &["cat"]),
+                exec_line(1, &["ls"]),
+                exec_line(MAIN, &["ls"]),
+                exec_line(2, &[]),
+                line(&HostMessage::Stdin {
+                    process: 1,
+                    data: b64::encode(b"to the exec"),
+                }),
+                line(&HostMessage::StdinClosed { process: 1 }),
+                Ok(Event::Output(1, Stream::Stdout, b"to the exec".to_vec())),
+                Ok(Event::Signal(Signal::Child)),
+                // The container's command ended, and with it the container.
+                Ok(Event::Signal(Signal::Child)),
+                exec_line(3, &["ls"]),
+                line(&HostMessage::Shutdown),
+            ]),
+            reaps: VecDeque::from([Ok(vec![reaped(101, 0)]), Ok(vec![reaped(42, 137)])]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(sys.execs.len(), 1);
+        let (process, spec) = &sys.execs[0];
+        assert_eq!(*process, 1);
+        assert_eq!(spec.argv, ["cat"]);
+        assert_eq!(spec.cwd, "/srv");
+        assert_eq!(spec.hostname, DEFAULT_HOSTNAME, "it joins the container `Run` started");
+        assert_eq!(sys.stdin, [(1, b"to the exec".to_vec())]);
+        assert_eq!(sys.stdin_closed, [1]);
+        let error = |process, text: &str| GuestMessage::Error {
+            process,
+            message: text.into(),
+        };
+        assert_eq!(
+            replies(&sys),
+            [
+                error(1, "the container is not running"),
+                GuestMessage::Started { process: MAIN, pid: 42 },
+                GuestMessage::Started { process: 1, pid: 101 },
+                error(1, "process 1 is already in use"),
+                error(MAIN, "process 0 is already in use"),
+                error(2, "no command to run"),
+                GuestMessage::Output {
+                    process: 1,
+                    stream: Stream::Stdout,
+                    data: b64::encode(b"to the exec"),
+                },
+                GuestMessage::Exited { process: 1, code: 0 },
+                GuestMessage::Exited {
+                    process: MAIN,
+                    code: 137
+                },
+                error(3, "the container is not running"),
+                GuestMessage::ShuttingDown,
+            ]
+        );
+        assert!(log.contains("exec 1: started [\"cat\"] as pid 101, uid 0"), "{log}");
+
+        let mut sys = Fake {
+            exec_error: true,
+            events: VecDeque::from([run_line(&["sleep", "1d"], false), exec_line(4, &["nope"])]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(
+            replies(&sys)[1],
+            error(4, "starting nope: executable file not found in $PATH")
+        );
+        assert!(log.contains("exec 4: starting [\"nope\"] failed"));
     }
 
     #[test]
@@ -995,7 +1186,7 @@ mod tests {
         assert!(sys.started.is_empty());
         assert!(matches!(
             &replies(&sys)[0],
-            GuestMessage::Error { message } if message.contains("mounting the image's layers: no disk with serial layer1")
+            GuestMessage::Error { message, .. } if message.contains("mounting the image's layers: no disk with serial layer1")
         ));
 
         // Without layers the image is in the initramfs, and nothing is mounted for it.
@@ -1028,7 +1219,7 @@ mod tests {
         let mut sys = Fake {
             events: VecDeque::from([
                 run_line(&["sh", "-c", "echo hi"], true),
-                Ok(Event::Output(Stream::Stdout, b"hi\r\n".to_vec())),
+                Ok(Event::Output(MAIN, Stream::Stdout, b"hi\r\n".to_vec())),
                 Ok(Event::Signal(Signal::Child)),
                 line(&HostMessage::Shutdown),
             ]),
@@ -1052,16 +1243,18 @@ mod tests {
         assert_eq!(
             replies(&sys),
             [
-                GuestMessage::Started { pid: 42 },
+                GuestMessage::Started { process: MAIN, pid: 42 },
                 GuestMessage::Output {
+                    process: MAIN,
                     stream: Stream::Stdout,
                     data: b64::encode(b"hi\r\n")
                 },
                 GuestMessage::Output {
+                    process: MAIN,
                     stream: Stream::Stderr,
                     data: b64::encode(b"bye")
                 },
-                GuestMessage::Exited { code: 7 },
+                GuestMessage::Exited { process: MAIN, code: 7 },
                 GuestMessage::ShuttingDown,
             ]
         );
@@ -1073,13 +1266,14 @@ mod tests {
         let mut sys = with_events(vec![
             run_line(&["cat"], false),
             line(&HostMessage::Stdin {
+                process: MAIN,
                 data: b64::encode(b"input"),
             }),
-            line(&HostMessage::StdinClosed),
+            line(&HostMessage::StdinClosed { process: MAIN }),
         ]);
         run_fake(&mut sys);
-        assert_eq!(sys.stdin, b"input");
-        assert!(sys.stdin_closed);
+        assert_eq!(sys.stdin, [(MAIN, b"input".to_vec())]);
+        assert_eq!(sys.stdin_closed, [MAIN]);
     }
 
     #[test]
@@ -1091,9 +1285,9 @@ mod tests {
         ]);
         run_fake(&mut sys);
         let got = replies(&sys);
-        assert!(matches!(&got[0], GuestMessage::Error { message } if message == "no command to run"));
-        assert_eq!(got[1], GuestMessage::Started { pid: 42 });
-        assert!(matches!(&got[2], GuestMessage::Error { message } if message.contains("already ran")));
+        assert!(matches!(&got[0], GuestMessage::Error { message, .. } if message == "no command to run"));
+        assert_eq!(got[1], GuestMessage::Started { process: MAIN, pid: 42 });
+        assert!(matches!(&got[2], GuestMessage::Error { message, .. } if message.contains("already ran")));
 
         let mut sys = Fake {
             start_error: true,
@@ -1103,7 +1297,7 @@ mod tests {
         let (_, log) = run_fake(&mut sys);
         let got = replies(&sys);
         assert!(
-            matches!(&got[0], GuestMessage::Error { message } if message == "starting nope: executable file not found in $PATH"),
+            matches!(&got[0], GuestMessage::Error { message, .. } if message == "starting nope: executable file not found in $PATH"),
             "{got:?}"
         );
         assert!(log.contains("starting [\"nope\"] failed"));
@@ -1112,15 +1306,19 @@ mod tests {
     #[test]
     fn rejects_bad_stdin() {
         let mut sys = with_events(vec![
-            line(&HostMessage::Stdin { data: "!!".into() }),
             line(&HostMessage::Stdin {
+                process: MAIN,
+                data: "!!".into(),
+            }),
+            line(&HostMessage::Stdin {
+                process: MAIN,
                 data: b64::encode(b"x"),
             }),
         ]);
         run_fake(&mut sys);
         let got = replies(&sys);
-        assert!(matches!(&got[0], GuestMessage::Error { message } if message == "stdin data is not base64"));
-        assert!(matches!(&got[1], GuestMessage::Error { message } if message == "no command is running"));
+        assert!(matches!(&got[0], GuestMessage::Error { message, .. } if message == "stdin data is not base64"));
+        assert!(matches!(&got[1], GuestMessage::Error { message, .. } if message == "no command is running"));
     }
 
     #[test]
@@ -1150,7 +1348,9 @@ mod tests {
             })]);
             run_fake(&mut sys);
             assert!(sys.started.is_empty(), "{bad:?}");
-            assert!(matches!(&replies(&sys)[0], GuestMessage::Error { message } if message.contains("not a hostname")));
+            assert!(
+                matches!(&replies(&sys)[0], GuestMessage::Error { message, .. } if message.contains("not a hostname"))
+            );
         }
         assert!(valid_hostname("4f2a9c1d0b3e") && valid_hostname("web-1.local"));
     }

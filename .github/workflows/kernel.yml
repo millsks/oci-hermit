@@ -177,6 +177,21 @@ jobs:
           # rm -f stops a running container and removes it.
           "$hermit" run -d --name idle debian.tar sleep 1000 > /dev/null
           "$hermit" ps | grep -q ' idle$'
+          # exec runs more commands in the running container: its PID 1, files and namespaces, with its own exit
+          # code, user, directory, environment, stdin and terminal.
+          pid1=$("$hermit" exec idle sh -c 'tr "\0" " " < /proc/1/cmdline')
+          [ "$pid1" = "sleep 1000 " ] || { echo "::error::exec saw PID 1 as '$pid1'"; exit 1; }
+          "$hermit" exec idle sh -c 'echo shared > /tmp/note'
+          [ "$("$hermit" exec idle cat /tmp/note)" = shared ] || { echo "::error::exec did not share the container's files"; exit 1; }
+          [ "$("$hermit" exec -u nobody idle id -u)" = 65534 ]
+          # shellcheck disable=SC2016 # expands in the guest's shell
+          [ "$("$hermit" exec -w /tmp -e GREETING=hello idle sh -c 'echo "$GREETING from $(pwd)"')" = "hello from /tmp" ]
+          [ "$(echo piped | "$hermit" exec -i idle cat)" = piped ]
+          "$hermit" exec -t idle tty | grep -q '^/dev/pts/'
+          code=0; "$hermit" exec idle sh -c 'exit 6' || code=$?
+          [ "$code" = 6 ] || { echo "::error::exec exited with $code, not 6"; exit 1; }
+          code=0; "$hermit" exec idle no-such-command 2> exec.err || code=$?
+          if [ "$code" != 125 ] || ! grep -q 'executable file not found' exec.err; then cat exec.err; exit 1; fi
           "$hermit" rm -f idle
           if "$hermit" ps -a | grep -q ' idle$'; then echo "::error::rm -f left idle"; exit 1; fi
       - name: Show the sandbox console
@@ -339,6 +354,11 @@ jobs:
             sleep 1
           done
           [ "$("$hermit" logs ticker | tr -d '\r')" = started ] || { echo "::error::logs: $("$hermit" logs ticker)"; exit 1; }
+          # exec joins it, with its own exit code and stdin.
+          code=0; inside=$("$hermit" exec ticker sh -c 'tr "\0" " " < /proc/1/cmdline; exit 6') || code=$?
+          [ "$code" = 6 ] || { echo "::error::exec exited with $code, not 6"; exit 1; }
+          [[ "$(tr -d '\r' <<< "$inside")" == "sh -c echo started;"* ]] || { echo "::error::exec saw PID 1 as '$inside'"; exit 1; }
+          [ "$(echo piped | "$hermit" exec -i ticker cat | tr -d '\r')" = piped ]
           "$hermit" stop ticker
           "$hermit" ps -a | grep ' ticker$' | grep -q 'Exited (137)' || { "$hermit" ps -a; exit 1; }
           "$hermit" rm ticker

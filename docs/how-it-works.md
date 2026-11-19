@@ -38,7 +38,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <div class="oh-scroll">
 <svg viewBox="0 0 1000 760" role="img" aria-labelledby="oh-comp-title oh-comp-desc">
 <title id="oh-comp-title">oci-hermit components</title>
-<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: exec, a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
+<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
 <defs>
 <marker id="oh-ah" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="oh-ah-acc" class="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
@@ -141,13 +141,12 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <text x="554" y="500" class="small">PID 1 of its namespace, as the image's User, or -u</text>
 <path class="ln" d="M910,378 V423" marker-end="url(#oh-ah)"/>
 <text x="902" y="408" text-anchor="end" class="mono small">Run</text>
-<rect class="r-plan" x="500" y="556" width="470" height="176" rx="8"/>
+<rect class="r-plan" x="500" y="556" width="470" height="154" rx="8"/>
 <text x="514" y="578" class="b lbl-plan small">PLANNED &#183; not in the code yet</text>
-<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  exec: more commands in a running container (#22)</text>
-<text x="514" y="624" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
-<text x="514" y="646" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
-<text x="514" y="668" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
-<text x="514" y="690" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
+<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
+<text x="514" y="624" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
+<text x="514" y="646" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
+<text x="514" y="668" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
 <text x="514" y="716" class="small m">Today the VM has no network device.</text>
 </svg>
 </div>
@@ -280,7 +279,10 @@ container's running lock, starts QEMU (whose lifetime is tied to the monitor's),
 channel, a Unix socket in the data folder that only you can open or a named pipe on Windows, in the same kind of
 JSON lines: it attaches, gets `Booted`, `Started`, the output and `Exited`, and sends your stdin. Without `-d` the
 monitor stops the sandbox if `run` goes away; with `-d`, `run` prints the container's ID after `Started` and returns,
-and `logs` reads the log while `stop` asks the monitor over the same channel to power the sandbox off.
+and `logs` reads the log while `stop` asks the monitor over the same channel to power the sandbox off. `exec` asks
+it to start another command in the container: the monitor sends the agent `Exec` (protocol 1.5) with a process
+number, the agent runs it with `crun exec`, and that command's input, output and exit code travel tagged with its
+number, to that `exec` alone.
 
 ## Isolation
 
@@ -368,7 +370,6 @@ command as root. `oci-hermit version` prints the protocol version the host speak
 
 ## What changes later
 
-- **More commands in a running container** (#22): `exec`, through the container's monitor.
 - **A seccomp profile** (#102), as Docker applies by default.
 - **Networking** (#26 to #29) and **bind mounts** (#30 to #34), with the defaults described in
   [oci-hermit, Docker and Podman](docker-and-podman.md).

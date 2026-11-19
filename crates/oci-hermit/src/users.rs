@@ -26,6 +26,34 @@ impl Files for Rootfs {
     }
 }
 
+/// An image's `/etc/passwd` and `/etc/group`, read when its container starts, so `exec -u` in it resolves names the
+/// way `run -u` did (#22), without the image at hand.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Accounts {
+    pub passwd: String,
+    pub group: String,
+}
+
+impl Accounts {
+    pub fn of(files: &impl Files) -> Accounts {
+        Accounts {
+            passwd: read(files, "etc/passwd"),
+            group: read(files, "etc/group"),
+        }
+    }
+}
+
+impl Files for Accounts {
+    fn entry(&self, path: &str) -> Option<Entry> {
+        match path {
+            "etc/passwd" => Some(Entry::File(self.passwd.clone().into_bytes())),
+            "etc/group" => Some(Entry::File(self.group.clone().into_bytes())),
+            "etc" => Some(Entry::Other),
+            _ => None,
+        }
+    }
+}
+
 /// Who a command runs as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -236,6 +264,22 @@ nogroup:x:65534:
         // A uid with no entry runs with gid 0 and home /.
         assert_eq!(ids("4242").unwrap(), (4242, 0, vec![], "/".into()));
         assert_eq!(ids("4242:4242").unwrap(), (4242, 4242, vec![], "/".into()));
+    }
+
+    #[test]
+    fn accounts_kept_from_an_image_resolve_as_the_image_does() {
+        let accounts = Accounts::of(&image());
+        assert_eq!(accounts.passwd, PASSWD, "read through the image's links");
+        assert_eq!(accounts.group, GROUP);
+        let kept: Accounts = serde_json::from_str(&serde_json::to_string(&accounts).unwrap()).unwrap();
+        for spec in ["", "app", "1000", "app:video", "nobody", "4242"] {
+            assert_eq!(resolve(spec, &kept), resolve(spec, &image()), "{spec:?}");
+        }
+        assert!(resolve("ghost", &kept).is_err());
+        assert!(kept.entry("etc/shadow").is_none());
+        // An image without the files still runs numeric users.
+        let none = Accounts::default();
+        assert_eq!(resolve("1000:1000", &none).unwrap().uid, 1000);
     }
 
     #[test]

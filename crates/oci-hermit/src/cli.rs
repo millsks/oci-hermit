@@ -347,11 +347,24 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct ExecArgs {
+    /// Keep STDIN open
     #[arg(short, long)]
     pub interactive: bool,
+    /// Allocate a pseudo-TTY
     #[arg(short, long)]
     pub tty: bool,
+    /// Run as this user instead of the container's: name|uid[:group|gid]
+    #[arg(short, long)]
+    pub user: Option<String>,
+    /// Set an environment variable: NAME=value
+    #[arg(short, long = "env")]
+    pub env: Vec<String>,
+    /// Working directory inside the container
+    #[arg(short, long)]
+    pub workdir: Option<String>,
+    /// Container name or ID
     pub container: String,
+    /// Command and arguments
     #[arg(trailing_var_arg = true, required = true)]
     pub command: Vec<String>,
 }

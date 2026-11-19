@@ -278,6 +278,7 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
             }
         },
         cli::Command::Monitor { data_dir, id } => monitor::serve(data_dir, id, err),
+        cli::Command::Exec(args) => exec_command(args, env, out, err),
         cli::Command::Load { input } => match open_store(env).map_err(Into::into).and_then(|store| {
             load::load(std::path::Path::new(input), &store, out).map_err(Box::<dyn std::error::Error>::from)
         }) {
@@ -1081,7 +1082,8 @@ fn run_in_sandbox(
         _ => None,
     };
     let user_spec = args.user.as_deref().or(image.config.user.as_deref()).unwrap_or("");
-    let (rootfs, identity) = match &disks {
+    // The image's accounts are kept for `exec -u` in the running container.
+    let (rootfs, identity, accounts) = match &disks {
         Some(paths) => {
             let layers = erofs::Layers(
                 paths
@@ -1090,12 +1092,13 @@ fn run_in_sandbox(
                     .map(|p| erofs::reader::Disk::open_path(p))
                     .collect::<std::io::Result<_>>()?,
             );
-            (None, users::resolve(user_spec, &layers)?)
+            (None, users::resolve(user_spec, &layers)?, users::Accounts::of(&layers))
         }
         None => {
             let rootfs = image.rootfs()?;
             let identity = users::resolve(user_spec, &rootfs)?;
-            (Some(rootfs), identity)
+            let accounts = users::Accounts::of(&rootfs);
+            (Some(rootfs), identity, accounts)
         }
     };
     let argv = image.config.argv(&args.command);
@@ -1189,6 +1192,7 @@ fn run_in_sandbox(
             interactive: args.interactive,
             detach: args.detach,
             boot_timeout_secs: 120,
+            accounts,
         };
         store::write_atomically(
             &containers.dir(&container.id).join(monitor::LAUNCH),
@@ -1215,6 +1219,131 @@ fn run_in_sandbox(
         }
     };
     attach(args, env, &container, conn, &monitor_log, store, timings, out, err)
+}
+
+/// Passes this process's stdin to a monitor, on a thread of its own, until it ends.
+fn forward_stdin(mut to_monitor: Box<dyn Write + Send>) {
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; hermit_proto::CHUNK];
+        loop {
+            let request = match std::io::Read::read(&mut stdin, &mut buf) {
+                Ok(0) | Err(_) => monitor::Request::StdinClosed,
+                Ok(n) => monitor::Request::Stdin {
+                    data: hermit_proto::b64::encode(&buf[..n]),
+                },
+            };
+            let last = request == monitor::Request::StdinClosed;
+            // Dropping this half leaves the connection open: the notices still come on the other.
+            if monitor::send(to_monitor.as_mut(), &request).is_err() || last {
+                return;
+            }
+        }
+    });
+}
+
+/// `exec`: run a command in a running container, through its monitor, and exit with its exit code; 125 when it
+/// cannot be started.
+fn exec_command(args: &cli::ExecArgs, env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
+    match exec_in(args, env, out, err) {
+        Ok(code) => u8::try_from(code.rem_euclid(256)).unwrap_or(1),
+        Err(e) => {
+            let _ = writeln!(err, "oci-hermit: {e}");
+            125
+        }
+    }
+}
+
+fn exec_in(
+    args: &cli::ExecArgs,
+    env: &Env,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let containers = open_containers(env)?;
+    let data_dir = env.data_dir.as_deref().expect("the container store opened");
+    let listed = containers.find(&args.container)?;
+    let name = &listed.container.name;
+    if !listed.running {
+        return Err(format!("container {name} is not running").into());
+    }
+    let ipc::Conn { reader, mut writer } = ipc::connect(data_dir, &listed.container.id)
+        .map_err(|e| format!("cannot reach the monitor of container {name}: {e}"))?;
+    // `-e NAME` without a value passes this process's own, as Docker does; one that is not set is left out.
+    let mut vars: Vec<String> = args
+        .env
+        .iter()
+        .filter_map(|var| match var.contains('=') {
+            true => Some(var.clone()),
+            false => std::env::var(var).ok().map(|value| format!("{var}={value}")),
+        })
+        .collect();
+    if args.tty && !vars.iter().any(|v| v.starts_with("TERM=")) {
+        vars.push(format!(
+            "TERM={}",
+            std::env::var("TERM").unwrap_or_else(|_| "xterm".into())
+        ));
+    }
+    monitor::send(
+        writer.as_mut(),
+        &monitor::Request::Exec {
+            argv: args.command.clone(),
+            env: vars,
+            workdir: args.workdir.clone(),
+            user: args.user.clone(),
+            tty: args.tty,
+            size: args
+                .tty
+                .then(crossterm::terminal::size)
+                .and_then(Result::ok)
+                .map(|(cols, rows)| (rows, cols)),
+            interactive: args.interactive,
+        },
+    )?;
+    let mut writer = Some(writer);
+    let mut raw = None;
+    let (mut code, mut failure) = (None, None);
+    monitor::read_messages(reader, |notice: monitor::Notice| {
+        match notice {
+            monitor::Notice::Started => {
+                if args.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    raw = RawTerminal::enable();
+                }
+                if args.interactive
+                    && let Some(to_monitor) = writer.take()
+                {
+                    forward_stdin(to_monitor);
+                }
+            }
+            monitor::Notice::Output { stream, data } => {
+                let Some(bytes) = hermit_proto::b64::decode(&data) else {
+                    failure = Some("the monitor sent output that is not base64".to_string());
+                    return false;
+                };
+                let sink: &mut dyn Write = match stream {
+                    hermit_proto::Stream::Stdout => out,
+                    hermit_proto::Stream::Stderr => err,
+                };
+                // A reader that went away (`| head`) ends the exec here; its command runs on.
+                if sink.write_all(&bytes).and_then(|()| sink.flush()).is_err() {
+                    return false;
+                }
+            }
+            monitor::Notice::Exited { code: ended } => {
+                drop(raw.take());
+                code = Some(ended);
+            }
+            monitor::Notice::Failed { message } => failure = Some(message),
+            monitor::Notice::Done => return false,
+            monitor::Notice::Booted | monitor::Notice::Stopping => {}
+        }
+        true
+    });
+    drop(raw);
+    if let Some(message) = failure {
+        return Err(message.into());
+    }
+    Ok(code.ok_or_else(|| format!("container {name} stopped before the command ended"))?)
 }
 
 /// Follows the container `run` started, through its monitor: drops `store` once QEMU has the layer disks open, and
@@ -1259,25 +1388,9 @@ fn attach(
                     raw = RawTerminal::enable();
                 }
                 if args.interactive
-                    && let Some(mut to_monitor) = writer.take()
+                    && let Some(to_monitor) = writer.take()
                 {
-                    std::thread::spawn(move || {
-                        let mut stdin = std::io::stdin();
-                        let mut buf = [0u8; hermit_proto::CHUNK];
-                        loop {
-                            let request = match std::io::Read::read(&mut stdin, &mut buf) {
-                                Ok(0) | Err(_) => monitor::Request::StdinClosed,
-                                Ok(n) => monitor::Request::Stdin {
-                                    data: hermit_proto::b64::encode(&buf[..n]),
-                                },
-                            };
-                            let last = request == monitor::Request::StdinClosed;
-                            // Dropping this half leaves the connection open: the notices still come on the other.
-                            if monitor::send(to_monitor.as_mut(), &request).is_err() || last {
-                                return;
-                            }
-                        }
-                    });
+                    forward_stdin(to_monitor);
                 }
             }
             monitor::Notice::Output { stream, data } => {
@@ -1398,7 +1511,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.4"));
+        assert!(out.contains("control protocol 1.5"));
         assert!(err.is_empty());
     }
 
@@ -1845,8 +1958,8 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.4)"),
-                "the fake agent speaks 1.0: {out}"
+                out.contains("(control protocol 1.5)"),
+                "the fake agent speaks 1.5: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
         }
@@ -1993,6 +2106,19 @@ mod tests {
         let (code, out, err) = run_with(&env, &["logs", "web"]);
         assert_eq!((code, out.as_str(), err.as_str()), (0, "hi\n", ""));
 
+        // exec runs another command in it, by name or ID, and exits with that command's code; its output is not
+        // the container's.
+        let (code, out, err) = run_with(&env, &["exec", "-e", "A=1", "-w", "/tmp", "web", "ls"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (5, "ex\n", ""));
+        assert_eq!(run_with(&env, &["exec", &id[..12], "ls"]).0, 5);
+        assert_eq!(run_with(&env, &["logs", "web"]).1, "hi\n");
+        let (code, _, err) = run_with(&env, &["exec", "-u", "ghost", "web", "id"]);
+        assert_eq!(code, 125);
+        assert!(err.contains("\"ghost\" is not in the image's /etc/passwd"), "{err}");
+        let (code, _, err) = run_with(&env, &["exec", "nothere", "ls"]);
+        assert_eq!(code, 125);
+        assert!(err.contains("no such container: nothere"), "{err}");
+
         // rm will not remove it while it runs; stop does, and records it as killed.
         let (code, _, err) = run_with(&env, &["rm", "web"]);
         assert_eq!(code, 1);
@@ -2004,8 +2130,11 @@ mod tests {
         // Following a stopped container's logs shows them and ends.
         let (code, out, _) = run_with(&env, &["logs", "-f", id]);
         assert_eq!((code, out.as_str()), (0, "hi\n"));
-        // Stopping it again is fine, as with Docker.
+        // Stopping it again is fine, as with Docker; exec needs it running.
         assert_eq!(run_with(&env, &["stop", "web"]).0, 0);
+        let (code, _, err) = run_with(&env, &["exec", "web", "ls"]);
+        assert_eq!(code, 125);
+        assert!(err.contains("container web is not running"), "{err}");
 
         // rm -f stops a running container and removes it.
         let (code, _, err) = detached("job");
@@ -2013,6 +2142,14 @@ mod tests {
         let (code, out, err) = run_with(&env, &["rm", "-f", "job", "web"]);
         assert_eq!((code, out.as_str()), (0, "job\nweb\n"), "{err}");
         assert_eq!(run_with(&env, &["ps", "-aq"]).1, "");
+
+        // A guest from before exec runs containers, but no exec in them.
+        std::fs::write(bundle.join("agent.version"), "1,4").unwrap();
+        assert_eq!(detached("legacy").0, 0);
+        let (code, _, err) = run_with(&env, &["exec", "legacy", "ls"]);
+        assert_eq!(code, 125);
+        assert!(err.contains("which has no exec; it needs 1.5 or later"), "{err}");
+        assert_eq!(run_with(&env, &["rm", "-f", "legacy"]).0, 0);
 
         // A detached container that cannot run says why, and is kept as having failed.
         std::fs::write(bundle.join("agent.version"), "1,3").unwrap();

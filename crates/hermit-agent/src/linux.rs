@@ -1,6 +1,6 @@
 //! The real system calls, for the Linux guest.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, ErrorKind, IoSliceMut, Read, Write};
@@ -10,7 +10,7 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use hermit_proto::{CONTROL_PORT, Framer, Stream};
+use hermit_proto::{CONTROL_PORT, Framer, MAIN, Process, Stream};
 use nix::errno::Errno;
 use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
 use nix::mount::MsFlags;
@@ -35,17 +35,54 @@ const NEW_ROOT: &str = "/newroot";
 /// The container's OCI runtime bundle (`config.json`), the files it bind-mounts and crun's console socket.
 const BUNDLE: &str = "/run/oci-hermit";
 
-/// The container's name in crun: one runs per sandbox.
+/// The container's name in crun: one runs per sandbox, and `exec` joins it.
 const CONTAINER: &str = "hermit";
 
 /// How long crun gets to hand over a container's terminal.
 const CONSOLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The command a `Run` started: where its input goes and where its output comes from.
+/// What crun writes once it has created the container; `crun exec` needs it. `Started` goes to the host as soon as
+/// `crun run` is spawned, so an `exec` right after `run -d` can come before it.
+const CRUN_STATUS: &str = "/run/crun/hermit/status";
+
+/// How long an `exec` waits for crun to finish creating the container.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Waits for `path` to exist, for at most `timeout`.
+fn wait_for(path: &Path, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!("the container was not created within {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// A command `Run` or `Exec` started: where its input goes and where its output comes from.
 struct Running {
     tty: bool,
     stdin: Option<File>,
     outputs: Vec<(Stream, File)>,
+}
+
+fn fs_error(what: String) -> impl Fn(io::Error) -> io::Error {
+    move |e| io::Error::new(e.kind(), format!("{what}: {e}"))
+}
+
+/// With a terminal, crun makes it in the container and sends the agent its other end over a socket at `path`.
+fn console_listener(tty: bool, path: &str) -> io::Result<Option<UnixListener>> {
+    if !tty {
+        return Ok(None);
+    }
+    let _ = std::fs::remove_file(path);
+    UnixListener::bind(path)
+        .map(Some)
+        .map_err(fs_error("listening for the terminal".into()))
 }
 
 fn context(what: &str) -> impl Fn(Errno) -> io::Error + '_ {
@@ -211,7 +248,7 @@ pub struct Linux {
     control: Option<File>,
     framer: Framer,
     pending: VecDeque<Event>,
-    run: Option<Running>,
+    runs: BTreeMap<Process, Running>,
 }
 
 impl Linux {
@@ -219,27 +256,96 @@ impl Linux {
         Self::default()
     }
 
-    /// Read the command's outputs that poll found ready; one that ends (EOF, or EIO from a terminal) is dropped.
+    /// Read the commands' outputs that poll found ready, in the order [`Linux::next_event`] polled them; one that
+    /// ends (EOF, or EIO from a terminal) is dropped.
     fn read_outputs(&mut self, ready: &[bool]) {
-        let Some(run) = self.run.as_mut() else {
-            return;
-        };
         let mut buf = [0u8; 4096];
-        let mut ended = Vec::new();
-        for (i, (stream, file)) in run.outputs.iter_mut().enumerate() {
-            if !ready.get(i).copied().unwrap_or(false) {
-                continue;
+        let mut ready = ready.iter().copied();
+        for (&process, run) in &mut self.runs {
+            let mut ended = Vec::new();
+            for (i, (stream, file)) in run.outputs.iter_mut().enumerate() {
+                if !ready.next().unwrap_or(false) {
+                    continue;
+                }
+                match file.read(&mut buf) {
+                    Ok(0) => ended.push(i),
+                    Ok(n) => self
+                        .pending
+                        .push_back(Event::Output(process, *stream, buf[..n].to_vec())),
+                    Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {}
+                    Err(_) => ended.push(i),
+                }
             }
-            match file.read(&mut buf) {
-                Ok(0) => ended.push(i),
-                Ok(n) => self.pending.push_back(Event::Output(*stream, buf[..n].to_vec())),
-                Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {}
-                Err(_) => ended.push(i),
+            for i in ended.into_iter().rev() {
+                run.outputs.remove(i);
             }
         }
-        for i in ended.into_iter().rev() {
-            run.outputs.remove(i);
+    }
+
+    /// Starts crun with `args` for `process`: its stdout and stderr (and without a terminal its stdin) are pipes,
+    /// and with one it hands over the terminal it made on `console`, a socket it is told about in `args`.
+    fn spawn_crun(
+        &mut self,
+        process: Process,
+        args: &[&str],
+        console: Option<(UnixListener, &str)>,
+    ) -> io::Result<i32> {
+        let tty = console.is_some();
+        let argv = cstrings(&args.iter().map(|a| (*a).to_string()).collect::<Vec<_>>())?;
+        let envp = cstrings(&["PATH=/bin".to_string()])?;
+
+        let mut attr = PosixSpawnAttr::init()?;
+        // The agent blocks SIGTERM, SIGINT and SIGCHLD; crun and the container must start with nothing blocked.
+        attr.set_sigmask(&SigSet::empty())?;
+        let mut defaults = shutdown_signals();
+        defaults.add(NixSignal::SIGHUP);
+        attr.set_sigdefault(&defaults)?;
+        attr.set_pgroup(Pid::from_raw(0))?;
+        attr.set_flags(
+            PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK
+                | PosixSpawnFlags::POSIX_SPAWN_SETSIGDEF
+                | PosixSpawnFlags::POSIX_SPAWN_SETPGROUP,
+        )?;
+        let mut actions = PosixSpawnFileActions::init()?;
+        // crun's own output carries its errors; without a terminal its stdio is the command's too.
+        let (stdout_r, stdout_w) = pipe2(OFlag::O_CLOEXEC)?;
+        let (stderr_r, stderr_w) = pipe2(OFlag::O_CLOEXEC)?;
+        let stdin = if tty {
+            actions.add_open(0, "/dev/null", OFlag::O_RDONLY, Mode::empty())?;
+            None
+        } else {
+            let (stdin_r, stdin_w) = pipe2(OFlag::O_CLOEXEC)?;
+            actions.add_dup2(stdin_r.as_raw_fd(), 0)?;
+            Some((stdin_r, stdin_w))
+        };
+        actions.add_dup2(stdout_w.as_raw_fd(), 1)?;
+        actions.add_dup2(stderr_w.as_raw_fd(), 2)?;
+        let pid = posix_spawn(Path::new(CRUN), &actions, &attr, &argv, &envp).map_err(context("starting crun"))?;
+        drop((stdout_w, stderr_w));
+        let mut stdin = stdin.map(|(_, w)| File::from(w));
+        let mut outputs = vec![
+            (Stream::Stdout, File::from(stdout_r)),
+            (Stream::Stderr, File::from(stderr_r)),
+        ];
+
+        if let Some((listener, socket)) = console {
+            let terminal = receive_terminal(&listener, &outputs[1].1);
+            let _ = std::fs::remove_file(socket);
+            match terminal {
+                Ok(Some(master)) => {
+                    stdin = Some(master.try_clone()?);
+                    outputs.insert(0, (Stream::Stdout, master));
+                }
+                // crun ended first: what it wrote on stderr says why, and its exit code follows.
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = kill(pid, NixSignal::SIGKILL);
+                    return Err(e);
+                }
+            }
         }
+        self.runs.insert(process, Running { tty, stdin, outputs });
+        Ok(pid.as_raw())
     }
 
     /// Read what the control port has, turning it into events.
@@ -333,7 +439,7 @@ impl System for Linux {
                     fds.push(PollFd::new(port.as_fd(), PollFlags::POLLIN));
                 }
                 let first_output = fds.len();
-                if let Some(run) = &self.run {
+                for run in self.runs.values() {
                     for (_, file) in &run.outputs {
                         fds.push(PollFd::new(file.as_fd(), PollFlags::POLLIN));
                     }
@@ -374,7 +480,6 @@ impl System for Linux {
             disks = list_disks()?;
         }
         let devices = init::layer_devices(layers, &disks)?;
-        let fs_error = |what: String| move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
         for (i, device) in devices.iter().enumerate() {
             let target = init::layer_dir(i);
             std::fs::create_dir_all(&target).map_err(fs_error(format!("creating {target}")))?;
@@ -415,7 +520,6 @@ impl System for Linux {
     }
 
     fn leave_initramfs(&mut self) -> io::Result<()> {
-        let fs_error = |what: String| move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
         if !Path::new(CRUN).is_file() {
             return Err(io::Error::new(
                 ErrorKind::NotFound,
@@ -468,118 +572,81 @@ impl System for Linux {
     }
 
     fn start(&mut self, spec: &RunSpec) -> io::Result<i32> {
-        if self.run.is_some() {
+        if self.runs.contains_key(&MAIN) {
             return Err(io::Error::new(ErrorKind::AlreadyExists, "a command is already running"));
         }
         find_executable(ROOTFS, &spec.argv[0], &spec.env, &spec.cwd)?;
-        let fs_error = |what: String| move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
         std::fs::create_dir_all(BUNDLE).map_err(fs_error(format!("creating {BUNDLE}")))?;
         std::fs::write(format!("{BUNDLE}/hosts"), init::hosts_file(&spec.hostname))?;
         std::fs::write(format!("{BUNDLE}/hostname"), format!("{}\n", spec.hostname))?;
         let config = serde_json::to_vec_pretty(&init::container_config(spec, BUNDLE)).map_err(io::Error::other)?;
         std::fs::write(format!("{BUNDLE}/config.json"), config).map_err(fs_error("writing config.json".into()))?;
-
-        // With a terminal, crun makes it in the container and sends the agent its other end over this socket.
         let socket = format!("{BUNDLE}/console.sock");
-        let _ = std::fs::remove_file(&socket);
-        let listener = if spec.tty {
-            Some(UnixListener::bind(&socket).map_err(fs_error("listening for the terminal".into()))?)
-        } else {
-            None
-        };
+        let console = console_listener(spec.tty, &socket)?;
         let mut args = vec![CRUN, "--cgroup-manager=cgroupfs", "run", "--bundle", BUNDLE];
         if spec.tty {
             args.extend(["--console-socket", socket.as_str()]);
         }
         args.push(CONTAINER);
-        let argv = cstrings(&args.iter().map(|a| (*a).to_string()).collect::<Vec<_>>())?;
-        let envp = cstrings(&["PATH=/bin".to_string()])?;
-
-        let mut attr = PosixSpawnAttr::init()?;
-        // The agent blocks SIGTERM, SIGINT and SIGCHLD; crun and the container must start with nothing blocked.
-        attr.set_sigmask(&SigSet::empty())?;
-        let mut defaults = shutdown_signals();
-        defaults.add(NixSignal::SIGHUP);
-        attr.set_sigdefault(&defaults)?;
-        attr.set_pgroup(Pid::from_raw(0))?;
-        attr.set_flags(
-            PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK
-                | PosixSpawnFlags::POSIX_SPAWN_SETSIGDEF
-                | PosixSpawnFlags::POSIX_SPAWN_SETPGROUP,
-        )?;
-        let mut actions = PosixSpawnFileActions::init()?;
-        // crun's own output carries its errors; without a terminal its stdio is the container's too.
-        let (stdout_r, stdout_w) = pipe2(OFlag::O_CLOEXEC)?;
-        let (stderr_r, stderr_w) = pipe2(OFlag::O_CLOEXEC)?;
-        let stdin = if spec.tty {
-            actions.add_open(0, "/dev/null", OFlag::O_RDONLY, Mode::empty())?;
-            None
-        } else {
-            let (stdin_r, stdin_w) = pipe2(OFlag::O_CLOEXEC)?;
-            actions.add_dup2(stdin_r.as_raw_fd(), 0)?;
-            Some((stdin_r, stdin_w))
-        };
-        actions.add_dup2(stdout_w.as_raw_fd(), 1)?;
-        actions.add_dup2(stderr_w.as_raw_fd(), 2)?;
-        let pid = posix_spawn(Path::new(CRUN), &actions, &attr, &argv, &envp).map_err(context("starting crun"))?;
-        drop((stdout_w, stderr_w));
-        let mut stdin = stdin.map(|(_, w)| File::from(w));
-        let mut outputs = vec![
-            (Stream::Stdout, File::from(stdout_r)),
-            (Stream::Stderr, File::from(stderr_r)),
-        ];
-
-        if let Some(listener) = listener {
-            let terminal = receive_terminal(&listener, &outputs[1].1);
-            let _ = std::fs::remove_file(&socket);
-            match terminal {
-                Ok(Some(master)) => {
-                    stdin = Some(master.try_clone()?);
-                    outputs.insert(0, (Stream::Stdout, master));
-                }
-                // crun ended first: what it wrote on stderr says why, and its exit code follows.
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = kill(pid, NixSignal::SIGKILL);
-                    return Err(e);
-                }
-            }
-        }
-        self.run = Some(Running {
-            tty: spec.tty,
-            stdin,
-            outputs,
-        });
-        Ok(pid.as_raw())
+        self.spawn_crun(MAIN, &args, console.map(|l| (l, socket.as_str())))
     }
 
-    fn write_stdin(&mut self, data: &[u8]) -> io::Result<()> {
+    fn exec(&mut self, process: Process, spec: &RunSpec) -> io::Result<i32> {
+        if self.runs.contains_key(&process) {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!("process {process} is already running"),
+            ));
+        }
+        wait_for(Path::new(CRUN_STATUS), CREATE_TIMEOUT)?;
+        // The container's root, as the container sees it now: what its commands wrote is there too.
+        find_executable(ROOTFS, &spec.argv[0], &spec.env, &spec.cwd)?;
+        let file = format!("{BUNDLE}/exec-{process}.json");
+        let config = serde_json::to_vec_pretty(&init::process_config(spec)).map_err(io::Error::other)?;
+        std::fs::write(&file, config).map_err(fs_error(format!("writing {file}")))?;
+        let socket = format!("{BUNDLE}/console-{process}.sock");
+        let console = console_listener(spec.tty, &socket)?;
+        let mut args = vec![CRUN, "--cgroup-manager=cgroupfs", "exec", "--process", file.as_str()];
+        if spec.tty {
+            args.extend(["--console-socket", socket.as_str()]);
+        }
+        args.push(CONTAINER);
+        let started = self.spawn_crun(process, &args, console.map(|l| (l, socket.as_str())));
+        // crun has read it by the time it hands over a terminal; without one, it may still be reading it, and a
+        // stale one is overwritten by the next exec with this number.
+        if spec.tty {
+            let _ = std::fs::remove_file(&file);
+        }
+        started
+    }
+
+    fn write_stdin(&mut self, process: Process, data: &[u8]) -> io::Result<()> {
         let stdin = self
-            .run
-            .as_mut()
+            .runs
+            .get_mut(&process)
             .and_then(|r| r.stdin.as_mut())
             .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "the command's stdin is closed"))?;
         stdin.write_all(data)
     }
 
-    fn close_stdin(&mut self) {
+    fn close_stdin(&mut self, process: Process) {
         // A terminal stays open: closing it would hang up the command.
-        if let Some(run) = self.run.as_mut().filter(|r| !r.tty) {
+        if let Some(run) = self.runs.get_mut(&process).filter(|r| !r.tty) {
             run.stdin = None;
         }
     }
 
-    fn drain_output(&mut self) -> Vec<(Stream, Vec<u8>)> {
+    fn drain_output(&mut self, process: Process) -> Vec<(Stream, Vec<u8>)> {
         // Output already read but still queued behind the SIGCHLD comes first, so nothing follows `Exited`.
         let mut drained = Vec::new();
         self.pending.retain(|event| match event {
-            Event::Output(stream, bytes) => {
+            Event::Output(p, stream, bytes) if *p == process => {
                 drained.push((*stream, bytes.clone()));
                 false
             }
             _ => true,
         });
-        if let Some(mut run) = self.run.take() {
+        if let Some(mut run) = self.runs.remove(&process) {
             for (stream, file) in &mut run.outputs {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -597,6 +664,9 @@ impl System for Linux {
                     }
                 }
             }
+        }
+        if process != MAIN {
+            let _ = std::fs::remove_file(format!("{BUNDLE}/exec-{process}.json"));
         }
         drained
     }
@@ -780,11 +850,14 @@ mod tests {
     #[test]
     fn a_second_start_is_refused() {
         let mut sys = Linux::new();
-        sys.run = Some(Running {
-            tty: false,
-            stdin: None,
-            outputs: Vec::new(),
-        });
+        sys.runs.insert(
+            MAIN,
+            Running {
+                tty: false,
+                stdin: None,
+                outputs: Vec::new(),
+            },
+        );
         let spec = RunSpec {
             argv: vec!["true".into()],
             env: Vec::new(),
@@ -795,9 +868,13 @@ mod tests {
             hostname: init::DEFAULT_HOSTNAME.into(),
         };
         assert_eq!(sys.start(&spec).unwrap_err().kind(), ErrorKind::AlreadyExists);
-        assert_eq!(sys.write_stdin(b"x").unwrap_err().kind(), ErrorKind::NotConnected);
-        sys.close_stdin();
-        assert!(sys.drain_output().is_empty());
+        assert_eq!(sys.exec(MAIN, &spec).unwrap_err().kind(), ErrorKind::AlreadyExists);
+        assert_eq!(sys.write_stdin(MAIN, b"x").unwrap_err().kind(), ErrorKind::NotConnected);
+        assert_eq!(sys.write_stdin(1, b"x").unwrap_err().kind(), ErrorKind::NotConnected);
+        sys.close_stdin(MAIN);
+        sys.close_stdin(1);
+        assert!(sys.drain_output(MAIN).is_empty());
+        assert!(sys.runs.is_empty());
     }
 
     #[test]
@@ -805,15 +882,43 @@ mod tests {
         let mut sys = Linux::new();
         sys.pending.push_back(Event::Signal(Signal::Child));
         sys.pending
-            .push_back(Event::Output(Stream::Stdout, b"last words".to_vec()));
-        sys.run = Some(Running {
-            tty: false,
-            stdin: None,
-            outputs: Vec::new(),
-        });
-        assert_eq!(sys.drain_output(), [(Stream::Stdout, b"last words".to_vec())]);
-        assert!(matches!(sys.pending.as_slices().0, [Event::Signal(Signal::Child)]));
-        assert!(sys.run.is_none());
+            .push_back(Event::Output(MAIN, Stream::Stdout, b"last words".to_vec()));
+        sys.pending
+            .push_back(Event::Output(2, Stream::Stdout, b"another's".to_vec()));
+        for process in [MAIN, 2] {
+            sys.runs.insert(
+                process,
+                Running {
+                    tty: false,
+                    stdin: None,
+                    outputs: Vec::new(),
+                },
+            );
+        }
+        assert_eq!(sys.drain_output(MAIN), [(Stream::Stdout, b"last words".to_vec())]);
+        assert!(matches!(
+            sys.pending.as_slices().0,
+            [Event::Signal(Signal::Child), Event::Output(2, ..)]
+        ));
+        assert!(!sys.runs.contains_key(&MAIN) && sys.runs.contains_key(&2));
+    }
+
+    #[test]
+    fn an_exec_waits_for_crun_to_create_the_container() {
+        let path = std::env::temp_dir().join(format!("hermit-agent-status-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let err = wait_for(&path, Duration::from_millis(30)).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                std::fs::write(path, "{}").unwrap();
+            })
+        };
+        wait_for(&path, Duration::from_secs(10)).unwrap();
+        writer.join().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

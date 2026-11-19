@@ -10,8 +10,8 @@ native, and the sandbox has no network at all.
 
 !!! warning "Early days"
 
-    oci-hermit is a pre-release (below 1.0). You can log in, pull, load, store and run images, in the foreground or detached, today; `exec`, published
-    ports, bind mounts, pods and Compose are still to come. The [roadmap](roadmap.md) says when, and the
+    oci-hermit is a pre-release (below 1.0). You can log in, pull, load, store and run images, in the foreground or detached, and
+    `exec` into them today; published ports, bind mounts, pods and Compose are still to come. The [roadmap](roadmap.md) says when, and the
     [command-line reference](cli.md#planned-commands) lists every planned command with its issue.
 
 ## In 30 seconds

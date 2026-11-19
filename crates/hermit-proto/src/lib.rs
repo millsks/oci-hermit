@@ -23,12 +23,17 @@
 //! Since 1.4 the agent runs the command in a container, with crun: its own PID, mount, IPC, UTS, network and cgroup
 //! namespaces and Docker's default capabilities, rather than chrooted as root's peer. `Run` can name the container's
 //! `hostname`. An older agent would run the command outside a container, so the host refuses one.
+//!
+//! Since 1.5 the host can [`HostMessage::Exec`] more commands in the running container (`oci-hermit exec`). Each
+//! carries a `process` number the host picks, from 1; the messages about a command's input, output and end carry it
+//! too. The command `Run` started is process 0, and the field is left out for it, so 1.4 peers see the messages they
+//! know.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 4);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 5);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
@@ -43,6 +48,20 @@ pub const CHUNK: usize = 16 * 1024;
 /// What the agent prints on the guest console once the guest is set up. The console is for people; the host waits
 /// for [`GuestMessage::Ready`] on the control channel instead.
 pub const CONSOLE_READY: &str = "hermit-agent: ready (control protocol";
+
+/// Which command a message is about: 0 for the one `Run` started, the number the host gave an `Exec` otherwise (1.5).
+pub type Process = u32;
+
+/// The command `Run` started.
+pub const MAIN: Process = 0;
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_main(process: &Process) -> bool {
+    *process == MAIN
+}
 
 /// Messages sent from the host tool to the guest agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,10 +97,31 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hostname: Option<String>,
     },
-    /// Bytes for the command's stdin, base64-encoded (1.1).
-    Stdin { data: String },
-    /// The host's stdin reached end of file (1.1).
-    StdinClosed,
+    /// Bytes for a command's stdin, base64-encoded (1.1).
+    Stdin {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+        data: String,
+    },
+    /// The host's stdin for a command reached end of file (1.1).
+    StdinClosed {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+    },
+    /// Start another command in the container `Run` started (1.5), as `process`, a number not in use.
+    Exec {
+        process: Process,
+        argv: Vec<String>,
+        env: Vec<String>,
+        cwd: String,
+        tty: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<User>,
+    },
 }
 
 /// The identity a command runs as, already resolved against the image's `/etc/passwd` and `/etc/group`.
@@ -102,14 +142,31 @@ pub enum GuestMessage {
     Ready { version: (u16, u16) },
     /// Reply to `Shutdown`, sent before the guest powers off.
     ShuttingDown,
-    /// A message was refused or failed.
-    Error { message: String },
-    /// The command from `Run` started (1.1).
-    Started { pid: i32 },
-    /// Output from the command, base64-encoded (1.1). With a terminal everything is `stdout`.
-    Output { stream: Stream, data: String },
-    /// The command ended (1.1): its exit status, or 128 plus the signal that killed it.
-    Exited { code: i32 },
+    /// A message was refused or failed; an `Exec` that could not start names its process.
+    Error {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+        message: String,
+    },
+    /// The command from `Run` or `Exec` started (1.1).
+    Started {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+        pid: i32,
+    },
+    /// Output from a command, base64-encoded (1.1). With a terminal everything is `stdout`.
+    Output {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+        stream: Stream,
+        data: String,
+    },
+    /// A command ended (1.1): its exit status, or 128 plus the signal that killed it.
+    Exited {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+        code: i32,
+    },
 }
 
 /// Which output stream an [`GuestMessage::Output`] belongs to.
@@ -285,7 +342,11 @@ mod tests {
 
     #[test]
     fn messages_are_tagged_and_strict() {
-        let line = encode(&GuestMessage::Error { message: "nope".into() }).unwrap();
+        let line = encode(&GuestMessage::Error {
+            process: MAIN,
+            message: "nope".into(),
+        })
+        .unwrap();
         assert!(line.contains("\"type\":\"error\""));
         assert_eq!(
             encode(&GuestMessage::ShuttingDown).unwrap(),
@@ -348,6 +409,7 @@ mod tests {
             HostMessage::Run { user: None, ref layers, hostname: None, .. } if layers.is_empty()
         ));
         let output = GuestMessage::Output {
+            process: MAIN,
             stream: Stream::Stderr,
             data: b64::encode(&[0u8; CHUNK]),
         };
@@ -355,6 +417,56 @@ mod tests {
         assert!(line.len() < MAX_LINE, "a full chunk fits in one line");
         assert!(line.contains(r#""stream":"stderr""#));
         assert_eq!(decode::<GuestMessage>(&line).unwrap(), output);
+    }
+
+    #[test]
+    fn exec_messages_name_their_process_and_the_main_command_stays_as_it_was() {
+        let exec = HostMessage::Exec {
+            process: 2,
+            argv: vec!["sh".into()],
+            env: vec!["PATH=/bin".into()],
+            cwd: "/srv".into(),
+            tty: true,
+            rows: Some(24),
+            cols: Some(80),
+            user: None,
+        };
+        assert_eq!(decode::<HostMessage>(&encode(&exec).unwrap()).unwrap(), exec);
+        // The command `Run` started is process 0, and its messages are what a 1.4 peer sends and expects.
+        let cases: [(GuestMessage, &str); 3] = [
+            (
+                GuestMessage::Exited { process: MAIN, code: 3 },
+                r#"{"type":"exited","code":3}"#,
+            ),
+            (
+                GuestMessage::Started { process: MAIN, pid: 7 },
+                r#"{"type":"started","pid":7}"#,
+            ),
+            (
+                GuestMessage::Error {
+                    process: MAIN,
+                    message: "no".into(),
+                },
+                r#"{"type":"error","message":"no"}"#,
+            ),
+        ];
+        for (message, line) in cases {
+            assert_eq!(encode(&message).unwrap(), format!("{line}\n"));
+            assert_eq!(decode::<GuestMessage>(line).unwrap(), message);
+        }
+        assert_eq!(
+            encode(&HostMessage::StdinClosed { process: MAIN }).unwrap(),
+            "{\"type\":\"stdin_closed\"}\n"
+        );
+        let to_exec = HostMessage::Stdin {
+            process: 2,
+            data: "aGkK".into(),
+        };
+        let line = encode(&to_exec).unwrap();
+        assert!(line.contains(r#""process":2"#), "{line}");
+        assert_eq!(decode::<HostMessage>(&line).unwrap(), to_exec);
+        let from_exec = GuestMessage::Exited { process: 2, code: 0 };
+        assert_eq!(decode::<GuestMessage>(&encode(&from_exec).unwrap()).unwrap(), from_exec);
     }
 
     #[test]
@@ -418,12 +530,17 @@ mod tests {
             })
             .unwrap(),
             encode(&HostMessage::Shutdown).unwrap(),
-            encode(&GuestMessage::Error { message: "x".into() }).unwrap(),
+            encode(&GuestMessage::Error {
+                process: MAIN,
+                message: "x".into(),
+            })
+            .unwrap(),
             encode(&HostMessage::Stdin {
+                process: 3,
                 data: b64::encode(b"ls -l\r"),
             })
             .unwrap(),
-            encode(&GuestMessage::Exited { code: 7 }).unwrap(),
+            encode(&GuestMessage::Exited { process: MAIN, code: 7 }).unwrap(),
         ];
         let mut out = Vec::new();
         for _ in 0..rng.below(8) {

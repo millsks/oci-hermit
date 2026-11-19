@@ -11,15 +11,20 @@
 //! process killed) the monitor stops the sandbox. `run -d` detaches once the command started, and the container runs
 //! until it exits or `stop` asks the monitor to stop it.
 //!
+//! `exec` connects too, and asks the monitor to start another command in the container (protocol 1.5): that
+//! command's output goes to that `exec` only, not to the container's log, as with Docker.
+//!
 //! The monitor and its clients talk in lines of JSON: a client sends a [`Request`], the monitor answers with
 //! [`Notice`]s.
 
 use crate::containers::Containers;
 use crate::ipc;
-use crate::supervisor::{self, Input, Sandbox, SupervisorError};
-use hermit_proto::{Frame, Framer, Stream, b64};
+use crate::supervisor::{self, Input, Relayed, Sandbox, SupervisorError};
+use crate::users;
+use hermit_proto::{Frame, Framer, MAIN, Process as ProcessNumber, Stream, b64};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -62,6 +67,9 @@ pub struct Launch {
     /// `-d`: the container keeps running when the `run` that started it goes away.
     pub detach: bool,
     pub boot_timeout_secs: u64,
+    /// The image's `/etc/passwd` and `/etc/group`, for `exec -u`.
+    #[serde(default)]
+    pub accounts: users::Accounts,
 }
 
 /// What a client asks of a monitor. The first one on a connection says what the connection is for.
@@ -77,6 +85,25 @@ pub enum Request {
     StdinClosed,
     /// Stop the container.
     Stop,
+    /// `exec`: start another command in the running container. The connection then carries that command's stdin,
+    /// and its notices.
+    Exec {
+        argv: Vec<String>,
+        /// `NAME=value` pairs over the container's environment.
+        env: Vec<String>,
+        /// The working directory; the container's when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<String>,
+        /// Who to run it as (name|uid[:group|gid]), resolved against the image; the container's user when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        tty: bool,
+        /// The terminal's `(rows, cols)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<(u16, u16)>,
+        /// `-i`: keep its stdin open.
+        interactive: bool,
+    },
 }
 
 /// What a monitor tells its clients.
@@ -187,35 +214,164 @@ fn notify(owner: &Owner, notice: &Notice) {
     }
 }
 
-/// One of the command's output streams: into the container log, and to a foreground `run`.
-struct Sink {
-    stream: Stream,
-    log: Arc<Mutex<File>>,
-    owner: Owner,
-    forward: bool,
+/// One `exec`'s connection.
+struct ExecClient {
+    to: Box<dyn Write + Send>,
+    started: bool,
 }
 
-impl Write for Sink {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // A full disk must not stop the container, so a log write that fails only loses that output.
-        let mut log = self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = write_record(&mut *log, self.stream, buf);
-        drop(log);
-        if self.forward {
-            notify(
-                &self.owner,
-                &Notice::Output {
-                    stream: self.stream,
-                    data: b64::encode(buf),
-                },
-            );
-        }
-        Ok(buf.len())
+/// The `exec` clients, by the process number their command has in the guest.
+struct Execs {
+    /// Whether more are taken: not once the container's command has ended.
+    open: bool,
+    last: ProcessNumber,
+    clients: HashMap<ProcessNumber, ExecClient>,
+}
+
+type SharedExecs = Arc<Mutex<Execs>>;
+
+impl Execs {
+    fn new() -> SharedExecs {
+        Arc::new(Mutex::new(Execs {
+            open: true,
+            last: MAIN,
+            clients: HashMap::new(),
+        }))
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    /// Tells `process`'s client; one that went away is forgotten, and its command's output dropped.
+    fn tell(&mut self, process: ProcessNumber, notice: &Notice) {
+        if let Some(client) = self.clients.get_mut(&process)
+            && send(client.to.as_mut(), notice).is_err()
+        {
+            self.clients.remove(&process);
+        }
     }
+
+    /// Tells `process`'s client how it ended, and lets it go.
+    fn finish(&mut self, process: ProcessNumber, notice: &Notice) {
+        self.tell(process, notice);
+        if let Some(mut client) = self.clients.remove(&process) {
+            let _ = send(client.to.as_mut(), &Notice::Done);
+        }
+    }
+
+    /// The container's command ended: what still runs was killed with it, and nothing more is taken.
+    fn close(&mut self) {
+        self.open = false;
+        for (_, mut client) in self.clients.drain() {
+            let notice = if client.started {
+                Notice::Exited { code: STOPPED }
+            } else {
+                Notice::Failed {
+                    message: "the container is not running".into(),
+                }
+            };
+            let _ = send(client.to.as_mut(), &notice);
+            let _ = send(client.to.as_mut(), &Notice::Done);
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What an `exec` runs, from its request over the container's own command: the container's environment, working
+/// directory and user unless the request says otherwise.
+fn exec_command(launch: &Launch, request: &Request) -> Result<supervisor::Command, String> {
+    let Request::Exec {
+        argv,
+        env,
+        workdir,
+        user,
+        tty,
+        size,
+        ..
+    } = request
+    else {
+        return Err("not an exec".into());
+    };
+    let base = &launch.command;
+    let mut vars = base.env.clone();
+    let mut set = |var: String| {
+        let name = var.split('=').next().unwrap_or_default().to_string();
+        match vars.iter_mut().find(|v| v.split('=').next() == Some(name.as_str())) {
+            Some(old) => *old = var,
+            None => vars.push(var),
+        }
+    };
+    let user = match user {
+        Some(spec) => {
+            let identity = users::resolve(spec, &launch.accounts)?;
+            set(format!("HOME={}", identity.home));
+            (!identity.is_root()).then_some(hermit_proto::User {
+                uid: identity.uid,
+                gid: identity.gid,
+                groups: identity.groups,
+            })
+        }
+        None => base.user.clone(),
+    };
+    for var in env {
+        set(var.clone());
+    }
+    Ok(supervisor::Command {
+        argv: argv.clone(),
+        env: vars,
+        cwd: workdir.clone().unwrap_or_else(|| base.cwd.clone()),
+        tty: *tty,
+        size: *size,
+        user,
+        layers: Vec::new(),
+        hostname: None,
+    })
+}
+
+/// Serves one `exec` connection: starts its command, then passes its stdin on until it hangs up.
+fn serve_exec(request: &Request, conn: ipc::Conn, launch: &Launch, execs: &SharedExecs, to_run: &mpsc::Sender<Input>) {
+    let ipc::Conn { reader, mut writer } = conn;
+    let refuse = |writer: &mut Box<dyn Write + Send>, message: String| {
+        let _ = send(writer.as_mut(), &Notice::Failed { message });
+        let _ = send(writer.as_mut(), &Notice::Done);
+    };
+    let command = match exec_command(launch, request) {
+        Ok(command) => command,
+        Err(message) => return refuse(&mut writer, message),
+    };
+    let interactive = matches!(request, Request::Exec { interactive: true, .. });
+    let process = {
+        let mut execs = lock(execs);
+        if !execs.open {
+            drop(execs);
+            return refuse(&mut writer, "the container is not running".into());
+        }
+        execs.last += 1;
+        let process = execs.last;
+        execs.clients.insert(
+            process,
+            ExecClient {
+                to: writer,
+                started: false,
+            },
+        );
+        process
+    };
+    if to_run.send(Input::Exec(process, command)).is_err() {
+        return;
+    }
+    if !interactive {
+        let _ = to_run.send(Input::Eof(process));
+    }
+    read_messages(reader, |request: Request| match request {
+        Request::Stdin { data } => {
+            b64::decode(&data).is_some_and(|bytes| to_run.send(Input::Data(process, bytes)).is_ok())
+        }
+        Request::StdinClosed => to_run.send(Input::Eof(process)).is_ok(),
+        _ => true,
+    });
+    // It hung up: its command runs on, as with Docker, with its stdin closed.
+    let _ = to_run.send(Input::Eof(process));
 }
 
 /// Run as the monitor of container `id`, writing what goes wrong to `log`; the process's exit code.
@@ -232,20 +388,25 @@ pub fn serve(data_dir: &Path, id: &str, log: &mut dyn Write) -> u8 {
 fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
     let containers = Containers::open(data_dir)?;
     let dir = containers.dir(id);
-    let launch: Launch = serde_json::from_slice(&std::fs::read(dir.join(LAUNCH))?)?;
+    let launch: Arc<Launch> = Arc::new(serde_json::from_slice(&std::fs::read(dir.join(LAUNCH))?)?);
     let auto_remove = containers.find(id)?.container.auto_remove;
     let running = containers.start(id, crate::images::now())?;
     let owner: Owner = Arc::new(Mutex::new(None));
     let (to_run, input) = mpsc::channel();
     let (attached_tx, attached) = mpsc::channel();
     let finished = Arc::new(AtomicBool::new(false));
+    let execs = Execs::new();
     let outcome = match ipc::Listener::bind(data_dir, id) {
         Ok(listener) => {
             let accepting = {
                 let (owner, to_run, finished) = (owner.clone(), to_run.clone(), finished.clone());
-                std::thread::spawn(move || accept(listener, &owner, attached_tx, &to_run, &finished))
+                let (launch, execs) = (launch.clone(), execs.clone());
+                std::thread::spawn(move || {
+                    accept(listener, &owner, attached_tx, &to_run, &finished, &launch, &execs);
+                })
             };
-            let outcome = run(&launch, &dir, &owner, &attached, to_run, &input, log);
+            let outcome = run(&launch, &dir, &owner, &execs, &attached, to_run, &input, log);
+            lock(&execs).close();
             finished.store(true, Ordering::SeqCst);
             // Wake the accepting thread so it drops the listener, which removes the socket.
             drop(ipc::connect(data_dir, id));
@@ -254,6 +415,7 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
         }
         Err(e) => Err(format!("listening for commands: {e}")),
     };
+    lock(&execs).close();
     let (code, error) = match outcome {
         Ok(code) => (code, None),
         Err(message) => {
@@ -277,13 +439,16 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     Ok(())
 }
 
-/// Takes connections until the monitor is finished: the first `Attach` becomes the owner, a `Stop` is passed on.
+/// Takes connections until the monitor is finished: the first `Attach` becomes the owner, a `Stop` is passed on,
+/// an `Exec` starts its command.
 fn accept(
     mut listener: ipc::Listener,
     owner: &Owner,
     attached: mpsc::Sender<Box<dyn Read + Send>>,
     to_run: &mpsc::Sender<Input>,
     finished: &AtomicBool,
+    launch: &Arc<Launch>,
+    execs: &SharedExecs,
 ) {
     let attached = Arc::new(Mutex::new(Some(attached)));
     while let Ok(conn) = listener.accept() {
@@ -291,10 +456,14 @@ fn accept(
             return;
         }
         let (owner, attached, to_run) = (owner.clone(), attached.clone(), to_run.clone());
+        let (launch, execs) = (launch.clone(), execs.clone());
         // A client that connects and says nothing holds only its own thread.
         std::thread::spawn(move || {
             let ipc::Conn { mut reader, mut writer } = conn;
             match read_one(&mut reader) {
+                Some(request @ Request::Exec { .. }) => {
+                    serve_exec(&request, ipc::Conn { reader, writer }, &launch, &execs, &to_run);
+                }
                 Some(Request::Attach) => {
                     let first = attached
                         .lock()
@@ -325,11 +494,13 @@ fn accept(
     }
 }
 
-/// Boots the sandbox and runs the command; its exit code, or why it could not run.
+/// Boots the sandbox and runs the command, and any `exec`'s; its exit code, or why it could not run.
+#[allow(clippy::too_many_arguments)]
 fn run(
     launch: &Launch,
     dir: &Path,
     owner: &Owner,
+    execs: &SharedExecs,
     attached: &mpsc::Receiver<Box<dyn Read + Send>>,
     to_run: mpsc::Sender<Input>,
     input: &mpsc::Receiver<Input>,
@@ -341,10 +512,12 @@ fn run(
     let detach = launch.detach;
     std::thread::spawn(move || {
         read_messages(reader, |request: Request| match request {
-            Request::Stdin { data } => b64::decode(&data).is_some_and(|bytes| to_run.send(Input::Data(bytes)).is_ok()),
-            Request::StdinClosed => to_run.send(Input::Eof).is_ok(),
+            Request::Stdin { data } => {
+                b64::decode(&data).is_some_and(|bytes| to_run.send(Input::Data(MAIN, bytes)).is_ok())
+            }
+            Request::StdinClosed => to_run.send(Input::Eof(MAIN)).is_ok(),
             Request::Stop => to_run.send(Input::Stop).is_ok(),
-            Request::Attach => true,
+            Request::Attach | Request::Exec { .. } => true,
         });
         // A foreground run whose oci-hermit went away stops with it.
         if !detach {
@@ -378,23 +551,48 @@ fn run(
         .append(true)
         .open(dir.join(LOG))
         .map_err(|e| format!("opening the container log: {e}"))?;
-    let container_log = Arc::new(Mutex::new(container_log));
-    let sink = |stream| Sink {
-        stream,
-        log: container_log.clone(),
-        owner: owner.clone(),
-        forward: !detach,
-    };
+    let mut container_log = std::io::BufWriter::new(container_log);
     sandbox.start(&launch.command, START_TIMEOUT).map_err(see_logs)?;
     notify(owner, &Notice::Started);
-    let ended = sandbox
-        .relay(
-            input,
-            launch.interactive,
-            &mut sink(Stream::Stdout),
-            &mut sink(Stream::Stderr),
-        )
-        .map_err(see_logs)?;
+    let mut on = |relayed: Relayed<'_>| -> io::Result<()> {
+        match relayed {
+            Relayed::Output {
+                process: MAIN,
+                stream,
+                bytes,
+            } => {
+                // A full disk must not stop the container, so a log write that fails only loses that output.
+                let _ = write_record(&mut container_log, stream, bytes).and_then(|()| container_log.flush());
+                if !detach {
+                    notify(
+                        owner,
+                        &Notice::Output {
+                            stream,
+                            data: b64::encode(bytes),
+                        },
+                    );
+                }
+            }
+            Relayed::Output { process, stream, bytes } => lock(execs).tell(
+                process,
+                &Notice::Output {
+                    stream,
+                    data: b64::encode(bytes),
+                },
+            ),
+            Relayed::Started { process } => {
+                let mut execs = lock(execs);
+                if let Some(client) = execs.clients.get_mut(&process) {
+                    client.started = true;
+                }
+                execs.tell(process, &Notice::Started);
+            }
+            Relayed::Exited { process, code } => lock(execs).finish(process, &Notice::Exited { code }),
+            Relayed::Failed { process, message } => lock(execs).finish(process, &Notice::Failed { message }),
+        }
+        Ok(())
+    };
+    let ended = sandbox.relay(input, launch.interactive, &mut on).map_err(see_logs)?;
     let code = ended.unwrap_or(STOPPED);
     notify(owner, &Notice::Exited { code });
     if let Err(e) = sandbox.shutdown(SHUTDOWN_TIMEOUT) {
@@ -708,6 +906,85 @@ mod tests {
         read_one(conn.reader.as_mut()).expect("a notice")
     }
 
+    fn exec_request(argv: &[&str], interactive: bool, user: Option<&str>) -> Request {
+        Request::Exec {
+            argv: argv.iter().map(|a| (*a).to_string()).collect(),
+            env: vec!["EXTRA=1".into()],
+            workdir: None,
+            user: user.map(Into::into),
+            tty: false,
+            size: None,
+            interactive,
+        }
+    }
+
+    fn launch_with(env: &[&str], user: Option<hermit_proto::User>) -> Launch {
+        Launch {
+            qemu: PathBuf::from("/unused"),
+            args: Vec::new(),
+            qemu_log: PathBuf::new(),
+            console_log: PathBuf::new(),
+            command: supervisor::Command {
+                argv: vec!["sleep".into()],
+                env: env.iter().map(|e| (*e).to_string()).collect(),
+                cwd: "/srv".into(),
+                tty: false,
+                size: None,
+                user,
+                layers: vec!["layer0".into()],
+                hostname: Some("4f2a9c1d0b3e".into()),
+            },
+            interactive: false,
+            detach: true,
+            boot_timeout_secs: 1,
+            accounts: users::Accounts {
+                passwd: "root:x:0:0::/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n".into(),
+                group: "root:x:0:\napp:x:1000:\nvideo:x:44:app\n".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn an_exec_runs_with_the_containers_settings_unless_it_says_otherwise() {
+        let app = hermit_proto::User {
+            uid: 1000,
+            gid: 1000,
+            groups: vec![44],
+        };
+        let launch = launch_with(&["PATH=/bin", "HOME=/root", "EXTRA=0"], None);
+        let command = exec_command(&launch, &exec_request(&["id"], false, None)).unwrap();
+        assert_eq!(command.argv, ["id"]);
+        assert_eq!(command.env, ["PATH=/bin", "HOME=/root", "EXTRA=1"]);
+        assert_eq!(command.cwd, "/srv");
+        assert_eq!(command.user, None);
+        assert!(
+            command.layers.is_empty() && command.hostname.is_none(),
+            "the container's own"
+        );
+
+        // -u resolves against the image's accounts, and brings that user's home.
+        let command = exec_command(&launch, &exec_request(&["id"], false, Some("app"))).unwrap();
+        assert_eq!(command.user, Some(app.clone()));
+        assert_eq!(command.env, ["PATH=/bin", "HOME=/home/app", "EXTRA=1"]);
+        let err = exec_command(&launch, &exec_request(&["id"], false, Some("ghost"))).unwrap_err();
+        assert!(err.contains("ghost"), "{err}");
+
+        // The container's user unless -u says otherwise, root included; -w and -e win.
+        let launch = launch_with(&["PATH=/bin"], Some(app.clone()));
+        let mut request = exec_request(&["pwd"], true, None);
+        if let Request::Exec { workdir, env, .. } = &mut request {
+            *workdir = Some("/tmp".into());
+            env.push("PATH=/usr/bin".into());
+        }
+        let command = exec_command(&launch, &request).unwrap();
+        assert_eq!(command.user, Some(app));
+        assert_eq!(command.cwd, "/tmp");
+        assert_eq!(command.env, ["PATH=/usr/bin", "EXTRA=1"]);
+        let as_root = exec_command(&launch, &exec_request(&["id"], false, Some("0"))).unwrap();
+        assert_eq!(as_root.user, None);
+        assert!(exec_command(&launch, &Request::Stop).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_foreground_container_stops_when_its_run_goes_away() {
@@ -735,6 +1012,7 @@ mod tests {
             interactive: true,
             detach: false,
             boot_timeout_secs: 10,
+            accounts: users::Accounts::default(),
         };
         std::fs::write(
             containers.dir(&made.id).join(LAUNCH),
@@ -767,8 +1045,49 @@ mod tests {
         send(other.writer.as_mut(), &Request::Attach).unwrap();
         assert!(matches!(next(&mut other), Notice::Failed { .. }));
 
+        // An exec runs beside it: its output goes to it alone, and so does its exit code.
+        let mut exec = ipc::connect(&dir, &made.id).unwrap();
+        send(exec.writer.as_mut(), &exec_request(&["ls"], false, None)).unwrap();
+        assert_eq!(next(&mut exec), Notice::Started);
+        assert_eq!(
+            next(&mut exec),
+            Notice::Output {
+                stream: Stream::Stdout,
+                data: b64::encode(b"ex\n"),
+            }
+        );
+        assert_eq!(next(&mut exec), Notice::Exited { code: 5 });
+        assert_eq!(next(&mut exec), Notice::Done);
+        // One with -i gets its stdin, and ends when that does.
+        let mut cat = ipc::connect(&dir, &made.id).unwrap();
+        send(cat.writer.as_mut(), &exec_request(&["cat"], true, None)).unwrap();
+        assert_eq!(next(&mut cat), Notice::Started);
+        let meow = b64::encode(b"meow\n");
+        send(cat.writer.as_mut(), &Request::Stdin { data: meow.clone() }).unwrap();
+        assert_eq!(
+            next(&mut cat),
+            Notice::Output {
+                stream: Stream::Stdout,
+                data: meow
+            }
+        );
+        send(cat.writer.as_mut(), &Request::StdinClosed).unwrap();
+        assert_eq!(next(&mut cat), Notice::Exited { code: 0 });
+        assert_eq!(next(&mut cat), Notice::Done);
+        // A user the image does not have is refused before anything starts.
+        let mut ghost = ipc::connect(&dir, &made.id).unwrap();
+        send(ghost.writer.as_mut(), &exec_request(&["id"], false, Some("ghost"))).unwrap();
+        assert!(matches!(next(&mut ghost), Notice::Failed { message } if message.contains("ghost")));
+        assert_eq!(next(&mut ghost), Notice::Done);
+        // One still running when the container stops is killed with it.
+        let mut idle = ipc::connect(&dir, &made.id).unwrap();
+        send(idle.writer.as_mut(), &exec_request(&["cat"], true, None)).unwrap();
+        assert_eq!(next(&mut idle), Notice::Started);
+
         // The run going away stops the container.
         drop(conn);
+        assert_eq!(next(&mut idle), Notice::Exited { code: STOPPED });
+        assert_eq!(next(&mut idle), Notice::Done);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !process.has_exited() {
             assert!(Instant::now() < deadline, "the monitor did not stop");

@@ -243,10 +243,11 @@ pub(crate) mod testing {
     }
 
     /// Shell scripts standing in for both emulators. They answer `--version` and `-accel help`; launched as a
-    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, with protocol 1.4 unless
+    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, with protocol 1.5 unless
     /// `<bundle>/agent.version` says otherwise (as `1,1`); for a `Run`, `Started`, `hi` on stdout, `oops` on stderr and
     /// exit code 3 (the `Run` line is saved to `<bundle>/run.seen`); then `ShuttingDown` and exit. A command with a
-    /// `wait` argument prints `hi`, echoes its stdin and runs until the host shuts the guest down.
+    /// `wait` argument prints `hi`, echoes its stdin and runs until the host shuts the guest down; meanwhile an `Exec`
+    /// prints `ex` and exits with 5, or one running `cat` echoes its stdin and exits with 0 once that closes.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -255,12 +256,18 @@ pub(crate) mod testing {
              case \"$1\" in\n\
              --version) echo '{version_line}' ;;\n\
              -accel) printf 'Accelerators supported in QEMU binary:\\n{accels}\\n' ;;\n\
-             *) read hello; v=$(cat \"$(dirname \"$0\")/../agent.version\" 2>/dev/null || echo 1,4); \
+             *) read hello; v=$(cat \"$(dirname \"$0\")/../agent.version\" 2>/dev/null || echo 1,5); \
              echo \"{{\\\"type\\\":\\\"ready\\\",\\\"version\\\":[$v]}}\"; read next; \
              case \"$next\" in *'\"run\"'*) echo \"$next\" > \"$(dirname \"$0\")/../run.seen\"; \
              echo '{{\"type\":\"started\",\"pid\":7}}'; \
              echo '{{\"type\":\"output\",\"stream\":\"stdout\",\"data\":\"aGkK\"}}'; \
-             case \"$next\" in *'\"wait\"'*) while read l; do case \"$l\" in \
+             case \"$next\" in *'\"wait\"'*) while read l; do \
+             p=$(echo \"$l\" | sed -n 's/.*\"process\":\\([0-9]*\\).*/\\1/p'); case \"$l\" in \
+             *'\"exec\"'*) echo \"{{\\\"type\\\":\\\"started\\\",\\\"process\\\":$p,\\\"pid\\\":8}}\"; \
+             case \"$l\" in *'\"cat\"'*) ;; *) \
+             echo \"{{\\\"type\\\":\\\"output\\\",\\\"process\\\":$p,\\\"stream\\\":\\\"stdout\\\",\\\"data\\\":\\\"ZXgK\\\"}}\"; \
+             echo \"{{\\\"type\\\":\\\"exited\\\",\\\"process\\\":$p,\\\"code\\\":5}}\" ;; esac ;; \
+             *'\"stdin_closed\",\"process\"'*) echo \"{{\\\"type\\\":\\\"exited\\\",\\\"process\\\":$p,\\\"code\\\":0}}\" ;; \
              *'\"stdin\"'*) echo \"$l\" | sed 's/\"type\":\"stdin\"/\"type\":\"output\",\"stream\":\"stdout\"/' ;; \
              *shutdown*) break ;; esac; done ;; \
              *) echo '{{\"type\":\"output\",\"stream\":\"stderr\",\"data\":\"b29wcwo=\"}}'; \
