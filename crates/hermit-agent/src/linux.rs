@@ -41,6 +41,28 @@ const CONTAINER: &str = "hermit";
 /// How long crun gets to hand over a container's terminal.
 const CONSOLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What crun writes once it has created the container; `crun exec` needs it. `Started` goes to the host as soon as
+/// `crun run` is spawned, so an `exec` right after `run -d` can come before it.
+const CRUN_STATUS: &str = "/run/crun/hermit/status";
+
+/// How long an `exec` waits for crun to finish creating the container.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Waits for `path` to exist, for at most `timeout`.
+fn wait_for(path: &Path, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!("the container was not created within {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 /// A command `Run` or `Exec` started: where its input goes and where its output comes from.
 struct Running {
     tty: bool,
@@ -576,6 +598,7 @@ impl System for Linux {
                 format!("process {process} is already running"),
             ));
         }
+        wait_for(Path::new(CRUN_STATUS), CREATE_TIMEOUT)?;
         // The container's root, as the container sees it now: what its commands wrote is there too.
         find_executable(ROOTFS, &spec.argv[0], &spec.env, &spec.cwd)?;
         let file = format!("{BUNDLE}/exec-{process}.json");
@@ -878,6 +901,24 @@ mod tests {
             [Event::Signal(Signal::Child), Event::Output(2, ..)]
         ));
         assert!(!sys.runs.contains_key(&MAIN) && sys.runs.contains_key(&2));
+    }
+
+    #[test]
+    fn an_exec_waits_for_crun_to_create_the_container() {
+        let path = std::env::temp_dir().join(format!("hermit-agent-status-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let err = wait_for(&path, Duration::from_millis(30)).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                std::fs::write(path, "{}").unwrap();
+            })
+        };
+        wait_for(&path, Duration::from_secs(10)).unwrap();
+        writer.join().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
