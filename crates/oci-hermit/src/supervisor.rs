@@ -11,7 +11,7 @@
 //! that is dropped kills its QEMU as well.
 
 use crate::qemu::{self, GuestArch};
-use hermit_proto::{Frame, Framer, GuestMessage, HostMessage, PROTOCOL_VERSION};
+use hermit_proto::{Frame, Framer, GuestMessage, HostMessage, MAIN, PROTOCOL_VERSION, Process, Stream};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
@@ -198,13 +198,33 @@ pub struct Command {
     pub hostname: Option<String>,
 }
 
-/// What [`Sandbox::run`] takes while a command runs: bytes for its stdin, the end of that, or a request to stop.
+/// What [`Sandbox::relay`] takes while the container runs: bytes for a command's stdin, the end of that, another
+/// command to start in the container, or a request to stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    Data(Vec<u8>),
-    Eof,
-    /// Stop waiting for the command: [`Sandbox::run`] returns `None` and the caller stops the sandbox.
+    Data(Process, Vec<u8>),
+    Eof(Process),
+    /// Start `Command` in the running container as this process (protocol 1.5); its `layers` and `hostname` are
+    /// the container's and are not sent.
+    Exec(Process, Command),
+    /// Stop waiting for the command: [`Sandbox::relay`] returns `None` and the caller stops the sandbox.
     Stop,
+}
+
+/// What [`Sandbox::relay`] reports while the container runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Relayed<'a> {
+    Output {
+        process: Process,
+        stream: Stream,
+        bytes: &'a [u8],
+    },
+    /// A command from [`Input::Exec`] started.
+    Started { process: Process },
+    /// A command from [`Input::Exec`] ended; the container's own command ends the relay instead.
+    Exited { process: Process, code: i32 },
+    /// A command from [`Input::Exec`] could not be started.
+    Failed { process: Process, message: String },
 }
 
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
@@ -216,6 +236,8 @@ pub struct Sandbox {
     child: Option<Child>,
     to_agent: Option<ChildStdin>,
     from_agent: Receiver<Incoming>,
+    /// The protocol the agent speaks, once it answered.
+    version: (u16, u16),
     /// Windows closes this job's handle when oci-hermit exits, however it exits, and that kills QEMU.
     #[cfg(windows)]
     _job: win32job::Job,
@@ -270,6 +292,7 @@ impl Sandbox {
             child: Some(child),
             to_agent,
             from_agent,
+            version: (0, 0),
             #[cfg(windows)]
             _job: job,
         })
@@ -364,14 +387,17 @@ impl Sandbox {
             version: PROTOCOL_VERSION,
         })?;
         match self.receive(deadline, timeout)? {
-            GuestMessage::Ready { version } if hermit_proto::compatible(version) => Ok((start.elapsed(), version)),
+            GuestMessage::Ready { version } if hermit_proto::compatible(version) => {
+                self.version = version;
+                Ok((start.elapsed(), version))
+            }
             GuestMessage::Ready { version } => Err(SupervisorError::Refused {
                 message: format!(
                     "it speaks control protocol {}.{}; this host speaks {}.{}",
                     version.0, version.1, PROTOCOL_VERSION.0, PROTOCOL_VERSION.1
                 ),
             }),
-            GuestMessage::Error { message } => Err(SupervisorError::Refused { message }),
+            GuestMessage::Error { message, .. } => Err(SupervisorError::Refused { message }),
             other => Err(SupervisorError::Protocol(format!("{other:?} instead of ready"))),
         }
     }
@@ -392,42 +418,71 @@ impl Sandbox {
         let deadline = Instant::now() + start_timeout;
         match self.receive(deadline, start_timeout)? {
             GuestMessage::Started { .. } => Ok(()),
-            GuestMessage::Error { message } => Err(SupervisorError::Refused { message }),
+            GuestMessage::Error { message, .. } => Err(SupervisorError::Refused { message }),
             other => Err(SupervisorError::Protocol(format!("{other:?} instead of started"))),
         }
     }
 
-    /// Relay the command [`Sandbox::start`] started: its output to `stdout` and `stderr`, and from `input` its
-    /// stdin when `interactive` (otherwise stdin is closed at once) and any request to stop. Returns the command's
-    /// exit code, or `None` when asked to stop first. There is no overall timeout: an interactive shell may sit
-    /// idle. A QEMU that exits ends the session with an error.
+    /// Relay the container [`Sandbox::start`] started until its command ends: from `input` its stdin when
+    /// `interactive` (otherwise stdin is closed at once), more commands to start in it and any request to stop, and
+    /// to `on` what they all write and how the others went. Returns the command's exit code, or `None` when asked to
+    /// stop first. There is no overall timeout: an interactive shell may sit idle. A QEMU that exits ends the
+    /// session with an error.
     pub fn relay(
         &mut self,
         input: &Receiver<Input>,
         interactive: bool,
-        stdout: &mut impl Write,
-        stderr: &mut impl Write,
+        on: &mut dyn FnMut(Relayed<'_>) -> io::Result<()>,
     ) -> Result<Option<i32>, SupervisorError> {
         if !interactive {
-            self.send(&HostMessage::StdinClosed)?;
+            self.send(&HostMessage::StdinClosed { process: MAIN })?;
         }
-        let mut stdin_open = interactive;
+        // The processes whose stdin is still open; an exec's opens with it.
+        let mut stdin_open: std::collections::BTreeSet<Process> = std::collections::BTreeSet::new();
+        if interactive {
+            stdin_open.insert(MAIN);
+        }
         loop {
             while let Ok(next) = input.try_recv() {
                 match next {
                     Input::Stop => return Ok(None),
-                    Input::Data(bytes) if stdin_open => {
+                    Input::Data(process, bytes) if stdin_open.contains(&process) => {
                         for piece in bytes.chunks(hermit_proto::CHUNK) {
                             self.send(&HostMessage::Stdin {
+                                process,
                                 data: hermit_proto::b64::encode(piece),
                             })?;
                         }
                     }
-                    Input::Eof if stdin_open => {
-                        self.send(&HostMessage::StdinClosed)?;
-                        stdin_open = false;
+                    Input::Eof(process) if stdin_open.remove(&process) => {
+                        self.send(&HostMessage::StdinClosed { process })?;
                     }
-                    Input::Data(_) | Input::Eof => {}
+                    Input::Data(..) | Input::Eof(_) => {}
+                    Input::Exec(process, _) if process == MAIN => on(Relayed::Failed {
+                        process,
+                        message: "process 0 is the container's own command".into(),
+                    })?,
+                    Input::Exec(process, _) if self.version < (1, 5) => on(Relayed::Failed {
+                        process,
+                        message: format!(
+                            "the guest agent speaks control protocol {}.{}, which has no exec; it needs 1.5 or later \
+                             (use the guest that came with this oci-hermit)",
+                            self.version.0, self.version.1
+                        ),
+                    })?,
+                    Input::Exec(process, command) => {
+                        self.send(&HostMessage::Exec {
+                            process,
+                            argv: command.argv,
+                            env: command.env,
+                            cwd: command.cwd,
+                            tty: command.tty,
+                            rows: command.size.map(|s| s.0),
+                            cols: command.size.map(|s| s.1),
+                            user: command.user,
+                        })?;
+                        stdin_open.insert(process);
+                    }
                 }
             }
             let message = match self.from_agent.recv_timeout(Duration::from_millis(20)) {
@@ -457,18 +512,26 @@ impl Sandbox {
                 }
             };
             match message {
-                GuestMessage::Output { stream, data } => {
+                GuestMessage::Output { process, stream, data } => {
                     let bytes = hermit_proto::b64::decode(&data)
                         .ok_or_else(|| SupervisorError::Protocol("output that is not base64".into()))?;
-                    let sink: &mut dyn Write = match stream {
-                        hermit_proto::Stream::Stdout => stdout,
-                        hermit_proto::Stream::Stderr => stderr,
-                    };
-                    sink.write_all(&bytes)?;
-                    sink.flush()?;
+                    on(Relayed::Output {
+                        process,
+                        stream,
+                        bytes: &bytes,
+                    })?;
                 }
-                GuestMessage::Exited { code } => return Ok(Some(code)),
-                GuestMessage::Error { message } => return Err(SupervisorError::Refused { message }),
+                GuestMessage::Exited { process: MAIN, code } => return Ok(Some(code)),
+                GuestMessage::Exited { process, code } => {
+                    stdin_open.remove(&process);
+                    on(Relayed::Exited { process, code })?;
+                }
+                GuestMessage::Started { process, .. } if process != MAIN => on(Relayed::Started { process })?,
+                GuestMessage::Error { process: MAIN, message } => return Err(SupervisorError::Refused { message }),
+                GuestMessage::Error { process, message } => {
+                    stdin_open.remove(&process);
+                    on(Relayed::Failed { process, message })?;
+                }
                 other => return Err(SupervisorError::Protocol(format!("{other:?} during a run"))),
             }
         }
@@ -481,7 +544,7 @@ impl Sandbox {
         self.send(&HostMessage::Shutdown)?;
         match self.receive(deadline, timeout) {
             Ok(GuestMessage::ShuttingDown) | Err(SupervisorError::Exited { .. }) => {}
-            Ok(GuestMessage::Error { message }) => return Err(SupervisorError::Refused { message }),
+            Ok(GuestMessage::Error { message, .. }) => return Err(SupervisorError::Refused { message }),
             Ok(other) => return Err(SupervisorError::Protocol(format!("{other:?} instead of shutting down"))),
             Err(e) => {
                 self.stop()?;

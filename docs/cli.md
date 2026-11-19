@@ -14,6 +14,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | Command | What it does |
 | --- | --- |
 | [`run`](#run) | Run a command from an image in a new sandbox |
+| [`exec`](#exec) | Run another command in a running container |
 | [`ps`](#ps) | List containers |
 | [`logs`](#logs) | Show a container's output |
 | [`stop`](#stop) | Stop running containers |
@@ -122,6 +123,39 @@ Set `OCI_HERMIT_TIMINGS=1` to print how long each phase took, on stderr:
 $ OCI_HERMIT_TIMINGS=1 oci-hermit run public.ecr.aws/docker/library/alpine:3.20 true
 timings: prepare 0.04s, boot 0.33s, command 0.01s, stop 0.02s, total 0.41s
 ```
+
+## exec
+
+Run another command in a running container, beside its own: in the same filesystem (what the container wrote is
+there), processes, hostname and limits. Exits with the command's exit code.
+
+```
+oci-hermit exec [OPTIONS] <CONTAINER> <COMMAND>...
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-i`, `--interactive` | Pass stdin to the command. Without it, the command's stdin is closed. |
+| `-t`, `--tty` | Give the command a terminal (see `run -t`). |
+| `-u`, `--user <USER>` | Run as this user instead of the container's: `name`, `uid`, `name:group` or `uid:gid`. Names are looked up in the image's `/etc/passwd` and `/etc/group`, as `run -u` does; a user added inside the running container is not seen yet, so use its number. |
+| `-e`, `--env <NAME=value>` | Set an environment variable over the container's; `-e NAME` passes this shell's own value. Repeatable. |
+| `-w`, `--workdir <DIR>` | Working directory; the container's by default. |
+
+```console
+$ oci-hermit run -d --name web public.ecr.aws/docker/library/alpine:3.20 sleep 1d
+$ oci-hermit exec web cat /etc/alpine-release
+3.20.10
+$ oci-hermit exec -it web sh
+/ #
+```
+
+The container must be running: `exec` goes through its monitor. The command's output goes to `exec` only, not to
+the container's [log](#logs). If `exec` goes away (the terminal closes), the command keeps running, as with Docker;
+when the container stops, every command started with `exec` stops with it, and a waiting `exec` exits 137. `exec -d`
+is not supported yet.
+
+**Exit codes:** the command's own, or **125** when it could not be started: the container is not running or not
+found, the user is not in the image, or the command does not exist.
 
 ## ps
 
@@ -532,8 +566,8 @@ oci-hermit 0.2.0 (control protocol 1.4)
 | 0 | Success. |
 | 1 | The command failed: a pull, load, image or container command (`logs`, `stop`, `rm`) failed, `image exists` found nothing, `machine info` found no usable QEMU, `machine boot` did not boot. |
 | 2 | The command is not implemented yet, or the command line is wrong (clap's usage errors). |
-| 125 | `run`: oci-hermit itself failed before or around the command. |
-| other | `run`: the command's own exit code. |
+| 125 | `run`, `exec`: oci-hermit itself failed before or around the command. |
+| other | `run`, `exec`: the command's own exit code. |
 
 ## Planned commands
 
@@ -541,13 +575,12 @@ These are part of the command line already, so `--help` lists them, but they do 
 `oci-hermit: `<command>` is not implemented yet; see …/ROADMAP.md` and exits 2:
 
 ```console
-$ oci-hermit exec web sh
-oci-hermit: `exec` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
+$ oci-hermit cp web:/etc/hostname .
+oci-hermit: `cp` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
 ```
 
 | Command | Will | Issue |
 | --- | --- | --- |
-| `exec [-i] [-t] <CONTAINER> <COMMAND>...` | run a command in a running container | #22 |
 | `cp <SOURCE> <DESTINATION>` | copy files between a container and the host | #23 |
 | `pod create --name <NAME> [-p <PUBLISH>]`, `pod rm <POD>`, `pod ps` | pods: containers that share localhost | #35 |
 | `compose up [-d] [-f <FILE>]`, `compose down [-f <FILE>]` | a Compose subset | #36, #37 |

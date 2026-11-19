@@ -147,10 +147,12 @@ store does not have also leads to a pull.
 | `the container's control socket … would be longer than the 103 bytes a socket path may have` | Linux and macOS: the data folder is too deep for the socket a container's monitor listens on. Set `OCI_HERMIT_DATA_DIR` to a shorter folder. |
 | `the container's monitor stopped before it was ready: …` | The background `oci-hermit` that runs the container could not start it; the rest of the message, or `monitor.log`, says why. |
 | `the container name "<name>" is already in use by container …` | A kept container has that name. Remove it (`oci-hermit rm <name>`), or choose another name; `--rm` stops runs from keeping their containers. |
+| `container <name> is not running` | From `exec`: it runs commands only in a running container. Start one with `run -d`. |
+| `the guest agent speaks control protocol 1.4, which has no exec; it needs 1.5 or later` | The container was started with an older `guest/` folder. Use the one that came with this `oci-hermit`, and start the container again. |
 | `--memory 10m: use e.g. 512m or 2g, at least 64m` | `-m` needs a size with a unit, at least 64 MiB. |
 | `unsupported --platform …` | Only `linux/amd64` and `linux/arm64` run. |
 
-All of these make `run` exit with 125.
+All of these make `run` (or `exec`) exit with 125.
 
 ## A container will not stop or go away
 

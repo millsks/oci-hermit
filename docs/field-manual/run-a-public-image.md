@@ -112,8 +112,8 @@ See [Performance and limits](../performance.md) for what to expect from emulatio
 ## What it cannot do yet
 
 Every `run` is a fresh sandbox, and the files a command changed are gone when it ends. `run -d` keeps a container
-running in the background (follow it with `oci-hermit logs -f`, end it with `oci-hermit stop`), but nothing can be
-run inside it yet (`exec`, #22). These flags are refused with the issue that adds them, rather than ignored:
+running in the background: follow it with `oci-hermit logs -f`, run more commands in it with `oci-hermit exec`,
+and end it with `oci-hermit stop`. These flags are refused with the issue that adds them, rather than ignored:
 
 ```console
 $ oci-hermit run -p 8080:80 public.ecr.aws/docker/library/nginx:alpine
