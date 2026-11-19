@@ -18,6 +18,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | [`ps`](#ps) | List containers |
 | [`logs`](#logs) | Show a container's output |
 | [`stop`](#stop) | Stop running containers |
+| [`kill`](#kill) | Send a signal to running containers |
 | [`rm`](#rm) | Remove containers |
 | [`pull`](#pull) | Pull an image from a registry |
 | [`manifest inspect`](#manifest-inspect) | Show an image's platforms and digests in a registry, without pulling |
@@ -90,9 +91,14 @@ changed are thrown away with the sandbox.
 
 Each container's sandbox belongs to a small background `oci-hermit` process of its own, its monitor, which keeps
 QEMU, writes the output to the container's log and records how it ended. A `run` without `-d` stays attached to it:
-if that `run` goes away (the terminal closes, the process is killed, Ctrl-C without `-t`), the monitor stops the
-container. With `-d` the container runs on after `run` returns. There is no daemon: nothing runs when no container
-does.
+if that `run` goes away (the terminal closes, the process is killed), the monitor stops the container. With `-d` the
+container runs on after `run` returns. There is no daemon: nothing runs when no container does.
+
+Ctrl-C at a `run` without `-d` is passed on to the container's command as `SIGINT`, and `SIGTERM` sent to `run` as
+`SIGTERM`, as `docker run` does (on Windows, Ctrl-C and Ctrl-Break). What happens then is up to the command. One
+that is PID 1 in its container, as every container's command is, ignores signals it has no handler for: `sleep`
+does, so Ctrl-C does not end `run … sleep 60`. Use `oci-hermit stop` or `oci-hermit kill` from another terminal. With
+`-t`, Ctrl-C goes to the container's terminal instead, as a keystroke.
 
 ```console
 $ oci-hermit run public.ecr.aws/docker/library/alpine:3.20 cat /etc/alpine-release
@@ -179,7 +185,8 @@ CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS   
 ```
 
 A container is running while its monitor is (see [run](#run)). If the monitor was killed, the container shows as
-`Exited (unknown)`; one that was stopped shows `Exited (137)`.
+`Exited (unknown)`; one that was killed shows `Exited (137)`, and one that ended on `stop`'s `SIGTERM` usually
+`Exited (143)` or the code its handler chose.
 
 ## logs
 
@@ -208,11 +215,44 @@ Stop running containers. Prints each one as it was given, once it has stopped; e
 A container that is not running is left as it is, and printed too.
 
 ```
-oci-hermit stop <CONTAINERS>...
+oci-hermit stop [-t <SECONDS>] [-s <SIGNAL>] <CONTAINERS>...
 ```
 
-The sandbox is powered off at once, so the container's processes are killed and it is recorded with exit code
-137. Sending `SIGTERM` first and waiting, as `docker stop` does, comes with #25.
+| Option | Meaning |
+| --- | --- |
+| `-t`, `--time <SECONDS>` | How long to wait for the command to end before killing it. Default 10; `0` kills it at once. |
+| `-s`, `--signal <SIGNAL>` | The signal to send first, instead of the image's `StopSignal` (`SIGTERM` when it has none). |
+
+As `docker stop` does: the container's command gets its stop signal, and if it is still running when the time is
+up, the sandbox is powered off and the container is recorded with exit code 137. Several containers stop at once.
+A command that handles `SIGTERM` (a web server, a shell script with `trap … TERM`) ends with its own exit code;
+one that ignores it, as PID 1 does without a handler, takes the full time.
+
+```console
+$ oci-hermit stop -t 2 ticker
+ticker
+```
+
+## kill
+
+Send a signal to running containers' commands. Prints each one as it was given; exits 1 if any is not running or
+could not be signalled.
+
+```
+oci-hermit kill [-s <SIGNAL>] <CONTAINERS>...
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-s`, `--signal <SIGNAL>` | The signal: a name such as `TERM`, `SIGHUP` or `RTMIN+1`, or a number. Default `KILL`. |
+
+The command decides what a signal does, except `KILL`, which always ends it (exit code 137). Signals go to the
+container's own command, not to commands started with [`exec`](#exec).
+
+```console
+$ oci-hermit kill -s HUP web
+web
+```
 
 ## rm
 
@@ -564,7 +604,7 @@ oci-hermit 0.2.0 (control protocol 1.4)
 | Code | When |
 | --- | --- |
 | 0 | Success. |
-| 1 | The command failed: a pull, load, image or container command (`logs`, `stop`, `rm`) failed, `image exists` found nothing, `machine info` found no usable QEMU, `machine boot` did not boot. |
+| 1 | The command failed: a pull, load, image or container command (`logs`, `stop`, `kill`, `rm`) failed, `image exists` found nothing, `machine info` found no usable QEMU, `machine boot` did not boot. |
 | 2 | The command is not implemented yet, or the command line is wrong (clap's usage errors). |
 | 125 | `run`, `exec`: oci-hermit itself failed before or around the command. |
 | other | `run`, `exec`: the command's own exit code. |

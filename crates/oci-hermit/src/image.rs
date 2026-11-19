@@ -174,6 +174,9 @@ pub struct RunConfig {
     pub working_dir: Option<String>,
     #[serde(rename = "User", default)]
     pub user: Option<String>,
+    /// The signal `stop` sends first, e.g. `SIGQUIT`; `SIGTERM` when absent.
+    #[serde(rename = "StopSignal", default)]
+    pub stop_signal: Option<String>,
 }
 
 impl RunConfig {

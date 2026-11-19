@@ -28,12 +28,15 @@
 //! carries a `process` number the host picks, from 1; the messages about a command's input, output and end carry it
 //! too. The command `Run` started is process 0, and the field is left out for it, so 1.4 peers see the messages they
 //! know.
+//!
+//! Since 1.6 the host can [`HostMessage::Signal`] the container's command (`stop`, `kill`, Ctrl-C), which the agent
+//! passes on with `crun kill`. Signals are Linux's numbers ([`signal_number`]), the same on every guest architecture.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 5);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 6);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
@@ -108,6 +111,13 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "is_main")]
         process: Process,
     },
+    /// Send `signal` to a command (1.6); only the container's own, process 0, takes signals so far. There is no
+    /// reply: what the signal does shows in the command's output and exit.
+    Signal {
+        #[serde(default, skip_serializing_if = "is_main")]
+        process: Process,
+        signal: i32,
+    },
     /// Start another command in the container `Run` started (1.5), as `process`, a number not in use.
     Exec {
         process: Process,
@@ -132,6 +142,40 @@ pub struct User {
     /// Supplementary group IDs.
     #[serde(default)]
     pub groups: Vec<u32>,
+}
+
+/// Linux's signal names, as `docker kill -s` and an image's `StopSignal` give them, by number.
+const SIGNALS: [&str; 31] = [
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM", "TERM",
+    "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO",
+    "PWR", "SYS",
+];
+
+/// The highest signal number Linux has (`SIGRTMAX`).
+pub const MAX_SIGNAL: i32 = 64;
+
+/// The Linux signal `name` names: `TERM`, `SIGTERM`, `sigterm` or `15`; real-time ones as `RTMIN+3`.
+pub fn signal_number(name: &str) -> Option<i32> {
+    let upper = name.trim().to_ascii_uppercase();
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    // `RTMIN`, `RTMIN+n`, `RTMAX`, `RTMAX-n`.
+    let offset = |rest: &str, sign: char| -> Option<i32> {
+        if rest.is_empty() {
+            Some(0)
+        } else {
+            rest.strip_prefix(sign)?.parse().ok()
+        }
+    };
+    let number = if let Ok(n) = bare.parse::<i32>() {
+        n
+    } else if let Some(i) = SIGNALS.iter().position(|s| *s == bare) {
+        i32::try_from(i).ok()? + 1
+    } else if let Some(rest) = bare.strip_prefix("RTMIN") {
+        34 + offset(rest, '+')?
+    } else {
+        MAX_SIGNAL - offset(bare.strip_prefix("RTMAX")?, '-')?
+    };
+    (1..=MAX_SIGNAL).contains(&number).then_some(number)
 }
 
 /// Messages sent from the guest agent to the host tool.
@@ -467,6 +511,36 @@ mod tests {
         assert_eq!(decode::<HostMessage>(&line).unwrap(), to_exec);
         let from_exec = GuestMessage::Exited { process: 2, code: 0 };
         assert_eq!(decode::<GuestMessage>(&encode(&from_exec).unwrap()).unwrap(), from_exec);
+    }
+
+    #[test]
+    fn signals_go_by_linux_numbers() {
+        for (name, number) in [
+            ("TERM", 15),
+            ("SIGTERM", 15),
+            ("sigint", 2),
+            ("KILL", 9),
+            ("HUP", 1),
+            ("SYS", 31),
+            ("9", 9),
+            ("SIGWINCH", 28),
+            ("RTMIN", 34),
+            ("RTMIN+3", 37),
+            ("RTMAX", 64),
+            ("RTMAX-1", 63),
+        ] {
+            assert_eq!(signal_number(name), Some(number), "{name}");
+        }
+        for bad in ["", "0", "65", "-1", "NOPE", "RTMIN+31", "RTMIN3", "SIG"] {
+            assert_eq!(signal_number(bad), None, "{bad}");
+        }
+        let signal = HostMessage::Signal {
+            process: MAIN,
+            signal: 15,
+        };
+        let line = encode(&signal).unwrap();
+        assert_eq!(line, "{\"type\":\"signal\",\"signal\":15}\n");
+        assert_eq!(decode::<HostMessage>(&line).unwrap(), signal);
     }
 
     #[test]

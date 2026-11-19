@@ -194,6 +194,32 @@ jobs:
           if [ "$code" != 125 ] || ! grep -q 'executable file not found' exec.err; then cat exec.err; exit 1; fi
           "$hermit" rm -f idle
           if "$hermit" ps -a | grep -q ' idle$'; then echo "::error::rm -f left idle"; exit 1; fi
+          # stop sends SIGTERM first: a command that handles it ends on its own terms.
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          "$hermit" run -d --name calm debian.tar sh -c 'trap "echo bye; exit 0" TERM; while :; do sleep 1; done' > /dev/null
+          "$hermit" stop calm
+          "$hermit" ps -a | grep ' calm$' | grep -q 'Exited (0)' || { "$hermit" ps -a; exit 1; }
+          [ "$("$hermit" logs calm)" = bye ]
+          # One that ignores it (sleep as PID 1 has no handler) is killed when -t runs out.
+          "$hermit" run -d --name stubborn debian.tar sleep 1000 > /dev/null
+          start=$SECONDS
+          "$hermit" stop -t 3 stubborn
+          (( SECONDS - start >= 3 )) || { echo "::error::stop -t 3 took $(( SECONDS - start ))s"; exit 1; }
+          "$hermit" ps -a | grep ' stubborn$' | grep -q 'Exited (137)'
+          # kill passes any signal on.
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          "$hermit" run -d --name hup debian.tar sh -c 'trap "echo hup; exit 9" HUP; while :; do sleep 1; done' > /dev/null
+          "$hermit" kill -s HUP hup
+          [ "$("$hermit" logs -f hup)" = hup ]
+          "$hermit" ps -a | grep ' hup$' | grep -q 'Exited (9)'
+          # A foreground run passes the signals it gets on to its container, as docker run does.
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          "$hermit" run debian.tar sh -c 'trap "echo caught; exit 5" TERM; echo ready; while :; do sleep 1; done' > fg.out &
+          fg=$!
+          for _ in $(seq 120); do grep -q ready fg.out && break; sleep 1; done
+          kill -TERM "$fg"
+          code=0; wait "$fg" || code=$?
+          [ "$code" = 5 ] && [ "$(cat fg.out)" = $'ready\ncaught' ] || { echo "::error::exit $code: $(cat fg.out)"; exit 1; }
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true
@@ -342,10 +368,10 @@ jobs:
           [ "$who" = "$expected" ] || { echo "::error::-u nobody ran as '$who'"; exit 1; }
 
           # -d leaves the container running after run returns, under its own monitor; logs shows its output and
-          # stop ends it (exit code 137). Its ID goes to a file, not $(...): on Windows the monitor inherits the
+          # stop sends it SIGTERM, which it traps and exits 0 on. Its ID goes to a file, not $(...): on Windows the monitor inherits the
           # shell's stdout pipe and $(...) never returns (#105).
           # shellcheck disable=SC2016 # expands in the guest's shell
-          "$hermit" run -d --name ticker --platform "$platform" debian.tar sh -c 'echo started; while true; do sleep 1; done' < /dev/null > ticker.id 2> ticker.err || { cat ticker.err; exit 1; }
+          "$hermit" run -d --name ticker --platform "$platform" debian.tar sh -c 'trap "exit 0" TERM; echo started; while true; do sleep 1; done' < /dev/null > ticker.id 2> ticker.err || { cat ticker.err; exit 1; }
           id=$(tr -d '\r\n' < ticker.id)
           [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::run -d printed '$id'"; exit 1; }
           "$hermit" ps | grep -q ' ticker$' || { echo "::error::ticker is not running"; "$hermit" ps -a; exit 1; }
@@ -357,10 +383,10 @@ jobs:
           # exec joins it, with its own exit code and stdin.
           code=0; inside=$("$hermit" exec ticker sh -c 'tr "\0" " " < /proc/1/cmdline; exit 6') || code=$?
           [ "$code" = 6 ] || { echo "::error::exec exited with $code, not 6"; exit 1; }
-          [[ "$(tr -d '\r' <<< "$inside")" == "sh -c echo started;"* ]] || { echo "::error::exec saw PID 1 as '$inside'"; exit 1; }
+          [[ "$(tr -d '\r' <<< "$inside")" == "sh -c trap \"exit 0\" TERM; echo started;"* ]] || { echo "::error::exec saw PID 1 as '$inside'"; exit 1; }
           [ "$(echo piped | "$hermit" exec -i ticker cat | tr -d '\r')" = piped ]
           "$hermit" stop ticker
-          "$hermit" ps -a | grep ' ticker$' | grep -q 'Exited (137)' || { "$hermit" ps -a; exit 1; }
+          "$hermit" ps -a | grep ' ticker$' | grep -q 'Exited (0)' || { "$hermit" ps -a; exit 1; }
           "$hermit" rm ticker
 
           {

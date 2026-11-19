@@ -10,7 +10,8 @@
 //! `pivot_root` refuses an initramfs root. The command runs in a container (protocol 1.4): the agent writes an OCI
 //! runtime bundle whose `config.json` comes from [`container_config`], and crun runs it. While it runs, the host
 //! can start more commands in it (protocol 1.5, `oci-hermit exec`), which `crun exec` joins to the container; each is
-//! known by the process number the host gave it, and the first command is process 0.
+//! known by the process number the host gave it, and the first command is process 0. The host can signal the
+//! container's command (1.6), which crun passes on (`crun kill`).
 
 use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, MAIN, PROTOCOL_VERSION, Process, Stream, b64};
 use std::collections::BTreeMap;
@@ -176,6 +177,8 @@ pub trait System {
     fn start(&mut self, spec: &RunSpec) -> io::Result<i32>;
     /// Start another command in the running container, as `process`, and return its process ID (1.5).
     fn exec(&mut self, process: Process, spec: &RunSpec) -> io::Result<i32>;
+    /// Send `signal` to the container's command (1.6).
+    fn signal(&mut self, signal: i32) -> io::Result<()>;
     /// Pass bytes to a running command's stdin.
     fn write_stdin(&mut self, process: Process, data: &[u8]) -> io::Result<()>;
     /// Close a running command's stdin (a terminal is left open).
@@ -667,6 +670,31 @@ fn answer(
             sys.close_stdin(process);
             return ControlFlow::Continue(());
         }
+        // No reply, whatever happens: a container that has just ended, or a signal it ignores, is not an error.
+        HostMessage::Signal { process, signal } => {
+            if process != MAIN {
+                log(
+                    out,
+                    format_args!("signal {signal} for process {process} ignored: only process 0 takes signals"),
+                );
+            } else if !(1..=hermit_proto::MAX_SIGNAL).contains(&signal) {
+                log(out, format_args!("signal {signal} ignored: not a signal"));
+            } else if !commands.is_running(MAIN) {
+                log(
+                    out,
+                    format_args!("signal {signal} ignored: the container is not running"),
+                );
+            } else {
+                match sys.signal(signal) {
+                    Ok(()) => log(out, format_args!("sent signal {signal} to the container")),
+                    Err(e) => log(
+                        out,
+                        format_args!("sending signal {signal} to the container failed: {e}"),
+                    ),
+                }
+            }
+            return ControlFlow::Continue(());
+        }
     };
     send(sys, out, &reply);
     ControlFlow::Continue(())
@@ -724,6 +752,7 @@ mod tests {
         leftover: Vec<(Stream, Vec<u8>)>,
         execs: Vec<(Process, RunSpec)>,
         exec_error: bool,
+        signals: Vec<i32>,
     }
 
     impl System for Fake {
@@ -806,6 +835,13 @@ mod tests {
             self.execs.push((process, spec.clone()));
             Ok(100 + i32::try_from(process).unwrap())
         }
+        fn signal(&mut self, signal: i32) -> io::Result<()> {
+            self.signals.push(signal);
+            if signal == 31 {
+                return Err(io::Error::other("crun kill failed"));
+            }
+            Ok(())
+        }
         fn write_stdin(&mut self, process: Process, data: &[u8]) -> io::Result<()> {
             match self.stdin.last_mut() {
                 Some((p, bytes)) if *p == process => bytes.extend_from_slice(data),
@@ -877,7 +913,7 @@ mod tests {
         );
         assert!(log.contains("moved the root onto a tmpfs"));
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.5)"));
+        assert!(log.contains("ready (control protocol 1.6)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -978,7 +1014,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.5)"));
+        assert!(log.contains("ready (control protocol 1.6)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -1114,6 +1150,45 @@ mod tests {
             error(4, "starting nope: executable file not found in $PATH")
         );
         assert!(log.contains("exec 4: starting [\"nope\"] failed"));
+    }
+
+    #[test]
+    fn passes_signals_to_the_running_container_and_never_answers() {
+        let signal = |process, signal| line(&HostMessage::Signal { process, signal });
+        let mut sys = Fake {
+            events: VecDeque::from([
+                signal(MAIN, 15),
+                run_line(&["sleep", "1d"], false),
+                signal(MAIN, 15),
+                signal(MAIN, 31),
+                signal(1, 2),
+                signal(MAIN, 0),
+                signal(MAIN, 65),
+                Ok(Event::Signal(Signal::Child)),
+                signal(MAIN, 9),
+                line(&HostMessage::Shutdown),
+            ]),
+            reaps: VecDeque::from([exits(143)]),
+            ..Fake::default()
+        };
+        let (_, log) = run_fake(&mut sys);
+        assert_eq!(sys.signals, [15, 31]);
+        assert_eq!(
+            replies(&sys),
+            [
+                GuestMessage::Started { process: MAIN, pid: 42 },
+                GuestMessage::Exited {
+                    process: MAIN,
+                    code: 143
+                },
+                GuestMessage::ShuttingDown,
+            ]
+        );
+        assert_eq!(log.matches("ignored: the container is not running").count(), 2, "{log}");
+        assert!(log.contains("sent signal 15 to the container"));
+        assert!(log.contains("sending signal 31 to the container failed: crun kill failed"));
+        assert!(log.contains("only process 0 takes signals"));
+        assert_eq!(log.matches("ignored: not a signal").count(), 2);
     }
 
     #[test]

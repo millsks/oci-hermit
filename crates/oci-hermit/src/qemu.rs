@@ -243,11 +243,12 @@ pub(crate) mod testing {
     }
 
     /// Shell scripts standing in for both emulators. They answer `--version` and `-accel help`; launched as a
-    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, with protocol 1.5 unless
+    /// sandbox, they play the agent on their stdin and stdout: `Ready` to the hello, with protocol 1.6 unless
     /// `<bundle>/agent.version` says otherwise (as `1,1`); for a `Run`, `Started`, `hi` on stdout, `oops` on stderr and
     /// exit code 3 (the `Run` line is saved to `<bundle>/run.seen`); then `ShuttingDown` and exit. A command with a
     /// `wait` argument prints `hi`, echoes its stdin and runs until the host shuts the guest down; meanwhile an `Exec`
-    /// prints `ex` and exits with 5, or one running `cat` echoes its stdin and exits with 0 once that closes.
+    /// prints `ex` and exits with 5, or one running `cat` echoes its stdin and exits with 0 once that closes; SIGTERM
+    /// ends the command with 143, and other signals are ignored, as by `sleep` as PID 1.
     #[cfg(unix)]
     pub(crate) fn fake_bundle(dir: &Path, version_line: &str, accels: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -256,7 +257,7 @@ pub(crate) mod testing {
              case \"$1\" in\n\
              --version) echo '{version_line}' ;;\n\
              -accel) printf 'Accelerators supported in QEMU binary:\\n{accels}\\n' ;;\n\
-             *) read hello; v=$(cat \"$(dirname \"$0\")/../agent.version\" 2>/dev/null || echo 1,5); \
+             *) read hello; v=$(cat \"$(dirname \"$0\")/../agent.version\" 2>/dev/null || echo 1,6); \
              echo \"{{\\\"type\\\":\\\"ready\\\",\\\"version\\\":[$v]}}\"; read next; \
              case \"$next\" in *'\"run\"'*) echo \"$next\" > \"$(dirname \"$0\")/../run.seen\"; \
              echo '{{\"type\":\"started\",\"pid\":7}}'; \
@@ -267,6 +268,8 @@ pub(crate) mod testing {
              case \"$l\" in *'\"cat\"'*) ;; *) \
              echo \"{{\\\"type\\\":\\\"output\\\",\\\"process\\\":$p,\\\"stream\\\":\\\"stdout\\\",\\\"data\\\":\\\"ZXgK\\\"}}\"; \
              echo \"{{\\\"type\\\":\\\"exited\\\",\\\"process\\\":$p,\\\"code\\\":5}}\" ;; esac ;; \
+             *'\"signal\":15'*) echo '{{\"type\":\"exited\",\"code\":143}}' ;; \
+             *'\"type\":\"signal\"'*) ;; \
              *'\"stdin_closed\",\"process\"'*) echo \"{{\\\"type\\\":\\\"exited\\\",\\\"process\\\":$p,\\\"code\\\":0}}\" ;; \
              *'\"stdin\"'*) echo \"$l\" | sed 's/\"type\":\"stdin\"/\"type\":\"output\",\"stream\":\"stdout\"/' ;; \
              *shutdown*) break ;; esac; done ;; \

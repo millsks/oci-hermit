@@ -21,7 +21,8 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
-tokio.workspace = true
+# `signal`: a foreground run passes Ctrl-C and SIGTERM on to its container (#25).
+tokio = { workspace = true, features = ["signal"] }
 sha2.workspace = true
 
 [target.'cfg(windows)'.dependencies]

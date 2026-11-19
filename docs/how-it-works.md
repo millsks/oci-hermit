@@ -279,7 +279,9 @@ container's running lock, starts QEMU (whose lifetime is tied to the monitor's),
 channel, a Unix socket in the data folder that only you can open or a named pipe on Windows, in the same kind of
 JSON lines: it attaches, gets `Booted`, `Started`, the output and `Exited`, and sends your stdin. Without `-d` the
 monitor stops the sandbox if `run` goes away; with `-d`, `run` prints the container's ID after `Started` and returns,
-and `logs` reads the log while `stop` asks the monitor over the same channel to power the sandbox off. `exec` asks
+and `logs` reads the log while `stop` asks the monitor over the same channel to send the container's stop signal
+(`Signal`, protocol 1.6, which the agent passes on with `crun kill`) and to power the sandbox off if it has not
+ended in time. `kill` and Ctrl-C at a foreground `run` send `Signal` too. `exec` asks
 it to start another command in the container: the monitor sends the agent `Exec` (protocol 1.5) with a process
 number, the agent runs it with `crun exec`, and that command's input, output and exit code travel tagged with its
 number, to that `exec` alone.

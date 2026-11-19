@@ -159,13 +159,16 @@ All of these make `run` (or `exec`) exit with 125.
 | Message | What to do |
 | --- | --- |
 | `container <name> is running; stop it first …` | `oci-hermit stop <name>`, or `oci-hermit rm -f <name>`. |
+| `stop` takes 10 seconds | The command ignores `SIGTERM`, as a PID 1 without a handler does (`sleep`, many shell scripts), so `stop` waits out its time and then kills it. Use `stop -t 0`, handle `SIGTERM` in the command, or give the image a `StopSignal` it handles. |
+| `the container's guest agent is too old to pass signals on …` | The container was started with a `guest/` folder from before 0.3: `kill` can only send `KILL` to it, and `stop` kills it at once. Start it again with the guest that came with this `oci-hermit`. |
 | `could not stop container <name>: cannot reach its monitor: …` | The container's monitor is not answering. Find it (`ps aux \| grep __monitor`, or Task Manager on Windows: an `oci-hermit.exe` whose command line ends with the container's ID), end it, and its QEMU stops with it. The container then shows as `Exited (unknown)` and `rm` removes it. |
 
 On Windows, `id=$(oci-hermit run -d …)` and other pipes from a `run -d` do not finish while the container runs,
 because its monitor inherits the pipe (#105). Redirect the output to a file instead: `oci-hermit run -d … > id.txt`.
 
-A `run` without `-d` takes its container down with it: closing the terminal or killing that `run` stops the
-container, which then shows as `Exited (137)`. Use `-d` for a container that should keep running.
+A `run` without `-d` takes its container down with it: closing the terminal or killing that `run` (`kill -9`) stops
+the container, which then shows as `Exited (137)`. Ctrl-C does not: it is passed on to the command, which may ignore
+it (see [run](cli.md#run)). Use `-d` for a container that should keep running.
 
 ## The image store is busy
 
