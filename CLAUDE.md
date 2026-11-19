@@ -23,6 +23,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/reference.rs` | image references as Docker reads them (`debian` is `docker.io/library/debian:latest`) |
 | `crates/oci-hermit/src/login.rs` | `login`/`logout`: checks credentials with the registry (reqwest: `/v2/` with Basic, or its token server for a Bearer challenge), then writes Podman's `auth.json` (0600); never prints secrets |
 | `crates/oci-hermit/src/erofs.rs` | a layer tarball as a read-only EROFS image, in user space (#16): whiteouts as 0:0 devices, opaque dirs as `trusted.overlay.opaque`, the layer's own `trusted.*` xattrs dropped; `Store::layer_disk` caches one per layer digest under `erofs/<FORMAT>/`. Bump `erofs::FORMAT` whenever the output changes |
+| `crates/oci-hermit/src/containers.rs` | the container state store (#20): `<data>/containers/<id>/{container.json,state.json}`; `ps`, `rm`; `run` records each container and `--rm` removes it |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
 | `crates/oci-hermit/src/supervisor.rs` | builds the QEMU command line and runs one sandbox VM; `oci-hermit machine boot` drives it |
@@ -84,6 +85,12 @@ Everything runs through pixi.
   the initramfs under `/rootfs` (about twice its size in RAM). `run` holds its shared store until QEMU has the disks
   open (after the handshake), so `rmi` cannot delete a disk being attached. The agent chroots into `/rootfs`; crun
   (#21) replaces that.
+- Containers (#20): `containers/lock` serializes create, start and remove (unique names; nothing removed while it
+  starts). The process running a container holds `<id>/running.lock` alone for its whole life, and only it writes
+  `state.json`; "running" means that lock is held, never what `state.json` says, so a run that crashed shows as
+  `Exited (unknown)`. Readers probe with a shared `try_lock`, so writers wait up to 1 s (`containers::PATIENCE`)
+  before taking the lock as held. `container.json` is written last and removed first: a folder without it is not a
+  container. `run` holds the lock itself until #22 moves that into a per-container monitor process.
 - The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
   store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs. It waits up to 2 s, then fails with
   `Busy`: on Unix a child process holds an inherited lock between `fork` and `exec`, so a zero wait is flaky. A pull writes blobs before naming them, so garbage collection without the exclusive lock would

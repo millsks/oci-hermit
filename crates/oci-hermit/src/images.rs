@@ -212,9 +212,14 @@ pub fn parse_time(text: &str) -> Option<i64> {
 
 /// How long ago, as Docker words it: `3 days ago`, `About an hour ago`.
 pub fn ago(seconds: i64) -> String {
+    format!("{} ago", duration(seconds))
+}
+
+/// A length of time as Docker words it: `3 days`, `About an hour`, `Less than a second`.
+pub fn duration(seconds: i64) -> String {
     let s = seconds.max(0);
     let hours = (s + 1800) / 3600;
-    let words = match s {
+    match s {
         0 => "Less than a second".to_string(),
         1 => "1 second".to_string(),
         2..=59 => format!("{s} seconds"),
@@ -226,8 +231,7 @@ pub fn ago(seconds: i64) -> String {
         _ if hours < 24 * 30 * 2 => format!("{} weeks", hours / 24 / 7),
         _ if hours < 24 * 365 * 2 => format!("{} months", hours / 24 / 30),
         _ => format!("{} years", s / 3600 / 24 / 365),
-    };
-    format!("{words} ago")
+    }
 }
 
 fn created_ago(created: Option<&str>, now: i64) -> String {
