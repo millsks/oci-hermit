@@ -1664,8 +1664,8 @@ travels in the initramfs and is unpacked in the guest's RAM instead, so it gets 
 command runs out of memory, raise <code>-m</code>. More CPUs help commands that use several threads; booting does not get faster.</p>
 <h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>One command per sandbox.</strong> Each <code>run</code> boots, runs one command and powers off, in the foreground or with <code>-d</code> in
-  the background. Running more commands in a running container (<code>exec</code>) comes with <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>.</li>
+<li><strong>One container per sandbox.</strong> Each <code>run</code> boots its own VM for one container, in the foreground or with <code>-d</code> in
+  the background; <code>exec</code> runs more commands in it, but not more containers.</li>
 <li><strong>No network.</strong> No outbound access at all, by design, and no published ports yet (<a href="https://github.com/millsks/oci-hermit/issues/27">#27</a>).</li>
 <li><strong>No bind mounts yet</strong> (<a href="https://github.com/millsks/oci-hermit/issues/33">#33</a>). Put what the command needs in the image, or pass it on stdin with <code>-i</code>.</li>
 <li><strong>Image size.</strong> A stored image's layers become disks, once each, so the first <code>run</code> of a large image takes a moment

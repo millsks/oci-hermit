@@ -1793,8 +1793,9 @@
 <li>Container monitor (<a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>): each container's sandbox belongs to a background <code>oci-hermit __monitor</code> process of its own,
   like Podman's <code>conmon</code>, with no daemon. It holds the container's running lock, owns QEMU, writes the output to the
   container's log and records the exit code. Other commands reach it over an owner-only local channel (a Unix
-  socket in the data folder; a named pipe on Windows): <code>run</code> attaches to it, <code>stop</code> asks it to stop. A foreground
-  <code>run</code> that goes away takes its container with it; <code>run -d</code> leaves it running.</li>
+  socket in the data folder; a named pipe on Windows): <code>run</code> attaches to it, <code>stop</code> asks it to stop, <code>exec</code> asks it
+  to start another command in the container (protocol 1.5, <code>crun exec</code> in the guest). A foreground <code>run</code> that goes
+  away takes its container with it; <code>run -d</code> leaves it running.</li>
 <li>Control client: talks to the guest agent over the virtio-serial port <code>org.oci-hermit.control</code>. QEMU wires that port to its own stdin and stdout, which the host tool holds as an anonymous pipe pair, so nothing on the filesystem or network can reach it. Messages are newline-delimited JSON (<code>hermit-proto</code>), at most 64 KiB a line; a session opens with <code>Hello</code>/<code>Ready</code> (major versions must match) and ends with <code>Shutdown</code>/<code>ShuttingDown</code>. Anything else from either side gets an error reply, and the host never trusts the guest to behave.</li>
 <li>9P file server: serves bind-mounted folders and enforces the mount policy.</li>
 <li>Port publisher: listens on 127.0.0.1 and relays connections into the guest.</li>

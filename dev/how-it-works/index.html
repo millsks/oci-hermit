@@ -1593,7 +1593,7 @@ built yet, is in the <a href="../design/">design document</a>.</p>
 <div class="oh-scroll">
 <svg viewBox="0 0 1000 760" role="img" aria-labelledby="oh-comp-title oh-comp-desc">
 <title id="oh-comp-title">oci-hermit components</title>
-<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: exec, a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
+<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
 <defs>
 <marker id="oh-ah" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="oh-ah-acc" class="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
@@ -1696,13 +1696,12 @@ built yet, is in the <a href="../design/">design document</a>.</p>
 <text x="554" y="500" class="small">PID 1 of its namespace, as the image's User, or -u</text>
 <path class="ln" d="M910,378 V423" marker-end="url(#oh-ah)"/>
 <text x="902" y="408" text-anchor="end" class="mono small">Run</text>
-<rect class="r-plan" x="500" y="556" width="470" height="176" rx="8"/>
+<rect class="r-plan" x="500" y="556" width="470" height="154" rx="8"/>
 <text x="514" y="578" class="b lbl-plan small">PLANNED &#183; not in the code yet</text>
-<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  exec: more commands in a running container (#22)</text>
-<text x="514" y="624" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
-<text x="514" y="646" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
-<text x="514" y="668" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
-<text x="514" y="690" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
+<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
+<text x="514" y="624" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
+<text x="514" y="646" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
+<text x="514" y="668" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
 <text x="514" y="716" class="small m">Today the VM has no network device.</text>
 </svg>
 </div>
@@ -1859,7 +1858,10 @@ container's running lock, starts QEMU (whose lifetime is tied to the monitor's),
 channel, a Unix socket in the data folder that only you can open or a named pipe on Windows, in the same kind of
 JSON lines: it attaches, gets <code>Booted</code>, <code>Started</code>, the output and <code>Exited</code>, and sends your stdin. Without <code>-d</code> the
 monitor stops the sandbox if <code>run</code> goes away; with <code>-d</code>, <code>run</code> prints the container's ID after <code>Started</code> and returns,
-and <code>logs</code> reads the log while <code>stop</code> asks the monitor over the same channel to power the sandbox off.</p>
+and <code>logs</code> reads the log while <code>stop</code> asks the monitor over the same channel to power the sandbox off. <code>exec</code> asks
+it to start another command in the container: the monitor sends the agent <code>Exec</code> (protocol 1.5) with a process
+number, the agent runs it with <code>crun exec</code>, and that command's input, output and exit code travel tagged with its
+number, to that <code>exec</code> alone.</p>
 <h2 id="isolation">Isolation<a class="headerlink" href="#isolation" title="Permanent link">&para;</a></h2>
 <p>The security boundary is the emulator process. Guest code never runs directly on your CPU: QEMU translates every
 instruction, and the guest can touch only the devices QEMU gives it. The layers, outermost first:</p>
@@ -2075,7 +2077,6 @@ command as root. <code>oci-hermit version</code> prints the protocol version the
 </table>
 <h2 id="what-changes-later">What changes later<a class="headerlink" href="#what-changes-later" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>More commands in a running container</strong> (<a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>): <code>exec</code>, through the container's monitor.</li>
 <li><strong>A seccomp profile</strong> (<a href="https://github.com/millsks/oci-hermit/issues/102">#102</a>), as Docker applies by default.</li>
 <li><strong>Networking</strong> (<a href="https://github.com/millsks/oci-hermit/issues/26">#26</a> to <a href="https://github.com/millsks/oci-hermit/issues/29">#29</a>) and <strong>bind mounts</strong> (<a href="https://github.com/millsks/oci-hermit/issues/30">#30</a> to <a href="https://github.com/millsks/oci-hermit/issues/34">#34</a>), with the defaults described in
   <a href="../docker-and-podman/">oci-hermit, Docker and Podman</a>.</li>

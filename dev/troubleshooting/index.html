@@ -1808,6 +1808,14 @@ store does not have also leads to a pull.</p>
 <td>A kept container has that name. Remove it (<code>oci-hermit rm &lt;name&gt;</code>), or choose another name; <code>--rm</code> stops runs from keeping their containers.</td>
 </tr>
 <tr>
+<td><code>container &lt;name&gt; is not running</code></td>
+<td>From <code>exec</code>: it runs commands only in a running container. Start one with <code>run -d</code>.</td>
+</tr>
+<tr>
+<td><code>the guest agent speaks control protocol 1.4, which has no exec; it needs 1.5 or later</code></td>
+<td>The container was started with an older <code>guest/</code> folder. Use the one that came with this <code>oci-hermit</code>, and start the container again.</td>
+</tr>
+<tr>
 <td><code>--memory 10m: use e.g. 512m or 2g, at least 64m</code></td>
 <td><code>-m</code> needs a size with a unit, at least 64 MiB.</td>
 </tr>
@@ -1817,7 +1825,7 @@ store does not have also leads to a pull.</p>
 </tr>
 </tbody>
 </table>
-<p>All of these make <code>run</code> exit with 125.</p>
+<p>All of these make <code>run</code> (or <code>exec</code>) exit with 125.</p>
 <h2 id="a-container-will-not-stop-or-go-away">A container will not stop or go away<a class="headerlink" href="#a-container-will-not-stop-or-go-away" title="Permanent link">&para;</a></h2>
 <table>
 <thead>

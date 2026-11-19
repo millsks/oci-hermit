@@ -1598,8 +1598,8 @@ command, ask for more:</p>
 <p>See <a href="../../performance/">Performance and limits</a> for what to expect from emulation.</p>
 <h2 id="what-it-cannot-do-yet">What it cannot do yet<a class="headerlink" href="#what-it-cannot-do-yet" title="Permanent link">&para;</a></h2>
 <p>Every <code>run</code> is a fresh sandbox, and the files a command changed are gone when it ends. <code>run -d</code> keeps a container
-running in the background (follow it with <code>oci-hermit logs -f</code>, end it with <code>oci-hermit stop</code>), but nothing can be
-run inside it yet (<code>exec</code>, <a href="https://github.com/millsks/oci-hermit/issues/22">#22</a>). These flags are refused with the issue that adds them, rather than ignored:</p>
+running in the background: follow it with <code>oci-hermit logs -f</code>, run more commands in it with <code>oci-hermit exec</code>,
+and end it with <code>oci-hermit stop</code>. These flags are refused with the issue that adds them, rather than ignored:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="m">8080</span>:80<span class="w"> </span>public.ecr.aws/docker/library/nginx:alpine
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="go">oci-hermit: -p/--publish is not supported yet (#27); run it without -p/--publish</span>
 </code></pre></div>

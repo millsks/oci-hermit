@@ -1550,6 +1550,11 @@ nothing out.</p>
 <td>Kept by a monitor process per container, as Podman's <code>conmon</code>; no daemon. A <code>run</code> without <code>-d</code> takes its container down with it if it is killed.</td>
 </tr>
 <tr>
+<td><code>exec -u &lt;name&gt;</code></td>
+<td>Looks the name up in the container's current <code>/etc/passwd</code>.</td>
+<td>Looks it up in the image's: a user added inside the running container needs its number. <code>exec -d</code> is not supported yet.</td>
+</tr>
+<tr>
 <td>Containers</td>
 <td>Kept after they stop, until <code>rm</code>, with their files.</td>
 <td>Kept after they stop, until <code>rm</code> (<code>--rm</code> removes them at once), but only as a record and the output: name, image, command, exit code and <code>logs</code>. The files a command changed go with its sandbox.</td>
