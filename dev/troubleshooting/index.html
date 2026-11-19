@@ -1840,6 +1840,14 @@ store does not have also leads to a pull.</p>
 <td><code>oci-hermit stop &lt;name&gt;</code>, or <code>oci-hermit rm -f &lt;name&gt;</code>.</td>
 </tr>
 <tr>
+<td><code>stop</code> takes 10 seconds</td>
+<td>The command ignores <code>SIGTERM</code>, as a PID 1 without a handler does (<code>sleep</code>, many shell scripts), so <code>stop</code> waits out its time and then kills it. Use <code>stop -t 0</code>, handle <code>SIGTERM</code> in the command, or give the image a <code>StopSignal</code> it handles.</td>
+</tr>
+<tr>
+<td><code>the container's guest agent is too old to pass signals on …</code></td>
+<td>The container was started with a <code>guest/</code> folder from before 0.3: <code>kill</code> can only send <code>KILL</code> to it, and <code>stop</code> kills it at once. Start it again with the guest that came with this <code>oci-hermit</code>.</td>
+</tr>
+<tr>
 <td><code>could not stop container &lt;name&gt;: cannot reach its monitor: …</code></td>
 <td>The container's monitor is not answering. Find it (<code>ps aux \| grep __monitor</code>, or Task Manager on Windows: an <code>oci-hermit.exe</code> whose command line ends with the container's ID), end it, and its QEMU stops with it. The container then shows as <code>Exited (unknown)</code> and <code>rm</code> removes it.</td>
 </tr>
@@ -1847,8 +1855,9 @@ store does not have also leads to a pull.</p>
 </table>
 <p>On Windows, <code>id=$(oci-hermit run -d …)</code> and other pipes from a <code>run -d</code> do not finish while the container runs,
 because its monitor inherits the pipe (<a href="https://github.com/millsks/oci-hermit/issues/105">#105</a>). Redirect the output to a file instead: <code>oci-hermit run -d … &gt; id.txt</code>.</p>
-<p>A <code>run</code> without <code>-d</code> takes its container down with it: closing the terminal or killing that <code>run</code> stops the
-container, which then shows as <code>Exited (137)</code>. Use <code>-d</code> for a container that should keep running.</p>
+<p>A <code>run</code> without <code>-d</code> takes its container down with it: closing the terminal or killing that <code>run</code> (<code>kill -9</code>) stops
+the container, which then shows as <code>Exited (137)</code>. Ctrl-C does not: it is passed on to the command, which may ignore
+it (see <a href="../cli/#run">run</a>). Use <code>-d</code> for a container that should keep running.</p>
 <h2 id="the-image-store-is-busy">The image store is busy<a class="headerlink" href="#the-image-store-is-busy" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>oci-hermit: the image store is in use by another oci-hermit (a pull, load or run); try again when it has finished
 </code></pre></div>

@@ -1541,8 +1541,13 @@ nothing out.</p>
 </tr>
 <tr>
 <td><code>stop</code></td>
-<td><code>SIGTERM</code>, then <code>SIGKILL</code> after 10 seconds.</td>
-<td>Powers the sandbox off at once: exit code 137 (a grace period comes with <a href="https://github.com/millsks/oci-hermit/issues/25">#25</a>).</td>
+<td>The stop signal (<code>SIGTERM</code>), then <code>SIGKILL</code> after 10 seconds.</td>
+<td>The same; the kill is powering the sandbox off, exit code 137.</td>
+</tr>
+<tr>
+<td><code>kill</code>, Ctrl-C</td>
+<td><code>kill</code> sends any signal; <code>run</code> passes on the signals it gets.</td>
+<td>The same, to the container's command only (not to <code>exec</code>'s, as with Docker).</td>
 </tr>
 <tr>
 <td>Running containers</td>
