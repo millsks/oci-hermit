@@ -1673,9 +1673,11 @@ directory is fine: oci-hermit only reads from there. If the mount is not the cau
 <p>The <code>qemu/</code> folder is not beside <code>oci-hermit</code>. Keep the package's folder together: the binary, <code>qemu/</code> and <code>guest/</code>.
 Copying only <code>oci-hermit(.exe)</code> somewhere else breaks this. To keep them apart, set <code>OCI_HERMIT_QEMU_DIR</code> and
 <code>OCI_HERMIT_GUEST_DIR</code> (<a href="../configuration/">Configuration</a>).</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>oci-hermit: no x86_64 guest kernel and agent found; looked in … (set OCI_HERMIT_GUEST_DIR to a directory with x86_64/kernel and x86_64/hermit-agent)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>oci-hermit: no x86_64 guest kernel, agent and crun found; looked in … (set OCI_HERMIT_GUEST_DIR to a directory with x86_64/kernel, x86_64/hermit-agent and x86_64/crun)
 </code></pre></div>
-<p>The guest for that architecture is missing. <code>machine info</code> shows which ones were found.</p>
+<p>The guest for that architecture is missing, or it is one from before 0.3 without <code>crun</code>. <code>machine info</code> shows which
+ones were found. A guest that is too old to run containers is refused with <code>the guest agent speaks control protocol
+1.3 and cannot run containers; it needs 1.4 or later</code>: use the <code>guest/</code> folder that came with this <code>oci-hermit</code>.</p>
 <p>A message saying a QEMU <code>is not the bundled QEMU</code> means the folder holds some other QEMU. oci-hermit runs only the
 bundle it was built for, from the same package or CI run.</p>
 <h2 id="the-boot-times-out-or-is-very-slow">The boot times out or is very slow<a class="headerlink" href="#the-boot-times-out-or-is-very-slow" title="Permanent link">&para;</a></h2>

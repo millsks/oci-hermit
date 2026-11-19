@@ -1235,6 +1235,45 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#crun" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        crun
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="crun">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#building_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Building
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1436,6 +1475,45 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#crun" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        crun
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="crun">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#building_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Building
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1533,6 +1611,63 @@ fs</code>). It runs on any host the QEMU bundle runs on, so a kernel built in CI
 </code></pre></div>
 <p><code>.github/workflows/kernel.yml</code> builds both architectures on GitHub-hosted Linux runners, boot-tests each, and uploads
 the image, config and <code>BUNDLE.txt</code> as artifacts.</p>
+<h2 id="crun">crun<a class="headerlink" href="#crun" title="Permanent link">&para;</a></h2>
+<p>Each command runs in a container started by <a href="https://github.com/containers/crun">crun</a>. <code>crun/build.sh</code> builds it
+statically for one architecture, with the libraries it links, all from release tarballs checked against pinned
+sha256 sums:</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Version</th>
+<th>License</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>crun</td>
+<td>1.30.1</td>
+<td>GPL-2.0-or-later (libcrun LGPL-2.1-or-later)</td>
+<td>the OCI runtime</td>
+</tr>
+<tr>
+<td>json-c</td>
+<td>0.18</td>
+<td>MIT</td>
+<td>crun reads <code>config.json</code> with it</td>
+</tr>
+<tr>
+<td>libseccomp</td>
+<td>2.6.1</td>
+<td>LGPL-2.1-only</td>
+<td>seccomp filters (a profile comes with <a href="https://github.com/millsks/oci-hermit/issues/102">#102</a>)</td>
+</tr>
+<tr>
+<td>libcap</td>
+<td>2.78</td>
+<td>BSD-3-Clause or GPL-2.0-only</td>
+<td>capabilities</td>
+</tr>
+</tbody>
+</table>
+<p>crun is configured without systemd (cgroups are managed through cgroupfs), CRIU, <code>dlopen</code>ed handlers or a shared
+libcrun, and linked against the same conda-forge 2.39 sysroot as the agent, so the glibc source in the release's
+source archive covers both. The build fails unless the binary is static and reports <code>+CAP</code> and <code>+SECCOMP</code>.</p>
+<h3 id="output_1">Output<a class="headerlink" href="#output_1" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>&lt;out&gt;/crun                    the static binary
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>&lt;out&gt;/licenses/&lt;name&gt;/        each component's license files
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>&lt;out&gt;/licenses/SOURCES.json   name, version, license and source tarball of each
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>&lt;out&gt;/CRUN.txt                versions, the binary's sha256, the compiler and crun's feature list
+</code></pre></div>
+<p><code>packaging/licenses.py crun &lt;guest-dir&gt; &lt;out&gt;</code> merges the licenses and sources into a guest folder.</p>
+<h3 id="building_1">Building<a class="headerlink" href="#building_1" title="Permanent link">&para;</a></h3>
+<p>Natively on Linux only, like the kernel:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>pixi<span class="w"> </span>run<span class="w"> </span>-e<span class="w"> </span>crun-build<span class="w"> </span>crun-build<span class="w">                           </span><span class="c1"># this machine's architecture, into guest/out/crun-&lt;arch&gt;</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>pixi<span class="w"> </span>run<span class="w"> </span>-e<span class="w"> </span>crun-build<span class="w"> </span>crun-build<span class="w"> </span>aarch64<span class="w"> </span>guest/out/crun-aarch64
+</code></pre></div>
+<p>The host puts crun in the initramfs at <code>/bin/crun</code>. At boot the agent moves its root onto a tmpfs, taking crun
+along, because crun's <code>pivot_root</code> refuses an initramfs root.</p>
 
 
 

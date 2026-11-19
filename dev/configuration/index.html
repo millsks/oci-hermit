@@ -1472,7 +1472,7 @@ reads a few environment variables. <code>oci-hermit machine info</code> shows th
 </tr>
 <tr>
 <td><code>OCI_HERMIT_GUEST_DIR</code></td>
-<td>A guest to use, a folder with <code>x86_64/kernel</code>, <code>x86_64/hermit-agent</code>, <code>aarch64/kernel</code> and <code>aarch64/hermit-agent</code>. Searched first.</td>
+<td>A guest to use, a folder with <code>kernel</code>, <code>hermit-agent</code> and <code>crun</code> in <code>x86_64/</code> and <code>aarch64/</code>. Searched first.</td>
 <td><code>guest/</code> beside <code>oci-hermit</code>, or <code>&lt;prefix&gt;/libexec/oci-hermit/guest</code>.</td>
 </tr>
 <tr>
@@ -1636,7 +1636,7 @@ oci-hermit processes. Change it only through oci-hermit's commands.</p>
 same release from elsewhere, is refused. A missing guest for one architecture only stops images of that architecture.</p>
 <h2 id="what-machine-info-shows">What machine info shows<a class="headerlink" href="#what-machine-info-shows" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>info
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="go">oci-hermit 0.2.0 (control protocol 1.3)</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="go">oci-hermit 0.2.0 (control protocol 1.4)</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="go">host: macos/aarch64, so images default to linux/arm64</span>
 </code></pre></div>
 <p>The version, and the host's OS and architecture, which decide the default image platform.</p>

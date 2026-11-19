@@ -1457,7 +1457,7 @@
 </tr>
 <tr>
 <td><code>crates/oci-hermit/src/guest.rs</code></td>
-<td>Finds each architecture's kernel and agent (<code>$OCI_HERMIT_GUEST_DIR/&lt;arch&gt;/{kernel,hermit-agent}</code>, then the install layouts).</td>
+<td>Finds each architecture's kernel, agent and crun (<code>$OCI_HERMIT_GUEST_DIR/&lt;arch&gt;/{kernel,hermit-agent,crun}</code>, then the install layouts).</td>
 </tr>
 <tr>
 <td><code>crates/oci-hermit/src/image.rs</code></td>
@@ -1513,7 +1513,11 @@
 </tr>
 <tr>
 <td><code>crates/hermit-agent</code></td>
-<td>The guest agent, PID 1 in the sandbox; Linux only. <code>init.rs</code> is the testable logic behind a <code>System</code> trait, <code>linux.rs</code> the real system calls (nix). It refuses to start anywhere but as PID 1 on Linux.</td>
+<td>The guest agent, PID 1 in the sandbox; Linux only. <code>init.rs</code> is the testable logic behind a <code>System</code> trait, including the container's OCI <code>config.json</code>; <code>linux.rs</code> the real system calls (nix): moving the root off the initramfs, running <code>crun</code>, receiving its terminal. It refuses to start anywhere but as PID 1 on Linux.</td>
+</tr>
+<tr>
+<td><code>guest/crun/build.sh</code></td>
+<td>Builds a static crun per guest architecture, with json-c, libseccomp and libcap, from pinned release tarballs.</td>
 </tr>
 <tr>
 <td><code>crates/hermit-proto</code></td>

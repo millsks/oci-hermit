@@ -1438,7 +1438,7 @@
 <ul>
 <li><strong>Speed.</strong> Expect roughly 5–20 times slower than native, and slower again when emulating x86-64 on arm64. It answers "does it work", not "how fast is it". Timing-sensitive tests may be flaky.</li>
 <li><strong>Kernel.</strong> Images run on oci-hermit's small guest kernel, not your production hosts' kernel. Most applications never notice. Anything that depends on particular kernel features, cgroup limits or system calls may behave differently.</li>
-<li><strong>Runtime.</strong> For now, <code>oci-hermit run</code> starts the command in a <code>chroot</code> inside the guest. A real OCI runtime (crun) is planned. Even then, it will not behave exactly like Docker, Kubernetes or your cloud's container service.</li>
+<li><strong>Runtime.</strong> <code>oci-hermit run</code> starts the command with crun, a real OCI runtime, with Docker's defaults inside a small VM. It still does not behave exactly like Docker, Kubernetes or your cloud's container service: no seccomp profile yet (<a href="https://github.com/millsks/oci-hermit/issues/102">#102</a>), no resource limits beyond the VM's size.</li>
 <li><strong>Deliberate defaults.</strong><ul>
 <li>There is no outbound network at all, so an application that needs to reach the internet fails here and works in production.</li>
 <li>Bind mounts are read-only unless you add <code>:rw</code>.</li>
