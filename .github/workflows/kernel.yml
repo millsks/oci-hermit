@@ -559,7 +559,9 @@ jobs:
           # Installed where only administrators can write, with a work folder the account owns.
           $install = 'C:\oci-hermit'
           $work = 'C:\hermit-work'
-          New-Item -ItemType Directory $install, $work, "$work\tmp" | Out-Null
+          # Start-Process -Credential hands the account this runner's environment, so TMP and LOCALAPPDATA (where
+          # run records its containers) are pointed at folders it owns, as its own would be.
+          New-Item -ItemType Directory $install, $work, "$work\tmp", "$work\AppData\Local" | Out-Null
           Copy-Item target\release\oci-hermit.exe, debian.tar $install
           Copy-Item -Recurse qemu\out "$install\qemu"
           Copy-Item -Recurse guest\out\sandbox "$install\guest"
@@ -567,6 +569,7 @@ jobs:
           @echo off
           set TMP=$work\tmp
           set TEMP=$work\tmp
+          set LOCALAPPDATA=$work\AppData\Local
           set OCI_HERMIT_QEMU_DIR=$install\qemu
           set OCI_HERMIT_GUEST_DIR=$install\guest
           whoami > $work\whoami.txt
@@ -586,7 +589,7 @@ jobs:
           $whoami = (Get-Content "$work\whoami.txt" -Raw).Trim()
           $groups = Get-Content "$work\groups.txt" -Raw
           $privileges = Get-Content "$work\priv.txt" -Raw
-          $out = (Get-Content "$work\out.txt" -Raw).Trim()
+          $out = "$(Get-Content "$work\out.txt" -Raw)".Trim()
           Write-Output "whoami: $whoami" $groups $privileges $out
           Get-Content "$work\err.txt"
 
@@ -596,6 +599,9 @@ jobs:
           if (Test-Path "$work\install-writable.txt") { throw "hermit can write to $install" }
           if ($code -ne 7) { throw "exit code $code as a standard user, expected 7" }
           if ($out -notmatch '^Debian GNU/Linux 12') { throw "unexpected output: $out" }
+          if (-not (Get-ChildItem "$work\AppData\Local\oci-hermit\containers" -Directory)) {
+            throw 'run did not record its container in the account''s data folder'
+          }
 
           $summary = @(
             '', '### As a standard user', '',
