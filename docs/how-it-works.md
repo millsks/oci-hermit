@@ -21,12 +21,15 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
    file has its files put in the initramfs under `/rootfs` instead.)
 3. It starts the bundled QEMU as a normal child process, with a software CPU (`-accel tcg`), no network device, and
    the layer disks attached read-only, and boots oci-hermit's own Linux kernel with that initramfs.
-4. **In the guest,** the agent runs as PID 1. It mounts `/proc`, `/sys` and `/dev`, says it is ready, and waits for
+4. **In the guest,** the agent runs as PID 1. It moves its root off the initramfs onto a tmpfs (so crun can
+   `pivot_root` later), mounts `/proc`, `/sys`, the cgroup filesystem and `/dev`, says it is ready, and waits for
    instructions on a private serial channel.
 5. oci-hermit sends the command and the disks' serial numbers. The agent mounts each disk read-only and stacks them
    with overlayfs on `/rootfs`, under a writable layer in the guest's memory that is thrown away with the sandbox,
-   so nothing the command writes reaches the disks. It enters `/rootfs` with `chroot`, starts the command as the
-   image's user, and relays its input, output and exit code.
+   so nothing the command writes reaches the disks. It writes an OCI runtime bundle for the command (its user,
+   environment, working directory and terminal) and starts it in a container with crun: its own PID, mount, IPC,
+   UTS, network and cgroup namespaces, Docker's default capabilities, a read-only `/sys` and only the usual devices.
+   The agent relays the container's input, output and exit code.
 6. When the command exits, oci-hermit asks the agent to power off, and exits with the command's exit code.
 
 ## Components
@@ -35,7 +38,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <div class="oh-scroll">
 <svg viewBox="0 0 1000 760" role="img" aria-labelledby="oh-comp-title oh-comp-desc">
 <title id="oh-comp-title">oci-hermit components</title>
-<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a chroot as the image's user. A dashed box lists the planned parts: layer disks and overlayfs, crun, networking, bind mounts and an OS sandbox around QEMU.</desc>
+<desc id="oh-comp-desc">The host tool's modules, the QEMU helper process with its control port and serial console, and the guest VM with its kernel, hermit-agent as PID 1, and the command running in a crun container as the image's user. A dashed box lists the planned parts: detached containers, a seccomp profile, networking, bind mounts and an OS sandbox around QEMU.</desc>
 <defs>
 <marker id="oh-ah" class="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="oh-ah-acc" class="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker>
@@ -130,22 +133,22 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <path class="ln-accent" d="M580,128 V237" marker-start="url(#oh-ah-acc)" marker-end="url(#oh-ah-acc)"/>
 <path class="ln-muted" d="M910,238 V129" marker-end="url(#oh-ah-mut)"/>
 <rect class="r-chroot" x="520" y="392" width="430" height="134" rx="8"/>
-<text x="534" y="412" class="b lbl-cmd small">chroot /rootfs &#183; image files held in initramfs RAM</text>
+<text x="534" y="412" class="b lbl-cmd small">crun container on /rootfs &#183; own pid, mnt, ipc, uts, net, cgroup ns</text>
 <rect class="r-cmd" x="540" y="424" width="396" height="92" rx="6"/>
 <text x="554" y="444" class="b">container command</text>
-<text x="554" y="464" class="small">posix_spawn, empty sigmask, own process group</text>
-<text x="554" y="482" class="small">-t: pty, setsid, tcsetpgrp &#183; otherwise 3 pipes</text>
-<text x="554" y="500" class="small">as the image's User, or -u (protocol 1.2)</text>
+<text x="554" y="464" class="small">crun run --bundle /run/oci-hermit &#183; Docker's capabilities</text>
+<text x="554" y="482" class="small">-t: pty from crun's console socket &#183; otherwise 3 pipes</text>
+<text x="554" y="500" class="small">PID 1 of its namespace, as the image's User, or -u</text>
 <path class="ln" d="M910,378 V423" marker-end="url(#oh-ah)"/>
 <text x="902" y="408" text-anchor="end" class="mono small">Run</text>
 <rect class="r-plan" x="500" y="556" width="470" height="176" rx="8"/>
 <text x="514" y="578" class="b lbl-plan small">PLANNED &#183; not in the code yet</text>
-<text x="514" y="602" class="small"><tspan class="mono b">M2</tspan>  EROFS layer disks (virtio-blk, ro), overlayfs root (#16, #17)</text>
-<text x="514" y="624" class="small"><tspan class="mono b">M3</tspan>  crun, OCI runtime bundles, namespaces, cgroups (#21)</text>
+<text x="514" y="602" class="small"><tspan class="mono b">M3</tspan>  run -d, exec, logs, stop: a monitor per container (#22)</text>
+<text x="514" y="624" class="small"><tspan class="mono b">M3</tspan>  Docker's default seccomp profile in containers (#102)</text>
 <text x="514" y="646" class="small"><tspan class="mono b">M4</tspan>  libslirp NIC, restrict=on; -p on 127.0.0.1 only (#26, #27)</text>
 <text x="514" y="668" class="small"><tspan class="mono b">M5</tspan>  9P server over virtio-serial; mounts ro by default (#30&#8211;#33)</text>
 <text x="514" y="690" class="small"><tspan class="mono b">M7</tspan>  OS sandbox around QEMU: seccomp, App Sandbox, AppContainer (#38)</text>
-<text x="514" y="716" class="small m">Today the VM has no network device and no disks.</text>
+<text x="514" y="716" class="small m">Today the VM has no network device.</text>
 </svg>
 </div>
 <figcaption>The green arrows are the control channel. oci-hermit holds QEMU's stdin and stdout as an anonymous pipe pair, QEMU's <code>-chardev stdio</code> connects them to the virtio-serial port, and the agent finds the port through <code>/sys/class/virtio-ports</code>. Nothing on the filesystem or the network can reach it. QEMU must never print to stdout, so its diagnostics go to <code>qemu.log</code>. Registry pulls, logins and digest checks all happen in the host tool; the guest never sees a registry or a credential.</figcaption>
@@ -157,7 +160,8 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 | QEMU | The bundled emulator (`qemu/` in the package), started as a separate process. oci-hermit builds it itself, with only the two guest targets and no hypervisor accelerators, and refuses any other QEMU: its `--version` must be exactly `11.1.3 (oci-hermit-qemu-4)` and it must offer the `tcg` accelerator. See [Building QEMU](building-qemu.md). |
 | Guest kernel | Linux 6.18 LTS, built by the project from `tinyconfig` plus a short list of options. x86_64 guests use QEMU's `microvm` machine; aarch64 guests use `virt`. See [Building the guest](building-guest.md). |
 | Guest agent | `hermit-agent`, a static Rust binary that runs as PID 1. It never exits: on a shutdown request or any fatal error it syncs and powers the VM off. |
-| Control protocol | Newline-delimited JSON over the virtio-serial port `org.oci-hermit.control`, at most 64 KiB a line. Version 1.2. |
+| Container runtime | crun 1.30, built statically by the project with json-c, libseccomp and libcap. The agent hands it an OCI runtime bundle per command. |
+| Control protocol | Newline-delimited JSON over the virtio-serial port `org.oci-hermit.control`, at most 64 KiB a line. Version 1.4. |
 
 ## What happens when you run
 
@@ -196,7 +200,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <rect class="r-guest" x="665" y="12" width="130" height="46" rx="6"/>
 <text x="730" y="33" text-anchor="middle" class="b">hermit-agent</text><text x="730" y="50" text-anchor="middle" class="m small">PID 1</text>
 <rect class="r-cmd" x="845" y="12" width="120" height="46" rx="6"/>
-<text x="905" y="33" text-anchor="middle" class="b">command</text><text x="905" y="50" text-anchor="middle" class="m small">chroot /rootfs</text>
+<text x="905" y="33" text-anchor="middle" class="b">command</text><text x="905" y="50" text-anchor="middle" class="m small">crun container</text>
 <line class="ln" x1="70" y1="92" x2="223" y2="92" marker-end="url(#oh-ah2)"/>
 <text x="147" y="86" text-anchor="middle" class="mono small halo">run -it IMAGE CMD</text>
 <path class="ln" d="M225,114 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
@@ -209,7 +213,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <text x="400" y="186" class="small m halo">a path, else a stored name or ID, else pulled; every blob checked against its digest</text>
 <line class="ln" x1="225" y1="212" x2="388" y2="212" marker-end="url(#oh-ah2)"/>
 <text x="307" y="206" text-anchor="middle" class="mono small halo">verify, guest::locate</text>
-<text x="400" y="216" class="small m halo">"11.1.3 (oci-hermit-qemu-4)", tcg; &lt;arch&gt;/kernel and &lt;arch&gt;/hermit-agent</text>
+<text x="400" y="216" class="small m halo">"11.1.3 (oci-hermit-qemu-4)", tcg; &lt;arch&gt;/kernel, hermit-agent and crun</text>
 <path class="ln" d="M225,234 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
 <text x="262" y="245" class="small halo">rootfs(): layers in order; whiteouts, opaque dirs; ".." refused; User from /etc/passwd</text>
 <path class="ln" d="M225,264 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
@@ -221,16 +225,16 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
 <path class="ln" d="M730,368 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
 <text x="766" y="379" class="small halo">mounts, open port, "ready"</text>
 <line class="ln-host-msg" x1="225" y1="410" x2="728" y2="410" marker-end="url(#oh-ah-host)"/>
-<text x="476" y="404" text-anchor="middle" class="mono small b halo">Hello {version: [1,2]}</text>
+<text x="476" y="404" text-anchor="middle" class="mono small b halo">Hello {version: [1,4]}</text>
 <line class="ln-guest-msg" x1="730" y1="438" x2="227" y2="438" marker-end="url(#oh-ah-guest)"/>
-<text x="476" y="432" text-anchor="middle" class="mono small b halo">Ready {version: [1,2]}</text>
+<text x="476" y="432" text-anchor="middle" class="mono small b halo">Ready {version: [1,4]}</text>
 <text x="740" y="442" class="small m halo">major must match; host waits up to 120 s</text>
 <path class="ln" d="M225,478 h28 v14 h-26" marker-end="url(#oh-ah2)"/>
 <text x="262" y="489" class="small halo">raw mode (-t on a terminal); stdin reader thread (-i)</text>
 <line class="ln-host-msg" x1="225" y1="516" x2="728" y2="516" marker-end="url(#oh-ah-host)"/>
-<text x="476" y="510" text-anchor="middle" class="mono small b halo">Run {argv, env, cwd, tty, rows, cols, user}</text>
+<text x="476" y="510" text-anchor="middle" class="mono small b halo">Run {argv, env, cwd, tty, user, layers, hostname}</text>
 <line class="ln" x1="730" y1="542" x2="903" y2="542" marker-end="url(#oh-ah2)"/>
-<text x="817" y="536" text-anchor="middle" class="small halo">chroot; posix_spawn as the user</text>
+<text x="817" y="536" text-anchor="middle" class="small halo">bundle; crun run, as the user</text>
 <line class="ln-guest-msg" x1="730" y1="568" x2="227" y2="568" marker-end="url(#oh-ah-guest)"/>
 <text x="476" y="562" text-anchor="middle" class="mono small b halo">Started {pid}</text>
 <text x="740" y="572" class="small m halo">within 60 s</text>
@@ -283,7 +287,7 @@ instruction, and the guest can touch only the devices QEMU gives it. The layers,
 | Network | **Sealed.** No network device at all: no way out and no way in. | libslirp with `restrict=on` (#26); `-p` bound to 127.0.0.1 only, even when `0.0.0.0` is asked for (#27); an egress test suite (#28). |
 | Control channel | Anonymous pipes, no socket or file. Lines are capped at 64 KiB, anything that is not a message is refused, and every wait has a timeout: the host treats the guest as untrusted. | |
 | Image input | Every manifest, config and layer is checked against its sha256 digest when it is pulled, stored and read. Paths that climb out with `..` are refused, device nodes are skipped. | Signature verification with cosign or notation (#42). |
-| Inside the guest | `chroot` into the image's files, run as the image's `User` (or `-u`). No namespaces or cgroups: the VM is the boundary. | crun with namespaces and cgroups (#21). |
+| Inside the guest | A crun container: its own PID, mount, IPC, UTS, network and cgroup namespaces (no user namespace), Docker's default capabilities, masked and read-only kernel paths, a device allow-list, run as the image's `User` (or `-u`). The VM stays the main boundary. | Docker's default seccomp profile (#102). |
 | Host code | Rust, with `unsafe` code denied in the host crates; `cargo deny` checks advisories and licences; the QEMU and kernel sources are pinned by sha256. | Code-signed Windows and macOS releases (#39). |
 
 ## No network, on purpose
@@ -355,7 +359,7 @@ command as root. `oci-hermit version` prints the protocol version the host speak
 
 ## What changes later
 
-- **crun** (#21) replaces `chroot` and adds namespaces and cgroups inside the guest.
-- **Containers that outlive a command** (#20, #22): `run -d`, `exec`, `logs`, `ps`, `stop`, `rm`.
+- **Containers that outlive a command** (#22): `run -d`, `exec`, `logs`, `stop`, each with a monitor process.
+- **A seccomp profile** (#102), as Docker applies by default.
 - **Networking** (#26 to #29) and **bind mounts** (#30 to #34), with the defaults described in
   [oci-hermit, Docker and Podman](docker-and-podman.md).

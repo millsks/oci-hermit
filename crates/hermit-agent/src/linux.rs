@@ -1,110 +1,51 @@
 //! The real system calls, for the Linux guest.
 
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{self, ErrorKind, Read, Write};
-use std::os::fd::AsFd;
-use std::path::Path;
-
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::fs::File;
+use std::io::{self, ErrorKind, IoSliceMut, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::net::UnixListener;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use hermit_proto::{CONTROL_PORT, Framer, Stream};
 use nix::errno::Errno;
-use nix::fcntl::{OFlag, open};
+use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
 use nix::mount::MsFlags;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use nix::pty::{Winsize, openpty};
 use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, PosixSpawnFlags, posix_spawn};
 use nix::sys::reboot::{RebootMode, reboot};
-use nix::sys::signal::{SigSet, Signal as NixSignal};
+use nix::sys::signal::{SigSet, Signal as NixSignal, kill};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
+use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{
-    Gid, Pid, Uid, chdir, chroot, fchown, pipe2, setgroups, setresgid, setresuid, setsid, tcsetpgrp, ttyname,
-};
+use nix::unistd::{Pid, chdir, chroot, pipe2};
 
-use crate::init::{self, Event, Mount, Reaped, RunSpec, Signal, System};
+use crate::init::{self, Event, Mount, ROOTFS, Reaped, RunSpec, Signal, System};
 
-/// Where `oci-hermit run` puts the image's root filesystem in the initramfs.
-const ROOTFS: &str = "/rootfs";
+/// crun, in the initramfs and in the root the agent moves to.
+const CRUN: &str = "/bin/crun";
 
-/// Spawn the command as `user`. The agent takes the user's real and effective IDs and keeps root as its saved IDs, so
-/// the command's exec drops root for good while the agent takes root back afterwards: PID 1 still has to power off.
-fn spawn_as(user: Option<&hermit_proto::User>, spawn: impl FnOnce() -> nix::Result<Pid>) -> io::Result<Pid> {
-    let Some(user) = user else {
-        return spawn().map_err(context("starting the command"));
-    };
-    let groups: Vec<Gid> = user.groups.iter().copied().map(Gid::from_raw).collect();
-    let (uid, gid, root) = (Uid::from_raw(user.uid), Gid::from_raw(user.gid), Uid::from_raw(0));
-    let spawned = setgroups(&groups)
-        .map_err(context("setting the command's groups"))
-        .and_then(|()| setresgid(gid, gid, Gid::from_raw(0)).map_err(context("switching to the command's group")))
-        .and_then(|()| setresuid(uid, uid, root).map_err(context("switching to the command's user")))
-        .and_then(|()| spawn().map_err(context("starting the command")));
-    // The user ID first: changing groups needs root.
-    let restored = setresuid(root, root, root)
-        .and_then(|()| setresgid(Gid::from_raw(0), Gid::from_raw(0), Gid::from_raw(0)))
-        .and_then(|()| setgroups(&[]))
-        .map_err(context("taking root back"));
-    let pid = spawned?;
-    restored?;
-    Ok(pid)
-}
+/// Where the agent's root moves, off the initramfs (see [`System::leave_initramfs`]).
+const NEW_ROOT: &str = "/newroot";
 
-/// `PATH` when the image's environment has none, as Docker uses.
-const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// The container's OCI runtime bundle (`config.json`), the files it bind-mounts and crun's console socket.
+const BUNDLE: &str = "/run/oci-hermit";
 
-/// The filesystems a command expects, mounted inside the image root before it starts.
-const ROOTFS_MOUNTS: [Mount; 4] = [
-    Mount {
-        source: "proc",
-        target: "/rootfs/proc",
-        fstype: "proc",
-        nosuid: true,
-        nodev: true,
-        noexec: true,
-        data: None,
-    },
-    Mount {
-        source: "sysfs",
-        target: "/rootfs/sys",
-        fstype: "sysfs",
-        nosuid: true,
-        nodev: true,
-        noexec: true,
-        data: None,
-    },
-    Mount {
-        source: "devtmpfs",
-        target: "/rootfs/dev",
-        fstype: "devtmpfs",
-        nosuid: true,
-        nodev: false,
-        noexec: false,
-        data: Some("mode=0755"),
-    },
-    Mount {
-        source: "devpts",
-        target: "/rootfs/dev/pts",
-        fstype: "devpts",
-        nosuid: true,
-        nodev: false,
-        noexec: true,
-        data: Some("mode=0620,ptmxmode=0666"),
-    },
-];
+/// The container's name in crun: one runs per sandbox.
+const CONTAINER: &str = "hermit";
+
+/// How long crun gets to hand over a container's terminal.
+const CONSOLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The command a `Run` started: where its input goes and where its output comes from.
 struct Running {
     tty: bool,
     stdin: Option<File>,
     outputs: Vec<(Stream, File)>,
-    /// The terminal side of the pty, kept open so the master never reports a hangup mid-run.
-    _terminal: Option<OwnedFd>,
 }
 
 fn context(what: &str) -> impl Fn(Errno) -> io::Error + '_ {
@@ -126,29 +67,61 @@ fn list_disks() -> io::Result<Vec<(String, String)>> {
     Ok(disks)
 }
 
-/// `argv0` looked up in the `PATH` from `env`, inside the current root.
-fn resolve(argv0: &str, env: &[String]) -> io::Result<PathBuf> {
-    if argv0.contains('/') {
-        return Ok(PathBuf::from(argv0));
-    }
-    let path = env
-        .iter()
-        .rev()
-        .find_map(|e| e.strip_prefix("PATH="))
-        .unwrap_or(DEFAULT_PATH);
-    for dir in path.split(':') {
-        let candidate = Path::new(if dir.is_empty() { "." } else { dir }).join(argv0);
-        if let Ok(meta) = std::fs::metadata(&candidate)
-            && meta.is_file()
-            && meta.permissions().mode() & 0o111 != 0
+/// `PATH` when the image's environment has none, as Docker uses.
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Whether the image under `root` has `argv0` as an executable file: as a path (relative to `cwd`), or found in the
+/// `PATH` from `env`. Paths resolve as inside the image, so its absolute symlinks (busybox's) point into it, and
+/// nothing outside it can be reached. crun checks this too, but only after the container has started, and would
+/// report it as the command's own exit status.
+fn find_executable(root: &str, argv0: &str, env: &[String], cwd: &str) -> io::Result<()> {
+    let root_fd = open(
+        root,
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(context(&format!("opening {root}")))?;
+    let candidates: Vec<String> = if argv0.contains('/') {
+        vec![if argv0.starts_with('/') {
+            argv0.to_string()
+        } else {
+            format!("{cwd}/{argv0}")
+        }]
+    } else {
+        let path = env
+            .iter()
+            .rev()
+            .find_map(|e| e.strip_prefix("PATH="))
+            .unwrap_or(DEFAULT_PATH);
+        path.split(':')
+            .map(|dir| if dir.is_empty() { cwd } else { dir })
+            .map(|dir| format!("{dir}/{argv0}"))
+            .collect()
+    };
+    for candidate in candidates {
+        let how = OpenHow::new()
+            .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
+            .resolve(ResolveFlag::RESOLVE_IN_ROOT);
+        let Ok(fd) = openat2(&root_fd, candidate.as_str(), how) else {
+            continue;
+        };
+        if let Ok(stat) = nix::sys::stat::fstat(&fd)
+            && stat.st_mode & libc_mode::S_IFMT == libc_mode::S_IFREG
+            && stat.st_mode & 0o111 != 0
         {
-            return Ok(candidate);
+            return Ok(());
         }
     }
     Err(io::Error::new(
         ErrorKind::NotFound,
         "executable file not found in $PATH",
     ))
+}
+
+/// File type bits of `st_mode`.
+mod libc_mode {
+    pub const S_IFMT: u32 = 0o170_000;
+    pub const S_IFREG: u32 = 0o100_000;
 }
 
 fn cstrings(items: &[String]) -> io::Result<Vec<CString>> {
@@ -158,6 +131,68 @@ fn cstrings(items: &[String]) -> io::Result<Vec<CString>> {
             CString::new(s.as_str()).map_err(|_| io::Error::new(ErrorKind::InvalidInput, "a NUL byte in the command"))
         })
         .collect()
+}
+
+/// The container's terminal, as crun sends it on the console socket; `None` if crun ends first (its stderr, the
+/// pipe in `crun_stderr`, hangs up).
+fn receive_terminal(listener: &UnixListener, crun_stderr: &File) -> io::Result<Option<File>> {
+    let deadline = Instant::now() + CONSOLE_TIMEOUT;
+    loop {
+        let (connected, ended) = {
+            let mut fds = [
+                PollFd::new(listener.as_fd(), PollFlags::POLLIN),
+                PollFd::new(crun_stderr.as_fd(), PollFlags::empty()),
+            ];
+            match poll(&mut fds, PollTimeout::from(500u16)) {
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(e) => return Err(e.into()),
+            }
+            let has = |fd: &PollFd<'_>, flag| fd.revents().is_some_and(|r| r.intersects(flag));
+            (
+                has(&fds[0], PollFlags::POLLIN),
+                has(&fds[1], PollFlags::POLLHUP | PollFlags::POLLERR),
+            )
+        };
+        if connected {
+            let (stream, _) = listener.accept()?;
+            let mut buf = [0u8; 256];
+            let mut iov = [IoSliceMut::new(&mut buf)];
+            let mut space = nix::cmsg_space!(RawFd);
+            let msg = recvmsg::<()>(
+                stream.as_raw_fd(),
+                &mut iov,
+                Some(&mut space),
+                MsgFlags::MSG_CMSG_CLOEXEC,
+            )
+            .map_err(context("receiving the terminal"))?;
+            for cmsg in msg.cmsgs().map_err(context("receiving the terminal"))? {
+                if let ControlMessageOwned::ScmRights(fds) = cmsg {
+                    let mut owned: Vec<OwnedFd> = fds.into_iter().map(owned_fd).collect();
+                    if !owned.is_empty() {
+                        return Ok(Some(File::from(owned.swap_remove(0))));
+                    }
+                }
+            }
+            return Err(io::Error::new(ErrorKind::InvalidData, "crun sent no terminal"));
+        }
+        if ended {
+            return Ok(None);
+        }
+        if Instant::now() > deadline {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "crun did not hand over the terminal",
+            ));
+        }
+    }
+}
+
+/// Takes ownership of a file descriptor the kernel just passed this process over a socket.
+#[expect(unsafe_code, reason = "nix hands over descriptors from SCM_RIGHTS as raw numbers")]
+fn owned_fd(fd: RawFd) -> OwnedFd {
+    // SAFETY: the kernel installed `fd` in this process for the message just received (SCM_RIGHTS, with
+    // MSG_CMSG_CLOEXEC), and nothing else refers to it.
+    unsafe { OwnedFd::from_raw_fd(fd) }
 }
 
 /// Where the kernel lists virtio-serial ports, each with a `name` file.
@@ -379,28 +414,89 @@ impl System for Linux {
         Ok(())
     }
 
+    fn leave_initramfs(&mut self) -> io::Result<()> {
+        let fs_error = |what: String| move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
+        if !Path::new(CRUN).is_file() {
+            return Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!("no {CRUN} in the initramfs"),
+            ));
+        }
+        std::fs::create_dir_all(NEW_ROOT).map_err(fs_error(format!("creating {NEW_ROOT}")))?;
+        nix::mount::mount(
+            Some("tmpfs"),
+            NEW_ROOT,
+            Some("tmpfs"),
+            MsFlags::empty(),
+            Some("mode=0755"),
+        )
+        .map_err(context("mounting a tmpfs for the new root"))?;
+        for dir in [
+            "bin",
+            "dev",
+            "proc",
+            "sys",
+            "run",
+            "tmp",
+            ROOTFS.trim_start_matches('/'),
+        ] {
+            let path = format!("{NEW_ROOT}/{dir}");
+            std::fs::create_dir_all(&path).map_err(fs_error(format!("creating {path}")))?;
+        }
+        let crun = format!("{NEW_ROOT}{CRUN}");
+        std::fs::copy(CRUN, &crun).map_err(fs_error(format!("copying {CRUN}")))?;
+        std::fs::set_permissions(&crun, std::fs::Permissions::from_mode(0o755))?;
+        let _ = std::fs::remove_file(CRUN);
+        // An image run from a file came in the initramfs; it stays where it is and is bound into the new root.
+        if Path::new(ROOTFS).is_dir() {
+            nix::mount::mount(
+                Some(ROOTFS),
+                format!("{NEW_ROOT}{}", ROOTFS).as_str(),
+                None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REC,
+                None::<&str>,
+            )
+            .map_err(context("binding the image's files into the new root"))?;
+        }
+        // What switch_root does: the tmpfs becomes `/`, and the initramfs is out of reach below it.
+        chdir(NEW_ROOT).map_err(context("entering the new root"))?;
+        nix::mount::mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)
+            .map_err(context("moving the new root onto /"))?;
+        chroot(".").map_err(context("entering the new root"))?;
+        chdir("/").map_err(context("entering the new root"))?;
+        Ok(())
+    }
+
     fn start(&mut self, spec: &RunSpec) -> io::Result<i32> {
         if self.run.is_some() {
             return Err(io::Error::new(ErrorKind::AlreadyExists, "a command is already running"));
         }
-        for m in &ROOTFS_MOUNTS {
-            std::fs::create_dir_all(m.target)?;
-            match self.mount(m) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::ResourceBusy => {}
-                Err(e) => return Err(io::Error::new(e.kind(), format!("mounting {}: {e}", m.target))),
-            }
+        find_executable(ROOTFS, &spec.argv[0], &spec.env, &spec.cwd)?;
+        let fs_error = |what: String| move |e: io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
+        std::fs::create_dir_all(BUNDLE).map_err(fs_error(format!("creating {BUNDLE}")))?;
+        std::fs::write(format!("{BUNDLE}/hosts"), init::hosts_file(&spec.hostname))?;
+        std::fs::write(format!("{BUNDLE}/hostname"), format!("{}\n", spec.hostname))?;
+        let config = serde_json::to_vec_pretty(&init::container_config(spec, BUNDLE)).map_err(io::Error::other)?;
+        std::fs::write(format!("{BUNDLE}/config.json"), config).map_err(fs_error("writing config.json".into()))?;
+
+        // With a terminal, crun makes it in the container and sends the agent its other end over this socket.
+        let socket = format!("{BUNDLE}/console.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = if spec.tty {
+            Some(UnixListener::bind(&socket).map_err(fs_error("listening for the terminal".into()))?)
+        } else {
+            None
+        };
+        let mut args = vec![CRUN, "--cgroup-manager=cgroupfs", "run", "--bundle", BUNDLE];
+        if spec.tty {
+            args.extend(["--console-socket", socket.as_str()]);
         }
-        // The agent moves into the image root with the command: one command runs per sandbox.
-        chroot(ROOTFS).map_err(context("entering the image root"))?;
-        chdir("/").map_err(context("entering the image root"))?;
-        chdir(spec.cwd.as_str()).map_err(context(&format!("working directory {}", spec.cwd)))?;
-        let path = resolve(&spec.argv[0], &spec.env)?;
-        let argv = cstrings(&spec.argv)?;
-        let envp = cstrings(&spec.env)?;
+        args.push(CONTAINER);
+        let argv = cstrings(&args.iter().map(|a| (*a).to_string()).collect::<Vec<_>>())?;
+        let envp = cstrings(&["PATH=/bin".to_string()])?;
 
         let mut attr = PosixSpawnAttr::init()?;
-        // The agent blocks SIGTERM, SIGINT and SIGCHLD; the command must start with nothing blocked.
+        // The agent blocks SIGTERM, SIGINT and SIGCHLD; crun and the container must start with nothing blocked.
         attr.set_sigmask(&SigSet::empty())?;
         let mut defaults = shutdown_signals();
         defaults.add(NixSignal::SIGHUP);
@@ -412,62 +508,49 @@ impl System for Linux {
                 | PosixSpawnFlags::POSIX_SPAWN_SETPGROUP,
         )?;
         let mut actions = PosixSpawnFileActions::init()?;
-
-        let running = if spec.tty {
-            let size = spec.size.map(|(rows, cols)| Winsize {
-                ws_row: rows,
-                ws_col: cols,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            });
-            let pty = openpty(size.as_ref(), None).map_err(context("opening a terminal"))?;
-            // A session leader that opens a terminal without O_NOCTTY makes it its controlling terminal, so the
-            // command's foreground process group gets ^C and job control works.
-            let _ = setsid();
-            let name = ttyname(&pty.slave).map_err(context("naming the terminal"))?;
-            let terminal = open(&name, OFlag::O_RDWR | OFlag::O_CLOEXEC, Mode::empty())
-                .map_err(context("opening the terminal"))?;
-            drop(pty.slave);
-            if let Some(user) = &spec.user {
-                fchown(&terminal, Some(Uid::from_raw(user.uid)), None).map_err(context("handing over the terminal"))?;
-            }
-            for fd in 0..3 {
-                actions.add_dup2(terminal.as_raw_fd(), fd)?;
-            }
-            let pid = spawn_as(spec.user.as_ref(), || {
-                posix_spawn(path.as_path(), &actions, &attr, &argv, &envp)
-            })?;
-            let _ = tcsetpgrp(&terminal, pid);
-            let master = File::from(pty.master);
-            self.run = Some(Running {
-                tty: true,
-                stdin: Some(master.try_clone()?),
-                outputs: vec![(Stream::Stdout, master)],
-                _terminal: Some(terminal),
-            });
-            pid
+        // crun's own output carries its errors; without a terminal its stdio is the container's too.
+        let (stdout_r, stdout_w) = pipe2(OFlag::O_CLOEXEC)?;
+        let (stderr_r, stderr_w) = pipe2(OFlag::O_CLOEXEC)?;
+        let stdin = if spec.tty {
+            actions.add_open(0, "/dev/null", OFlag::O_RDONLY, Mode::empty())?;
+            None
         } else {
             let (stdin_r, stdin_w) = pipe2(OFlag::O_CLOEXEC)?;
-            let (stdout_r, stdout_w) = pipe2(OFlag::O_CLOEXEC)?;
-            let (stderr_r, stderr_w) = pipe2(OFlag::O_CLOEXEC)?;
             actions.add_dup2(stdin_r.as_raw_fd(), 0)?;
-            actions.add_dup2(stdout_w.as_raw_fd(), 1)?;
-            actions.add_dup2(stderr_w.as_raw_fd(), 2)?;
-            let pid = spawn_as(spec.user.as_ref(), || {
-                posix_spawn(path.as_path(), &actions, &attr, &argv, &envp)
-            })?;
-            self.run = Some(Running {
-                tty: false,
-                stdin: Some(File::from(stdin_w)),
-                outputs: vec![
-                    (Stream::Stdout, File::from(stdout_r)),
-                    (Stream::Stderr, File::from(stderr_r)),
-                ],
-                _terminal: None,
-            });
-            pid
+            Some((stdin_r, stdin_w))
         };
-        Ok(running.as_raw())
+        actions.add_dup2(stdout_w.as_raw_fd(), 1)?;
+        actions.add_dup2(stderr_w.as_raw_fd(), 2)?;
+        let pid = posix_spawn(Path::new(CRUN), &actions, &attr, &argv, &envp).map_err(context("starting crun"))?;
+        drop((stdout_w, stderr_w));
+        let mut stdin = stdin.map(|(_, w)| File::from(w));
+        let mut outputs = vec![
+            (Stream::Stdout, File::from(stdout_r)),
+            (Stream::Stderr, File::from(stderr_r)),
+        ];
+
+        if let Some(listener) = listener {
+            let terminal = receive_terminal(&listener, &outputs[1].1);
+            let _ = std::fs::remove_file(&socket);
+            match terminal {
+                Ok(Some(master)) => {
+                    stdin = Some(master.try_clone()?);
+                    outputs.insert(0, (Stream::Stdout, master));
+                }
+                // crun ended first: what it wrote on stderr says why, and its exit code follows.
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = kill(pid, NixSignal::SIGKILL);
+                    return Err(e);
+                }
+            }
+        }
+        self.run = Some(Running {
+            tty: spec.tty,
+            stdin,
+            outputs,
+        });
+        Ok(pid.as_raw())
     }
 
     fn write_stdin(&mut self, data: &[u8]) -> io::Result<()> {
@@ -649,31 +732,41 @@ mod tests {
     }
 
     #[test]
-    fn resolves_commands_through_the_image_path() {
-        let dir = std::env::temp_dir().join(format!("hermit-agent-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let (bin, other) = (dir.join("bin"), dir.join("other"));
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        for (path, mode) in [
-            (bin.join("tool"), 0o755),
-            (other.join("tool"), 0o755),
-            (bin.join("data"), 0o644),
-        ] {
-            std::fs::write(&path, "").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    fn finds_commands_inside_the_image_root_through_its_path() {
+        let root = std::env::temp_dir().join(format!("hermit-agent-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["bin", "usr/bin", "srv"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
         }
-        let env = vec![format!("PATH={}:{}", bin.display(), other.display())];
-        assert_eq!(resolve("tool", &env).unwrap(), bin.join("tool"));
-        assert_eq!(
-            resolve("data", &env).unwrap_err().kind(),
-            ErrorKind::NotFound,
-            "not executable"
+        for (path, mode) in [("bin/busybox", 0o755), ("usr/bin/data", 0o644), ("srv/run.sh", 0o755)] {
+            std::fs::write(root.join(path), "").unwrap();
+            std::fs::set_permissions(root.join(path), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        // An absolute symlink, as busybox images have: it points into the image, not the agent's root.
+        std::os::unix::fs::symlink("/bin/busybox", root.join("bin/sh")).unwrap();
+        std::os::unix::fs::symlink("/../../../../etc/passwd", root.join("bin/escape")).unwrap();
+        let root_s = root.to_str().unwrap();
+        let env = ["PATH=/usr/bin:/bin".to_string()];
+        assert!(find_executable(root_s, "sh", &env, "/").is_ok());
+        assert!(find_executable(root_s, "/bin/sh", &[], "/").is_ok());
+        assert!(find_executable(root_s, "./run.sh", &[], "/srv").is_ok());
+        assert!(
+            find_executable(root_s, "busybox", &[], "/").is_ok(),
+            "the default PATH has /bin"
         );
-        assert_eq!(resolve("/abs/path", &env).unwrap(), Path::new("/abs/path"));
-        assert_eq!(resolve("./rel", &[]).unwrap(), Path::new("./rel"));
-        assert!(resolve("no-such-tool-anywhere", &[]).is_err());
-        std::fs::remove_dir_all(dir).unwrap();
+        let missing = find_executable(root_s, "nosuchcmd", &env, "/").unwrap_err();
+        assert_eq!(missing.kind(), ErrorKind::NotFound);
+        assert_eq!(missing.to_string(), "executable file not found in $PATH");
+        assert!(find_executable(root_s, "data", &env, "/").is_err(), "not executable");
+        assert!(
+            find_executable(root_s, "escape", &env, "/").is_err(),
+            "stays inside the root"
+        );
+        assert!(
+            find_executable(root_s, "bin", &["PATH=/".into()], "/").is_err(),
+            "a directory"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -691,7 +784,6 @@ mod tests {
             tty: false,
             stdin: None,
             outputs: Vec::new(),
-            _terminal: None,
         });
         let spec = RunSpec {
             argv: vec!["true".into()],
@@ -700,6 +792,7 @@ mod tests {
             tty: false,
             size: None,
             user: None,
+            hostname: init::DEFAULT_HOSTNAME.into(),
         };
         assert_eq!(sys.start(&spec).unwrap_err().kind(), ErrorKind::AlreadyExists);
         assert_eq!(sys.write_stdin(b"x").unwrap_err().kind(), ErrorKind::NotConnected);
@@ -717,7 +810,6 @@ mod tests {
             tty: false,
             stdin: None,
             outputs: Vec::new(),
-            _terminal: None,
         });
         assert_eq!(sys.drain_output(), [(Stream::Stdout, b"last words".to_vec())]);
         assert!(matches!(sys.pending.as_slices().0, [Event::Signal(Signal::Child)]));

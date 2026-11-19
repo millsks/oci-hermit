@@ -459,7 +459,7 @@ oci-hermit machine boot [OPTIONS]
 ```console
 $ oci-hermit machine boot --arch x86_64
 booting an x86_64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12666-1794883275416245000/console.log
-agent ready after 0.6s (control protocol 1.3)
+agent ready after 0.6s (control protocol 1.4)
 guest powered off; sandbox stopped
 ```
 
@@ -471,7 +471,7 @@ Print the version and the control protocol version the host speaks.
 
 ```console
 $ oci-hermit version
-oci-hermit 0.2.0 (control protocol 1.3)
+oci-hermit 0.2.0 (control protocol 1.4)
 ```
 
 ## Exit codes

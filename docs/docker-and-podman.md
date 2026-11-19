@@ -13,7 +13,7 @@ nothing out.
 | Virtualization | On Windows and macOS, a Linux VM under a hypervisor (WSL 2, Hyper-V, Apple's Virtualization framework). | A VM with an emulated CPU (QEMU TCG). Nothing to enable. |
 | Daemon | Docker has a daemon; Podman machine has a VM that stays up. | Neither. Each `run` boots its own VM and powers it off when the command ends. |
 | Kernel | The host's (Linux) or the VM's. | oci-hermit's own minimal Linux 6.18 kernel, the same on every host. |
-| Runtime | runc or crun, with namespaces and cgroups. | For now, a `chroot` inside the VM; crun is planned (#21). The VM is the isolation boundary. |
+| Runtime | runc or crun, with namespaces and cgroups. | crun inside the VM, with Docker's default namespaces, capabilities, masked paths and devices; no seccomp profile yet (#102). The VM is the main boundary. |
 | Speed | Native, or close to it. | Emulated: roughly 5 to 20 times slower for CPU work. See [Performance and limits](performance.md). |
 | Other architectures | Through QEMU user-mode emulation (binfmt), set up separately. | Built in: amd64 and arm64 images run on every host. |
 

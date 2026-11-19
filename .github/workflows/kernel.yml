@@ -13,6 +13,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - guest/kernel/**
+      - guest/crun/**
       - qemu/**
       - packaging/**
       - pixi.toml
@@ -24,6 +25,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - guest/kernel/**
+      - guest/crun/**
       - qemu/**
       - packaging/**
       - pixi.toml
@@ -52,7 +54,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
-          environments: kernel-build qemu-build agent package default
+          environments: kernel-build crun-build qemu-build agent package default
           cache: true
       - name: Cache the QEMU bundle
         id: qemu-cache
@@ -79,6 +81,15 @@ jobs:
           bash guest/kernel/boot-test.sh "${{ matrix.arch }}" qemu/out "guest/out/${{ matrix.arch }}/$image" 180
       - name: Build the guest agent
         run: pixi run -e agent agent-build
+      - name: Cache crun
+        id: crun-cache
+        uses: actions/cache@v6
+        with:
+          path: guest/out/crun-${{ matrix.arch }}
+          key: crun-${{ matrix.arch }}-${{ hashFiles('guest/crun/**', 'pixi.lock') }}
+      - name: Build crun
+        if: steps.crun-cache.outputs.cache-hit != 'true'
+        run: pixi run -e crun-build crun-build "${{ matrix.arch }}" "guest/out/crun-${{ matrix.arch }}"
       - name: Boot a sandbox through the supervisor
         env:
           OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}/qemu/out
@@ -90,10 +101,13 @@ jobs:
           mkdir -p "guest/out/sandbox/$arch"
           cp "guest/out/$arch/$image" "guest/out/sandbox/$arch/kernel"
           cp "target/$arch-unknown-linux-gnu/release/hermit-agent" "guest/out/sandbox/$arch/hermit-agent"
-          # The kernel's license (from its build) and glibc's (statically linked into the agent), for the packages.
+          cp "guest/out/crun-$arch/crun" "guest/out/sandbox/$arch/crun"
+          # The kernel's license (from its build), glibc's (statically linked into the agent and crun) and those of
+          # crun and its libraries, for the packages.
           rm -rf "guest/out/sandbox/$arch/licenses"
           cp -R "guest/out/$arch/licenses" "guest/out/sandbox/$arch/licenses"
           pixi run -e package python -I packaging/licenses.py glibc "guest/out/sandbox/$arch" "$PWD/.pixi/envs/agent"
+          pixi run -e package python -I packaging/licenses.py crun "guest/out/sandbox/$arch" "guest/out/crun-$arch"
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
       - name: Run commands from a Debian image
         env:
@@ -130,6 +144,29 @@ jobs:
           cat tty.out
           [ "$code" = 3 ] || { echo "::error::exit code $code with -t, expected 3"; exit 1; }
           grep -q '/dev/pts/' tty.out
+
+          # The command runs in a container (crun): PID 1 in its own namespace, named by its short ID, with Docker's
+          # default capabilities, a read-only /sys and no way to open the layer disks.
+          # shellcheck disable=SC2016 # the single-quoted commands run in the guest's shell
+          inside=$("$hermit" run debian.tar sh -c 'echo "pid=$$"; hostname; grep CapEff /proc/self/status; \
+            mknod /tmp/vda b 254 0 && { head -c1 /tmp/vda > /dev/null 2>&1 && echo disk-readable || echo disk-denied; }; \
+            touch /sys/probe 2> /dev/null && echo sys-writable || echo sys-read-only')
+          echo "$inside"
+          grep -qx 'pid=1' <<< "$inside"
+          grep -qxE '[0-9a-f]{12}' <<< "$inside"
+          grep -qx 'CapEff:.00000000a80425fb' <<< "$inside"
+          grep -qx 'disk-denied' <<< "$inside"
+          grep -qx 'sys-read-only' <<< "$inside"
+          # Another user gets no capabilities at all.
+          grep -qx 'CapEff:.0000000000000000' <<< "$("$hermit" run -u nobody debian.tar grep CapEff /proc/self/status)"
+          # A command the image does not have fails before the container starts.
+          set +e
+          "$hermit" run debian.tar no-such-command 2> missing.err
+          code=$?
+          set -e
+          cat missing.err
+          [ "$code" = 125 ] || { echo "::error::exit code $code for a missing command, expected 125"; exit 1; }
+          grep -q 'executable file not found' missing.err
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true

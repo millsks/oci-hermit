@@ -86,10 +86,12 @@ Copying only `oci-hermit(.exe)` somewhere else breaks this. To keep them apart, 
 `OCI_HERMIT_GUEST_DIR` ([Configuration](configuration.md)).
 
 ```
-oci-hermit: no x86_64 guest kernel and agent found; looked in … (set OCI_HERMIT_GUEST_DIR to a directory with x86_64/kernel and x86_64/hermit-agent)
+oci-hermit: no x86_64 guest kernel, agent and crun found; looked in … (set OCI_HERMIT_GUEST_DIR to a directory with x86_64/kernel, x86_64/hermit-agent and x86_64/crun)
 ```
 
-The guest for that architecture is missing. `machine info` shows which ones were found.
+The guest for that architecture is missing, or it is one from before 0.3 without `crun`. `machine info` shows which
+ones were found. A guest that is too old to run containers is refused with `the guest agent speaks control protocol
+1.3 and cannot run containers; it needs 1.4 or later`: use the `guest/` folder that came with this `oci-hermit`.
 
 A message saying a QEMU `is not the bundled QEMU` means the folder holds some other QEMU. oci-hermit runs only the
 bundle it was built for, from the same package or CI run.

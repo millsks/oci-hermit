@@ -147,6 +147,31 @@ mike = ">=2.1"
 docs-serve = "mkdocs serve"
 docs-build = "mkdocs build --strict"
 
+# crun for the guest (guest/crun/build.sh): static, with json-c, libseccomp and libcap built from source, linked against the
+# same 2.39 sysroot as the agent so the glibc in the sources archive covers both. Natively on Linux only.
+[feature.crun-build]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.crun-build.dependencies]
+c-compiler = "*"
+make = "*"
+pkg-config = "*"
+gperf = "*"
+cmake = "*"
+xz = "*"
+# crun's configure asks for Python (libocispec's generator), though the release tarball's sources are pregenerated.
+python = "3.14.*"
+
+[feature.crun-build.target.linux-64.dependencies]
+sysroot_linux-64 = "2.39.*"
+
+[feature.crun-build.target.linux-aarch64.dependencies]
+sysroot_linux-aarch64 = "2.39.*"
+
+[feature.crun-build.tasks]
+# Arguments pass through: `pixi run -e crun-build crun-build [arch] [out-dir]`.
+crun-build = "bash guest/crun/build.sh"
+
 # Release packaging (packaging/package.py, release.yml): Python for the scripts, git-cliff for the release notes.
 [feature.package.dependencies]
 python = "3.14.*"
@@ -159,5 +184,6 @@ docs = { features = ["docs"], no-default-feature = true }
 msrv = { features = ["msrv"], no-default-feature = true }
 qemu-build = { features = ["qemu-build"], no-default-feature = true }
 kernel-build = { features = ["kernel-build"], no-default-feature = true }
+crun-build = { features = ["crun-build"], no-default-feature = true }
 agent = ["agent"]
 package = ["package"]

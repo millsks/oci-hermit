@@ -123,7 +123,7 @@ You now have an `oci-hermit` folder. The commands below run from the folder that
 
 ```console
 $ oci-hermit version
-oci-hermit 0.2.0 (control protocol 1.3)
+oci-hermit 0.2.0 (control protocol 1.4)
 ```
 
 `machine info` lists both emulators with `accel tcg`, both guests, the defaults `run` uses, where images are stored
@@ -132,7 +132,7 @@ found beside `oci-hermit`. On a Mac with Apple silicon it looks like this (paths
 
 ```console
 $ oci-hermit machine info
-oci-hermit 0.2.0 (control protocol 1.3)
+oci-hermit 0.2.0 (control protocol 1.4)
 host: macos/aarch64, so images default to linux/arm64
 
 emulator (QEMU, software CPU only):
@@ -168,7 +168,7 @@ registries (pulls happen on the host, never in the sandbox):
 ```console
 $ oci-hermit machine boot
 booting an aarch64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12655-1794883275062816000/console.log
-agent ready after 0.3s (control protocol 1.3)
+agent ready after 0.3s (control protocol 1.4)
 guest powered off; sandbox stopped
 ```
 
@@ -404,7 +404,7 @@ Point a source build at them with two settings, or copy them next to the binary 
 
 ```bash
 export OCI_HERMIT_QEMU_DIR=$PWD/qemu/out                 # contains bin/qemu-system-*
-export OCI_HERMIT_GUEST_DIR=$PWD/guest/out/sandbox       # contains <arch>/kernel and <arch>/hermit-agent
+export OCI_HERMIT_GUEST_DIR=$PWD/guest/out/sandbox       # contains <arch>/kernel, hermit-agent and crun
 target/release/oci-hermit machine info
 ```
 

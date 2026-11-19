@@ -194,6 +194,8 @@ pub struct Command {
     pub user: Option<hermit_proto::User>,
     /// The serial numbers of the image's layer disks, bottom first; empty when the image is in the initramfs.
     pub layers: Vec<String>,
+    /// The container's hostname; the agent picks one when `None`.
+    pub hostname: Option<String>,
 }
 
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
@@ -385,6 +387,7 @@ impl Sandbox {
             cols: command.size.map(|s| s.1),
             user: command.user.clone(),
             layers: command.layers.clone(),
+            hostname: command.hostname.clone(),
         })?;
         let deadline = Instant::now() + start_timeout;
         match self.receive(deadline, start_timeout)? {

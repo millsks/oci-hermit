@@ -19,12 +19,16 @@
 //! bottom layer first. The agent stacks them with overlayfs under a throwaway writable layer and runs the command
 //! there; without them the image is in the initramfs, as before. An older agent would ignore the field and find no
 //! image, so the host sends it only to an agent that speaks 1.3 or later.
+//!
+//! Since 1.4 the agent runs the command in a container, with crun: its own PID, mount, IPC, UTS, network and cgroup
+//! namespaces and Docker's default capabilities, rather than chrooted as root's peer. `Run` can name the container's
+//! `hostname`. An older agent would run the command outside a container, so the host refuses one.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 3);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 4);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
@@ -70,6 +74,9 @@ pub enum HostMessage {
         /// is in the initramfs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         layers: Vec<String>,
+        /// The container's hostname (1.4); the agent picks one when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
     },
     /// Bytes for the command's stdin, base64-encoded (1.1).
     Stdin { data: String },
@@ -331,13 +338,14 @@ mod tests {
                 groups: vec![27],
             }),
             layers: vec!["layer0".into(), "layer1".into()],
+            hostname: Some("4f2a9c1d0b3e".into()),
         };
         assert_eq!(decode::<HostMessage>(&encode(&run).unwrap()).unwrap(), run);
-        // A 1.1 host sends no user and a 1.2 host no layers, and that still decodes.
+        // A 1.1 host sends no user, a 1.2 host no layers and a 1.3 host no hostname, and that still decodes.
         let old = r#"{"type":"run","argv":["id"],"env":[],"cwd":"/","tty":false}"#;
         assert!(matches!(
             decode::<HostMessage>(old).unwrap(),
-            HostMessage::Run { user: None, ref layers, .. } if layers.is_empty()
+            HostMessage::Run { user: None, ref layers, hostname: None, .. } if layers.is_empty()
         ));
         let output = GuestMessage::Output {
             stream: Stream::Stderr,

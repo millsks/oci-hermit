@@ -111,23 +111,29 @@ impl Archive {
     }
 }
 
-fn agent_entries(archive: &mut Archive, agent: &[u8]) {
+fn agent_entries(archive: &mut Archive, agent: &[u8], crun: &[u8]) {
     archive.dir("dev", Meta::root(0o755));
     archive.char_device("dev/console", Meta::root(0o600), CONSOLE);
     archive.file("init", Meta::root(0o755), agent);
+    archive.dir("bin", Meta::root(0o755));
+    archive.file(CRUN, Meta::root(0o755), crun);
 }
 
-/// An initramfs that boots `agent` as PID 1, with `/dev/console` so its output reaches the serial console.
-pub fn build(agent: &[u8]) -> Vec<u8> {
+/// Where crun goes, and where the agent looks for it.
+pub const CRUN: &str = "bin/crun";
+
+/// An initramfs that boots `agent` as PID 1, with `/dev/console` so its output reaches the serial console, and
+/// `crun` at [`CRUN`] for the agent to run containers with.
+pub fn build(agent: &[u8], crun: &[u8]) -> Vec<u8> {
     let mut archive = Archive::new();
-    agent_entries(&mut archive, agent);
+    agent_entries(&mut archive, agent, crun);
     archive.finish()
 }
 
 /// [`build`], plus the image's files under [`ROOTFS`].
-pub fn build_with_rootfs(agent: &[u8], rootfs: &Rootfs) -> Vec<u8> {
+pub fn build_with_rootfs(agent: &[u8], crun: &[u8], rootfs: &Rootfs) -> Vec<u8> {
     let mut archive = Archive::new();
-    agent_entries(&mut archive, agent);
+    agent_entries(&mut archive, agent, crun);
     archive.dir(ROOTFS, Meta::root(0o755));
     for (path, node) in rootfs.nodes() {
         let name = format!("{ROOTFS}/{path}");
@@ -197,8 +203,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn holds_the_agent_as_init_and_a_console_node() {
-        let archive = build(b"\x7fELF agent");
+    fn holds_the_agent_as_init_a_console_node_and_crun() {
+        let archive = build(b"\x7fELF agent", b"\x7fELF crun");
         assert_eq!(archive.len() % 4, 0);
         let entries = parse(&archive);
         assert_eq!(
@@ -225,6 +231,20 @@ mod tests {
                     rdev: (0, 0),
                     data: b"\x7fELF agent".to_vec()
                 },
+                Entry {
+                    name: "bin".into(),
+                    mode: DIR | 0o755,
+                    uid: 0,
+                    rdev: (0, 0),
+                    data: vec![]
+                },
+                Entry {
+                    name: "bin/crun".into(),
+                    mode: FILE | 0o755,
+                    uid: 0,
+                    rdev: (0, 0),
+                    data: b"\x7fELF crun".to_vec()
+                },
             ]
         );
     }
@@ -233,7 +253,7 @@ mod tests {
     fn pads_every_data_length() {
         for len in 0..9 {
             let agent = vec![0xab; len];
-            let entries = parse(&build(&agent));
+            let entries = parse(&build(&agent, b""));
             assert_eq!(entries[2].data, agent);
         }
     }

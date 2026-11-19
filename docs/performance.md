@@ -92,5 +92,5 @@ command runs out of memory, raise `-m`. More CPUs help commands that use several
 - **Layer compression.** Plain and gzip layers. zstd layers are not supported yet.
 - **Platforms.** `linux/amd64` and `linux/arm64` only.
 - **Terminal.** The terminal size is sent when a `-t` command starts; resizing the window afterwards is not passed on.
-- **Inside the guest** there are no namespaces or cgroups yet, only `chroot` (crun comes with #21). Software that
-  expects to manage cgroups, or to see its own PID namespace, may behave differently.
+- **Inside the guest** each command runs in a crun container with Docker's defaults, but with no seccomp profile
+  yet (#102) and no resource limits beyond the VM's size.

@@ -9,7 +9,7 @@ reads a few environment variables. `oci-hermit machine info` shows the result.
 | --- | --- | --- |
 | `OCI_HERMIT_DATA_DIR` | Where the image store (`images/`) and the containers (`containers/`) live. | The platform's per-user data folder: see [Where things are kept](#where-things-are-kept). |
 | `OCI_HERMIT_QEMU_DIR` | A QEMU bundle to use, a folder with `bin/qemu-system-x86_64` and `bin/qemu-system-aarch64`. Searched first. | `qemu/` beside `oci-hermit`, or `<prefix>/libexec/oci-hermit/qemu` for a prefix install. |
-| `OCI_HERMIT_GUEST_DIR` | A guest to use, a folder with `x86_64/kernel`, `x86_64/hermit-agent`, `aarch64/kernel` and `aarch64/hermit-agent`. Searched first. | `guest/` beside `oci-hermit`, or `<prefix>/libexec/oci-hermit/guest`. |
+| `OCI_HERMIT_GUEST_DIR` | A guest to use, a folder with `kernel`, `hermit-agent` and `crun` in `x86_64/` and `aarch64/`. Searched first. | `guest/` beside `oci-hermit`, or `<prefix>/libexec/oci-hermit/guest`. |
 | `OCI_HERMIT_INSECURE_REGISTRIES` | Registries to reach over plain HTTP, as `host:port`, comma separated. | None: every registry needs HTTPS. |
 | `OCI_HERMIT_TIMINGS` | Anything but empty or `0` makes `run` print how long each phase took, on stderr. | Off. |
 | `REGISTRY_AUTH_FILE` | An auth file to read first, as Podman does. | Not set. |
@@ -87,7 +87,7 @@ same release from elsewhere, is refused. A missing guest for one architecture on
 
 ```console
 $ oci-hermit machine info
-oci-hermit 0.2.0 (control protocol 1.3)
+oci-hermit 0.2.0 (control protocol 1.4)
 host: macos/aarch64, so images default to linux/arm64
 ```
 

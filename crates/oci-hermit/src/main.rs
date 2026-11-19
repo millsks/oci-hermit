@@ -312,7 +312,7 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
     }
 }
 
-/// `oci-hermit 0.1.0 (control protocol 1.3)`.
+/// `oci-hermit 0.2.0 (control protocol 1.4)`.
 fn version_line() -> String {
     let (major, minor) = hermit_proto::PROTOCOL_VERSION;
     format!(
@@ -753,7 +753,10 @@ fn boot(
     let guest = guest::locate(&guest::candidates(env.guest_dir.clone(), &env.exe), arch)?;
     let dir = supervisor::run_dir(&env.run_base)?;
     let initrd = dir.join("initrd.cpio");
-    std::fs::write(&initrd, initramfs::build(&std::fs::read(&guest.agent)?))?;
+    std::fs::write(
+        &initrd,
+        initramfs::build(&std::fs::read(&guest.agent)?, &std::fs::read(&guest.crun)?),
+    )?;
     let console = dir.join("console.log");
     let qemu_log = dir.join("qemu.log");
     let (binary, qemu_args) = supervisor::qemu_command(&supervisor::Launch {
@@ -1092,18 +1095,20 @@ fn run_in_sandbox(
         None if args.name.is_some() => return Err(no_data_dir().into()),
         None => None,
     };
+    // As Docker names it: the container's short ID.
+    let hostname = record.as_ref().map(|(_, c, _)| containers::short(&c.id).to_string());
     let (out_, err_) = (&mut *out, &mut *err);
     let result = (move || -> Result<i32, Box<dyn std::error::Error>> {
         let (out, err) = (out_, err_);
         let memory = memory.unwrap_or_else(|| memory_for(rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes)));
         let dir = supervisor::run_dir(&env.run_base)?;
         let initrd = dir.join("initrd.cpio");
-        let agent = std::fs::read(&guest.agent)?;
+        let (agent, crun) = (std::fs::read(&guest.agent)?, std::fs::read(&guest.crun)?);
         std::fs::write(
             &initrd,
             match &rootfs {
-                Some(rootfs) => initramfs::build_with_rootfs(&agent, rootfs),
-                None => initramfs::build(&agent),
+                Some(rootfs) => initramfs::build_with_rootfs(&agent, &crun, rootfs),
+                None => initramfs::build(&agent, &crun),
             },
         )?;
         drop(rootfs);
@@ -1129,17 +1134,12 @@ fn run_in_sandbox(
         timings.mark("boot");
         // QEMU has the layer disks open now, so the store may let `rmi` go ahead.
         drop(store);
-        if disks.is_some() && version < (1, 3) {
+        // An agent older than 1.4 would run the command outside a container (and before 1.3 not find the layer
+        // disks, before 1.2 run it as root).
+        if version < (1, 4) {
             return Err(format!(
-                "the guest agent speaks control protocol {}.{} and cannot mount layer disks; it needs 1.3 or later",
-                version.0, version.1
-            )
-            .into());
-        }
-        // An agent older than 1.2 ignores the user and would run the command as root.
-        if !identity.is_root() && version < (1, 2) {
-            return Err(format!(
-                "the guest agent speaks control protocol {}.{} and cannot run a command as a user; it needs 1.2 or later",
+                "the guest agent speaks control protocol {}.{} and cannot run containers; it needs 1.4 or later \
+                 (use the guest that came with this oci-hermit)",
                 version.0, version.1
             )
             .into());
@@ -1176,6 +1176,7 @@ fn run_in_sandbox(
                 .enumerate()
                 .map(|(i, _)| supervisor::disk_serial(i))
                 .collect(),
+            hostname,
         };
         let stdin = args.interactive.then(|| {
             let (chunks, input) = std::sync::mpsc::channel();
@@ -1313,7 +1314,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.3"));
+        assert!(out.contains("control protocol 1.4"));
         assert!(err.is_empty());
     }
 
@@ -1732,7 +1733,7 @@ mod tests {
         assert!(err.contains("is not the bundled QEMU"));
     }
 
-    /// A guest directory holding a kernel and agent for both architectures.
+    /// A guest directory holding a kernel, agent and crun for both architectures.
     #[cfg(unix)]
     fn fake_guest(name: &str) -> PathBuf {
         let dir = qemu::testing::scratch(name);
@@ -1741,6 +1742,7 @@ mod tests {
             std::fs::create_dir_all(&arch_dir).unwrap();
             std::fs::write(arch_dir.join("kernel"), "kernel").unwrap();
             std::fs::write(arch_dir.join("hermit-agent"), "agent").unwrap();
+            std::fs::write(arch_dir.join("crun"), "crun").unwrap();
         }
         dir
     }
@@ -1759,7 +1761,7 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.3)"),
+                out.contains("(control protocol 1.4)"),
                 "the fake agent speaks 1.0: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
@@ -1770,7 +1772,7 @@ mod tests {
         let run = runs[0].as_ref().unwrap().path();
         assert_eq!(
             std::fs::read(run.join("initrd.cpio")).unwrap(),
-            initramfs::build(b"agent")
+            initramfs::build(b"agent", b"crun")
         );
     }
 
@@ -1783,7 +1785,7 @@ mod tests {
         let env = with_bundle(&bundle, None);
         let (code, _, err) = run_with(&env, &["machine", "boot", "--arch", "aarch64"]);
         assert_eq!(code, 1);
-        assert!(err.contains("no aarch64 guest kernel and agent found"));
+        assert!(err.contains("no aarch64 guest kernel, agent and crun found"));
         assert!(err.contains(guest::DIR_ENV));
     }
 
@@ -1837,6 +1839,12 @@ mod tests {
         assert_eq!(err, "oops\n");
         let seen: hermit_proto::HostMessage =
             hermit_proto::decode(&std::fs::read_to_string(bundle.join("run.seen")).unwrap()).unwrap();
+        // The container's hostname is its short ID, as Docker gives it.
+        let container = containers::Containers::open(&bundle.join("data"))
+            .unwrap()
+            .list()
+            .unwrap();
+        assert_eq!(container.len(), 1);
         assert_eq!(
             seen,
             hermit_proto::HostMessage::Run {
@@ -1848,6 +1856,7 @@ mod tests {
                 cols: None,
                 user: None,
                 layers: Vec::new(),
+                hostname: Some(containers::short(&container[0].container.id).to_string()),
             }
         );
         // An image opened from a path has no layer disks: the initramfs holds the agent and its files under rootfs/.
@@ -2028,7 +2037,7 @@ mod tests {
             Some(hermit_proto::HostMessage::Run { user, env, .. }) => (user, env),
             other => panic!("{other:?}"),
         };
-        let (code, err, seen) = run_as("main-user-image", "app", "1,2", &[]);
+        let (code, err, seen) = run_as("main-user-image", "app", "1,4", &[]);
         assert_eq!(code, 3, "{err}");
         let (who, env) = user(seen);
         assert_eq!(
@@ -2042,10 +2051,10 @@ mod tests {
         assert_eq!(env, ["HOME=/home/app"]);
 
         // -u wins over the image; root is sent as no user at all.
-        let (code, err, seen) = run_as("main-user-flag", "app", "1,2", &["-u", "root"]);
+        let (code, err, seen) = run_as("main-user-flag", "app", "1,4", &["-u", "root"]);
         assert_eq!(code, 3, "{err}");
         assert_eq!(user(seen), (None, vec!["HOME=/root".to_string()]));
-        let (_, _, seen) = run_as("main-user-numeric", "", "1,2", &["--user", "4242:44"]);
+        let (_, _, seen) = run_as("main-user-numeric", "", "1,4", &["--user", "4242:44"]);
         assert_eq!(user(seen).0.map(|u| (u.uid, u.gid)), Some((4242, 44)));
     }
 
@@ -2053,21 +2062,20 @@ mod tests {
     #[cfg(unix)]
     fn run_refuses_users_it_cannot_honour() {
         // A name the image does not have fails before anything boots.
-        let (code, err, seen) = run_as("main-user-ghost", "ghost", "1,2", &[]);
+        let (code, err, seen) = run_as("main-user-ghost", "ghost", "1,4", &[]);
         assert_eq!(code, 125);
         assert_eq!(err, "oci-hermit: user \"ghost\" is not in the image's /etc/passwd\n");
         assert!(seen.is_none());
-        // An agent that predates users would run the command as root, so it is never asked to.
-        let (code, err, seen) = run_as("main-user-old-agent", "app", "1,1", &[]);
-        assert_eq!(code, 125);
-        assert!(
-            err.contains("speaks control protocol 1.1 and cannot run a command as a user"),
-            "{err}"
-        );
-        assert!(seen.is_none());
-        // Root needs nothing new from the agent.
-        let (code, err, _) = run_as("main-user-old-root", "", "1,1", &[]);
-        assert_eq!(code, 3, "{err}");
+        // An agent that predates containers would run the command outside one (as root, before 1.2), so it is
+        // never asked to, whoever the user is.
+        for (name, user) in [("main-user-old-agent", "app"), ("main-user-old-root", "")] {
+            for version in ["1,1", "1,3"] {
+                let (code, err, seen) = run_as(name, user, version, &[]);
+                assert_eq!(code, 125);
+                assert!(err.contains("cannot run containers; it needs 1.4 or later"), "{err}");
+                assert!(seen.is_none());
+            }
+        }
     }
 
     #[test]
@@ -2184,11 +2192,11 @@ mod tests {
         assert_eq!(err, "oops\n");
         assert_eq!(std::fs::read_dir(&disks).unwrap().count(), 1);
 
-        // An agent older than 1.3 cannot mount the disks, and says so.
+        // An older agent cannot run containers, and says so.
         std::fs::write(bundle.join("agent.version"), "1,2").unwrap();
         let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", &reference]);
         assert_eq!(code, 125);
-        assert!(err.contains("cannot mount layer disks; it needs 1.3"), "{err}");
+        assert!(err.contains("cannot run containers; it needs 1.4"), "{err}");
     }
 
     #[test]

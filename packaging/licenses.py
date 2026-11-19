@@ -9,6 +9,7 @@ Subcommands:
 
   qemu  <bundle> <qemu-source> [patches-dir]   after qemu/build.sh bundled the libraries QEMU loads
   glibc <dest> <agent-env-prefix>              the static agent's C library, from that environment's sysroot
+  crun  <dest> <crun-out>                      crun and the libraries in it, from guest/crun/build.sh's output
 
 The Linux kernel's entry is written by guest/kernel/build.sh itself, in the same format. Standard library only: it
 runs under pixi on Linux and macOS and under MSYS2's Python on Windows.
@@ -302,6 +303,21 @@ def glibc(dest: Path, prefix: Path) -> None:
     write_sources(licenses, components)
 
 
+def crun(dest: Path, built: Path) -> None:
+    """crun, json-c, libseccomp and libcap: the license folders and sources ``guest/crun/build.sh`` wrote."""
+    found = built / "licenses" / "SOURCES.json"
+    if not found.is_file():
+        fail(f"no licenses/SOURCES.json in {built}: run guest/crun/build.sh")
+    components = json.loads(found.read_text())
+    licenses = dest / "licenses"
+    for component in components:
+        folder = built / "licenses" / component["name"]
+        if not folder.is_dir() or not any(folder.iterdir()):
+            fail(f"{component['name']}: no license files in {folder}")
+        shutil.copytree(folder, licenses / component["name"], dirs_exist_ok=True)
+    write_sources(licenses, components)
+
+
 def main(argv: list[str]) -> None:
     """Dispatches the subcommands documented at the top of this file."""
     match argv:
@@ -311,6 +327,8 @@ def main(argv: list[str]) -> None:
             qemu(Path(bundle), Path(source), Path(patches))
         case ["glibc", dest, prefix]:
             glibc(Path(dest), Path(prefix))
+        case ["crun", dest, built]:
+            crun(Path(dest), Path(built))
         case _:
             fail(__doc__ or "bad arguments")
 

@@ -124,7 +124,7 @@ Read it top to bottom: inputs reach the host tool, each host-tool component spea
 - Handles exec, PTYs, logs, signals and exit codes for the host tool.
 - Runs containers of one pod in a shared network namespace.
 
-**`run` today.** A stored image runs through the image pipeline below. An image opened from a path (an OCI layout directory or `.tar`), or one with more layers than a sandbox takes disks, is applied in memory instead and its files go into the initramfs under `/rootfs`. Either way the agent mounts `proc`, `sys`, `dev` and `dev/pts` in `/rootfs`, chroots in, and starts the command with `posix_spawn`, on a pty for `-t` or on pipes otherwise, then relays it over the control channel and reports its exit code. The VM is the isolation boundary until crun arrives.
+**`run` today.** A stored image runs through the image pipeline below. An image opened from a path (an OCI layout directory or `.tar`), or one with more layers than a sandbox takes disks, is applied in memory instead and its files go into the initramfs under `/rootfs`. Either way the agent writes an OCI runtime bundle (`/run/oci-hermit/config.json`, with Docker's default namespaces, capabilities, masked paths and device rules) and starts the command with `crun run`, on a pty crun hands over through a console socket for `-t` or on pipes otherwise, then relays it over the control channel and reports its exit code. crun's `pivot_root` refuses an initramfs root, so at boot the agent moves its root onto a tmpfs, as `switch_root` does. Seccomp (#102) is not applied yet.
 
 **Image pipeline.** pull or load → verify digests → per-layer EROFS image (cached) → attached read-only to the VM → stacked with overlayfs in the guest. The host never mounts anything, so no privileges are needed.
 

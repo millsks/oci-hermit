@@ -16,6 +16,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - packaging/**
+      - guest/crun/**
       - cliff.toml
   workflow_dispatch:
 
@@ -75,12 +76,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
-          environments: kernel-build agent package
+          environments: kernel-build crun-build agent package
           cache: true
       - name: Build the kernel
         run: pixi run -e kernel-build kernel-build "${{ matrix.arch }}" "guest/out/${{ matrix.arch }}"
       - name: Build the agent
         run: pixi run -e agent agent-build
+      - name: Build crun
+        run: pixi run -e crun-build crun-build "${{ matrix.arch }}" "guest/out/crun-${{ matrix.arch }}"
       - name: Assemble the guest with its licenses
         shell: bash
         run: |
@@ -92,8 +95,11 @@ jobs:
           cp "guest/out/$arch/$image" "$dest/kernel"
           cp "guest/out/$arch/config" "$dest/config"
           cp "target/$arch-unknown-linux-gnu/release/hermit-agent" "$dest/hermit-agent"
+          cp "guest/out/crun-$arch/crun" "$dest/crun"
+          cp "guest/out/crun-$arch/CRUN.txt" "$dest/CRUN.txt"
           cp -R "guest/out/$arch/licenses" "$dest/licenses"
           pixi run -e package python -I packaging/licenses.py glibc "$dest" "$PWD/.pixi/envs/agent"
+          pixi run -e package python -I packaging/licenses.py crun "$dest" "guest/out/crun-$arch"
           ls -lR "$dest"
       - uses: actions/upload-artifact@v7
         with:
