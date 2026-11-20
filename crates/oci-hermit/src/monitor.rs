@@ -1259,6 +1259,7 @@ mod tests {
     }
 
     /// As [`detached`], started with `-i` when `interactive`.
+    #[cfg(unix)]
     fn detached_with(
         name: &str,
         version: &str,
