@@ -1674,8 +1674,8 @@ command runs out of memory, raise <code>-m</code>. More CPUs help commands that 
 <li><strong>Layer compression.</strong> Plain and gzip layers. zstd layers are not supported yet.</li>
 <li><strong>Platforms.</strong> <code>linux/amd64</code> and <code>linux/arm64</code> only.</li>
 <li><strong>Terminal.</strong> The terminal size is sent when a <code>-t</code> command starts; resizing the window afterwards is not passed on.</li>
-<li><strong>Inside the guest</strong> each command runs in a crun container with Docker's defaults, but with no seccomp profile
-  yet (<a href="https://github.com/millsks/oci-hermit/issues/102">#102</a>) and no resource limits beyond the VM's size.</li>
+<li><strong>Inside the guest</strong> each command runs in a crun container with Docker's defaults, seccomp profile included, but
+  with no resource limits beyond the VM's size.</li>
 </ul>
 
 

@@ -1485,7 +1485,7 @@ nothing out.</p>
 <tr>
 <td>Runtime</td>
 <td>runc or crun, with namespaces and cgroups.</td>
-<td>crun inside the VM, with Docker's default namespaces, capabilities, masked paths and devices; no seccomp profile yet (<a href="https://github.com/millsks/oci-hermit/issues/102">#102</a>). The VM is the main boundary.</td>
+<td>crun inside the VM, with Docker's default namespaces, capabilities, seccomp profile, masked paths and devices. The VM is the main boundary.</td>
 </tr>
 <tr>
 <td>Speed</td>
