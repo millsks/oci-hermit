@@ -48,6 +48,26 @@ pub struct Container {
     /// `--rm`: removed when it exits.
     #[serde(default)]
     pub auto_remove: bool,
+    /// Its limits and the sandbox sized for them.
+    #[serde(default)]
+    pub resources: Resources,
+}
+
+/// A container's `--cpus` and `--memory`, and the sandbox VM `run` sized for them (#24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Resources {
+    /// CPU time in billionths of a CPU, as Docker's `NanoCpus`; `None` is no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nano_cpus: Option<u64>,
+    /// Memory in bytes; `None` is no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<u64>,
+    /// The sandbox's emulated CPUs.
+    #[serde(default)]
+    pub vcpus: u32,
+    /// The sandbox's memory, in MiB.
+    #[serde(default)]
+    pub vm_memory_mib: u32,
 }
 
 /// What a new container should be; [`Containers::create`] gives it an ID, and a name if it has none.
@@ -62,6 +82,7 @@ pub struct Spec {
     pub interactive: bool,
     pub user: Option<String>,
     pub auto_remove: bool,
+    pub resources: Resources,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -119,6 +140,74 @@ impl Listed {
             }
         }
     }
+}
+
+/// A container as `inspect` shows it, in Docker's shape: `HostConfig` holds its limits (`NanoCpus`, `Memory`; 0
+/// is none), and `Sandbox` the VM it runs in.
+pub fn inspect(listed: &Listed) -> Inspected {
+    use crate::images::format_time;
+    let (c, s) = (&listed.container, &listed.state);
+    // Docker's zero time, for a container that has not started or finished.
+    let time = |t: Option<i64>| t.map_or("0001-01-01T00:00:00Z".into(), format_time);
+    let status = match s.status {
+        _ if listed.running => "running",
+        Status::Created => "created",
+        Status::Running | Status::Exited => "exited",
+    };
+    let r = &c.resources;
+    Inspected {
+        id: c.id.clone(),
+        created: format_time(c.created),
+        path: c.command.first().cloned().unwrap_or_default(),
+        args: c.command.get(1..).unwrap_or_default().to_vec(),
+        state: serde_json::json!({
+            "Status": status,
+            "Running": listed.running,
+            "ExitCode": s.exit_code.unwrap_or(0),
+            "Error": s.error.as_deref().unwrap_or_default(),
+            "StartedAt": time(s.started),
+            "FinishedAt": time(s.finished),
+        }),
+        image: c.image_id.clone(),
+        name: format!("/{}", c.name),
+        platform: "linux",
+        config: serde_json::json!({
+            "Hostname": short(&c.id),
+            "User": c.user.as_deref().unwrap_or_default(),
+            "Tty": c.tty,
+            "OpenStdin": c.interactive,
+            "Cmd": c.command,
+            "Image": c.image,
+        }),
+        host_config: serde_json::json!({
+            "NanoCpus": r.nano_cpus.unwrap_or(0),
+            "Memory": r.memory.unwrap_or(0),
+            "AutoRemove": c.auto_remove,
+        }),
+        // Unknown (null) for a container recorded before sandboxes were sized per container.
+        sandbox: serde_json::json!({
+            "Platform": c.platform,
+            "Cpus": (r.vcpus > 0).then_some(r.vcpus),
+            "Memory": (r.vm_memory_mib > 0).then(|| u64::from(r.vm_memory_mib) * 1024 * 1024),
+        }),
+    }
+}
+
+/// One container as `inspect` shows it, in the order `docker inspect` uses.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Inspected {
+    pub id: String,
+    pub created: String,
+    pub path: String,
+    pub args: Vec<String>,
+    pub state: serde_json::Value,
+    pub image: String,
+    pub name: String,
+    pub platform: &'static str,
+    pub config: serde_json::Value,
+    pub host_config: serde_json::Value,
+    pub sandbox: serde_json::Value,
 }
 
 #[derive(Debug)]
@@ -257,6 +346,7 @@ impl Containers {
             interactive: spec.interactive,
             user: spec.user,
             auto_remove: spec.auto_remove,
+            resources: spec.resources,
         };
         write_json(&dir.join(STATE), &State::default())?;
         write_json(&dir.join(CONTAINER), &container)?;
@@ -701,6 +791,62 @@ mod tests {
             command: vec!["sh".into(), "-c".into(), "echo hello from the sandbox".into()],
             ..Spec::default()
         }
+    }
+
+    #[test]
+    fn inspect_shows_limits_and_the_sandbox_as_docker_shapes_them() {
+        let dir = scratch("containers-inspect");
+        let containers = Containers::open(&dir).unwrap();
+        let made = containers
+            .create(
+                Spec {
+                    user: Some("app".into()),
+                    resources: Resources {
+                        nano_cpus: Some(1_500_000_000),
+                        memory: Some(1 << 30),
+                        vcpus: 2,
+                        vm_memory_mib: 1152,
+                    },
+                    ..spec(Some("sized"))
+                },
+                1_735_689_600,
+            )
+            .unwrap();
+        let shown = serde_json::to_value(inspect(&containers.find("sized").unwrap())).unwrap();
+        assert_eq!(shown["Id"], made.id);
+        assert_eq!(shown["Name"], "/sized");
+        assert_eq!(shown["Created"], "2025-01-01T00:00:00Z");
+        assert_eq!(shown["Path"], "sh");
+        assert_eq!(shown["Args"], serde_json::json!(["-c", "echo hello from the sandbox"]));
+        assert_eq!(shown["State"]["Status"], "created");
+        assert_eq!(shown["State"]["StartedAt"], "0001-01-01T00:00:00Z");
+        assert_eq!(shown["Config"]["User"], "app");
+        assert_eq!(shown["Config"]["Hostname"], short(&made.id));
+        assert_eq!(shown["HostConfig"]["NanoCpus"], 1_500_000_000u64);
+        assert_eq!(shown["HostConfig"]["Memory"], 1u64 << 30);
+        assert_eq!(shown["Sandbox"]["Cpus"], 2);
+        assert_eq!(shown["Sandbox"]["Memory"], 1152u64 << 20);
+        assert_eq!(shown["Sandbox"]["Platform"], "linux/amd64");
+
+        let running = containers.start(&made.id, 1_735_689_601).unwrap();
+        let shown = serde_json::to_value(inspect(&containers.find("sized").unwrap())).unwrap();
+        assert_eq!(
+            (shown["State"]["Status"].as_str(), shown["State"]["Running"].as_bool()),
+            (Some("running"), Some(true))
+        );
+        assert_eq!(shown["State"]["StartedAt"], "2025-01-01T00:00:01Z");
+        running.exited(Some(3), None, 1_735_689_662).unwrap();
+        let shown = serde_json::to_value(inspect(&containers.find("sized").unwrap())).unwrap();
+        assert_eq!(shown["State"]["Status"], "exited");
+        assert_eq!(shown["State"]["ExitCode"], 3);
+        assert_eq!(shown["State"]["FinishedAt"], "2025-01-01T00:01:02Z");
+
+        // Without limits they read 0, as in Docker; a container from before #24 has no sandbox size.
+        let plain = containers.create(spec(Some("plain")), 0).unwrap();
+        let shown = serde_json::to_value(inspect(&containers.find(&plain.id).unwrap())).unwrap();
+        assert_eq!(shown["HostConfig"]["NanoCpus"], 0);
+        assert_eq!(shown["HostConfig"]["Memory"], 0);
+        assert!(shown["Sandbox"]["Cpus"].is_null() && shown["Sandbox"]["Memory"].is_null());
     }
 
     #[test]

@@ -26,7 +26,7 @@ nothing out.
 | Bind mounts (`-v`, planned in #33) | Read-write unless you add `:ro`. | Read-only unless you add `:rw`. Sensitive folders (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker`, the whole home folder, drive roots) are refused. |
 | `--network` (planned) | `bridge`, `host`, user networks. | Only `none` and a pod's shared network. |
 | `--privileged`, `--cap-add`, `--device`, `--pid host`, `--ipc host` (planned) | Accepted. | Refused. |
-| `--cpus`, `--memory` | Limits for the container. | The size of the emulated VM. |
+| `--cpus`, `--memory` | Limits for the container. | The same limits, from the container's cgroup; the emulated VM is sized to fit them (`--cpus 1.5` gives it 2 CPUs, `-m 1g` gives it 1 GiB and 128 MiB). |
 | `stop` | The stop signal (`SIGTERM`), then `SIGKILL` after 10 seconds. | The same; the kill is powering the sandbox off, exit code 137. |
 | `kill`, Ctrl-C | `kill` sends any signal; `run` passes on the signals it gets. | The same, to the container's command only (not to `exec`'s, as with Docker). |
 | Running containers | Kept by a daemon (`dockerd`) or, in Podman, by a `conmon` process per container. | Kept by a monitor process per container, as Podman's `conmon`; no daemon. A `run` without `-d` takes its container down with it if it is killed. |

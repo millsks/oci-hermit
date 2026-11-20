@@ -26,7 +26,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | [`login`](#login) | Log in to a registry |
 | [`logout`](#logout) | Remove a registry login |
 | [`images`, `image ls`](#images) | List stored images |
-| [`inspect`, `image inspect`](#inspect) | Show details of images as JSON |
+| [`inspect`, `image inspect`](#inspect) | Show details of containers and images as JSON |
 | [`tag`, `image tag`](#tag) | Give an image another name |
 | [`save`, `image save`](#save) | Save images to an archive |
 | [`rmi`, `image rm`](#rmi) | Remove images |
@@ -73,8 +73,8 @@ oci-hermit run [OPTIONS] <IMAGE> [COMMAND]...
 | `-t`, `--tty` | Give the command a terminal. With `-i`, an interactive shell. The terminal size is sent at the start; later resizes are not passed on yet. `TERM` is passed in from the host (`xterm` if unset) unless the image sets it. |
 | `-u`, `--user <USER>` | Run as this user instead of the image's `User`: `name`, `uid`, `name:group` or `uid:gid`. Names are looked up in the image's `/etc/passwd` and `/etc/group`. |
 | `--platform <PLATFORM>` | The image platform. Without it, the host's, or the other one with a warning if the image has only that. |
-| `--cpus <CPUS>` | Number of emulated CPUs. Default 1. |
-| `-m`, `--memory <MEMORY>` | Memory for the sandbox: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix, as Docker. At least `64m`. Default: 512 MiB for a stored image, which runs from its layer disks; for an image run from a file, twice its size plus 256 MiB. |
+| `--cpus <CPUS>` | The CPUs the container may use, as Docker's: a decimal number from `0.01` up to the host's CPU count (`0` is no limit). The sandbox gets an emulated CPU for each one started (`1.5` gives 2), and the container's cgroup holds it to the number given. Without it, 1 emulated CPU and no limit. |
+| `-m`, `--memory <MEMORY>` | The memory the container may use, as Docker's: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix. At least `6m`. The container's cgroup holds it to that (more is an out-of-memory kill, exit 137), and the sandbox gets 128 MiB more for the guest, plus room for an image run from a file. Without it, no limit, and the sandbox has 512 MiB for a stored image, which runs from its layer disks, or twice the size of one run from a file plus 256 MiB. |
 | `--name <NAME>` | The container's name: a letter or digit, then letters, digits, `_`, `.` or `-`. Without one, a name such as `quiet_nautilus` is made up. A name stays taken until the container is removed. |
 | `--rm` | Remove the container when the command ends. Without it the container is kept, exited, for `ps -a`, until `rm`. |
 | `-d`, `--detach` | Run in the background: print the container's ID once its command started, and leave it running until it exits or is stopped. See [logs](#logs) and [stop](#stop). With `-i`, its stdin stays open (nothing writes to it yet), so `-dit … sh` keeps a shell waiting. |
@@ -440,17 +440,47 @@ An image without a name shows `<none>` as its repository and tag.
 
 ## inspect
 
-Show details of images as a JSON array, one object per name, close to `podman image inspect`. `image inspect` is the
-same command.
+Show details of containers and images as a JSON array, one object per name. As with `docker inspect`, a name or ID is
+looked up among containers first, then images; `image inspect` looks only at images.
 
 ```
-oci-hermit inspect <IMAGES>...
+oci-hermit inspect <NAMES>...
+oci-hermit image inspect <IMAGES>...
 ```
 
-The fields are `Id`, `Digest`, `RepoTags`, `RepoDigests`, `Created`, `Author`, `Architecture`, `Variant`, `Os`,
-`Size`, `Labels`, `Config`, `RootFS`, `History` and `ManifestType`. An image that is not stored prints
-`oci-hermit: no such image: <name>` on stderr, and `inspect` exits 1. An example is in
-[Manage the image store](field-manual/image-store.md#look-inside-an-image).
+An image's fields are close to `podman image inspect`: `Id`, `Digest`, `RepoTags`, `RepoDigests`, `Created`,
+`Author`, `Architecture`, `Variant`, `Os`, `Size`, `Labels`, `Config`, `RootFS`, `History` and `ManifestType`. An
+example is in [Manage the image store](field-manual/image-store.md#look-inside-an-image).
+
+A container's are close to `docker inspect`'s: `Id`, `Created`, `Path`, `Args`, `State` (`Status`, `Running`,
+`ExitCode`, `Error`, `StartedAt`, `FinishedAt`), `Image` (the image ID), `Name`, `Platform`, `Config` (`Hostname`,
+`User`, `Tty`, `OpenStdin`, `Cmd`, `Image`) and `HostConfig` (`NanoCpus` and `Memory`, its `--cpus` and `-m` limits,
+0 when there is none; `AutoRemove`). `Sandbox` is oci-hermit's own: the VM it runs in (`Platform`, `Cpus`, and
+`Memory` in bytes).
+
+```console
+$ oci-hermit run -d --name web --cpus 1.5 -m 1g debian:bookworm-slim sleep 600
+$ oci-hermit inspect web
+[
+  {
+    "Id": "4f2a9c1d0b3e…",
+    …
+    "HostConfig": {
+      "AutoRemove": false,
+      "Memory": 1073741824,
+      "NanoCpus": 1500000000
+    },
+    "Sandbox": {
+      "Cpus": 2,
+      "Memory": 1207959552,
+      "Platform": "linux/amd64"
+    }
+  }
+]
+```
+
+A name that is neither prints `oci-hermit: no such image or container: <name>` on stderr (`no such image` for
+`image inspect`), and `inspect` exits 1.
 
 ## tag
 

@@ -70,15 +70,16 @@ sys	0m 0.00s
 
 | | Default | Change with |
 | --- | --- | --- |
-| CPUs | 1 | `run --cpus N`, `machine boot --cpus N` |
-| Memory for `run` | 512 MiB for a stored image; twice the size plus 256 MiB for one run from a file | `run -m 2g` (at least `64m`) |
+| CPUs | 1 | `run --cpus 1.5` (2 emulated CPUs, the container held to 1.5), `machine boot --cpus N` |
+| Memory for `run` | 512 MiB for a stored image; twice the size plus 256 MiB for one run from a file | `run -m 2g` (the container held to 2 GiB, the sandbox 128 MiB more; at least `6m`) |
 | Memory for `machine boot` | 512 MiB | `machine boot --memory 1024` (MiB) |
 
 The memory is the guest's RAM, which QEMU reserves on your machine. An image from the store (pulled or loaded) runs
 from read-only disks, one per layer, so 512 MiB does whatever its size; what the command writes is kept in that RAM
 until the sandbox stops. An image run straight from a file (`run image.tar`), or one with more than 20 layers,
 travels in the initramfs and is unpacked in the guest's RAM instead, so it gets twice its size plus 256 MiB. If a
-command runs out of memory, raise `-m`. More CPUs help commands that use several threads; booting does not get faster.
+command runs out of memory, raise `-m`; with `-m`, going over it is an out-of-memory kill (exit 137), as in Docker.
+More CPUs help commands that use several threads; booting does not get faster.
 
 ## Limits
 

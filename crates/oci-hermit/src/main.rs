@@ -476,10 +476,22 @@ fn machine_info(env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
 
     lines.push(String::new());
     lines.push("sandbox defaults for run:".into());
-    lines.push(row("cpus", "1 (--cpus)".into()));
+    let host = host_cpus();
+    lines.push(row(
+        "cpus",
+        format!("1 emulated CPU, no limit (--cpus 1.5: 2 CPUs, the container held to 1.5; at most {host}, the host's)"),
+    ));
     lines.push(row(
         "memory",
-        "512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB (--memory)".into(),
+        "512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB".into(),
+    ));
+    lines.push(format!(
+        "  {:<12}(-m 1g: the container held to 1 GiB, in a sandbox {GUEST_OVERHEAD_MIB} MiB larger, plus any image in memory)",
+        ""
+    ));
+    lines.push(row(
+        "limits",
+        "`inspect <container>` shows a container's limits and its sandbox".into(),
     ));
     lines.push(row(
         "network",
@@ -701,6 +713,14 @@ fn logout_command(
 }
 
 /// The image commands (`images`, `rmi`, `inspect`, `tag`, `save`, `image ...`, `system df`).
+/// What `inspect` shows: containers and images, each in its own field order.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum Inspected {
+    Container(containers::Inspected),
+    Image(images::Inspected),
+}
+
 fn image_command(
     command: &cli::Command,
     env: &Env,
@@ -728,12 +748,43 @@ fn image_command(
             }
         }
         C::Inspect(args) | C::Image(I::Inspect(args)) => {
-            let (objects, missing) = images::inspect(&open_store(env)?, &args.images)?;
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&objects)?);
-            for name in &missing {
-                let _ = writeln!(err, "oci-hermit: no such image: {name}");
+            // As `docker inspect`, a name is a container's before it is an image's; `image inspect` is images only.
+            let containers = match command {
+                C::Inspect(_) => env.data_dir.as_ref().and_then(|_| open_containers(env).ok()),
+                _ => None,
+            };
+            let mut objects = Vec::new();
+            let mut missing = Vec::new();
+            let mut failed = false;
+            let mut store = None;
+            for name in &args.images {
+                match containers.as_ref().map(|c| c.find(name)) {
+                    Some(Ok(listed)) => objects.push(Inspected::Container(containers::inspect(&listed))),
+                    Some(Err(e @ containers::ContainerError::Ambiguous(_))) => {
+                        let _ = writeln!(err, "oci-hermit: {e}");
+                        failed = true;
+                    }
+                    _ => {
+                        if store.is_none() {
+                            store = Some(open_store(env)?);
+                        }
+                        let (found, gone) =
+                            images::inspect(store.as_ref().expect("opened"), std::slice::from_ref(name))?;
+                        objects.extend(found.into_iter().map(Inspected::Image));
+                        missing.extend(gone);
+                    }
+                }
             }
-            if !missing.is_empty() {
+            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&objects)?);
+            let what = if containers.is_some() {
+                "image or container"
+            } else {
+                "image"
+            };
+            for name in &missing {
+                let _ = writeln!(err, "oci-hermit: no such {what}: {name}");
+            }
+            if failed || !missing.is_empty() {
                 return Ok(1);
             }
         }
@@ -995,8 +1046,9 @@ fn other_arch(arch: qemu::GuestArch) -> qemu::GuestArch {
     }
 }
 
-/// `--memory` as MiB: a number with an optional `k`, `m` or `g` suffix (bytes when there is none, as Docker).
-fn parse_memory(text: &str) -> Option<u32> {
+/// `--memory` in bytes: a number with an optional `k`, `m` or `g` suffix (bytes when there is none), at least
+/// 6 MiB, as Docker takes it.
+fn parse_memory(text: &str) -> Option<u64> {
     let text = text.trim().to_ascii_lowercase();
     let (digits, scale) = match text.strip_suffix(['b']).unwrap_or(&text) {
         t if t.ends_with('g') => (&t[..t.len() - 1], 1024 * 1024 * 1024),
@@ -1005,7 +1057,58 @@ fn parse_memory(text: &str) -> Option<u32> {
         t => (t, 1),
     };
     let bytes = digits.parse::<u64>().ok()?.checked_mul(scale)?;
-    u32::try_from(bytes / (1024 * 1024)).ok().filter(|&mib| mib >= 64)
+    // The sandbox's size in MiB must fit a u32 once the guest's share is added.
+    (bytes >= 6 * MIB && bytes / MIB < u64::from(u32::MAX / 2)).then_some(bytes)
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// What the guest needs besides the container's memory: the kernel, the agent, crun and the page cache.
+const GUEST_OVERHEAD_MIB: u32 = 128;
+
+/// `--cpus` as Docker's `NanoCpus`: a decimal number of CPUs, from 0.01 to the host's count; 0 is no limit.
+fn parse_cpus(text: &str, host_cpus: u32) -> Result<Option<u64>, String> {
+    let cpus: f64 = text
+        .trim()
+        .parse()
+        .ok()
+        .filter(|c: &f64| c.is_finite())
+        .ok_or_else(|| format!("--cpus {text}: use a number of CPUs, e.g. 2 or 1.5"))?;
+    let nano = (cpus * 1e9).round();
+    if nano == 0.0 {
+        return Ok(None);
+    }
+    if !(1e7..=f64::from(host_cpus) * 1e9).contains(&nano) {
+        return Err(format!(
+            "--cpus {text}: the range of CPUs is from 0.01 to {host_cpus}.00, as there are only {host_cpus} CPUs \
+             available"
+        ));
+    }
+    Ok(Some(nano as u64))
+}
+
+/// The sandbox for a container with these limits, holding `rootfs_bytes` of image in its initramfs: a vCPU for
+/// each CPU the limit starts (1 without one), and the memory limit plus [`GUEST_OVERHEAD_MIB`] and room for the
+/// image (or [`memory_for`] it without one). The container's cgroup holds it to the limits themselves.
+fn sizing(nano_cpus: Option<u64>, memory: Option<u64>, rootfs_bytes: u64) -> containers::Resources {
+    let rootfs_mib = u32::try_from(2 * rootfs_bytes.div_ceil(MIB)).unwrap_or(u32::MAX);
+    containers::Resources {
+        nano_cpus,
+        memory,
+        vcpus: nano_cpus.map_or(1, |n| u32::try_from(n.div_ceil(1_000_000_000)).unwrap_or(u32::MAX)),
+        vm_memory_mib: match memory {
+            Some(bytes) => u32::try_from(bytes.div_ceil(MIB))
+                .unwrap_or(u32::MAX)
+                .saturating_add(GUEST_OVERHEAD_MIB)
+                .saturating_add(rootfs_mib),
+            None => memory_for(rootfs_bytes),
+        },
+    }
+}
+
+/// The host's CPUs, which `--cpus` may not exceed.
+fn host_cpus() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX))
 }
 
 /// Memory for a sandbox holding `rootfs_bytes` of image files: the initramfs keeps a compressed-free copy of them
@@ -1085,8 +1188,12 @@ fn run_in_sandbox(
     }
     let memory = match &args.memory {
         Some(text) => {
-            Some(parse_memory(text).ok_or_else(|| format!("--memory {text}: use e.g. 512m or 2g, at least 64m"))?)
+            Some(parse_memory(text).ok_or_else(|| format!("--memory {text}: use e.g. 512m or 2g, at least 6m"))?)
         }
+        None => None,
+    };
+    let nano_cpus = match &args.cpus {
+        Some(text) => parse_cpus(text, host_cpus())?,
         None => None,
     };
     let requested = match args.platform.as_deref() {
@@ -1139,6 +1246,11 @@ fn run_in_sandbox(
     if argv.is_empty() {
         return Err("the image has no entrypoint or command, and none was given".into());
     }
+    let resources = sizing(
+        nano_cpus,
+        memory,
+        rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes),
+    );
     // The container is recorded once its image is known, and says how it ended whatever happens next.
     let data_dir = env.data_dir.as_deref().ok_or_else(no_data_dir)?;
     let containers = containers::Containers::open(data_dir)
@@ -1154,11 +1266,11 @@ fn run_in_sandbox(
             interactive: args.interactive,
             user: args.user.clone(),
             auto_remove: args.rm,
+            resources,
         },
         images::now(),
     )?;
     let started = (|| -> Result<(monitor::Process, ipc::Conn, PathBuf), Box<dyn std::error::Error>> {
-        let memory = memory.unwrap_or_else(|| memory_for(rootfs.as_ref().map_or(0, rootfs::Rootfs::content_bytes)));
         let dir = supervisor::run_dir(&env.run_base)?;
         let initrd = dir.join("initrd.cpio");
         let (agent, crun) = (std::fs::read(&guest.agent)?, std::fs::read(&guest.crun)?);
@@ -1178,8 +1290,8 @@ fn run_in_sandbox(
             console_log: &console_log,
             spec: supervisor::MachineSpec {
                 arch,
-                memory_mib: memory,
-                cpus: args.cpus.unwrap_or(1),
+                memory_mib: resources.vm_memory_mib,
+                cpus: resources.vcpus,
             },
             disks: disks.as_deref().unwrap_or_default(),
         })?;
@@ -1216,6 +1328,10 @@ fn run_in_sandbox(
                 .collect(),
             // As Docker names it: the container's short ID.
             hostname: Some(containers::short(&container.id).to_string()),
+            limits: hermit_proto::Limits {
+                nano_cpus: resources.nano_cpus,
+                memory: resources.memory,
+            },
         };
         let launch = monitor::Launch {
             qemu,
@@ -1582,7 +1698,7 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.6"));
+        assert!(out.contains("control protocol 1.7"));
         assert!(err.is_empty());
     }
 
@@ -1789,7 +1905,7 @@ mod tests {
         let (code, out, err) = run_with(&env, &["inspect", "example.com/app:2", "nope"]);
         assert_eq!(code, 1);
         assert!(out.starts_with("[\n  {\n    \"Id\": \"sha256:"), "{out}");
-        assert!(err.contains("no such image: nope"));
+        assert!(err.contains("no such image or container: nope"));
 
         let (code, out, _) = run_with(&env, &["image", "history", "example.com/app:1"]);
         assert_eq!(code, 0);
@@ -2029,8 +2145,8 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.6)"),
-                "the fake agent speaks 1.6: {out}"
+                out.contains("(control protocol 1.7)"),
+                "the fake agent speaks 1.7: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
         }
@@ -2085,6 +2201,124 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn run_sizes_the_sandbox_and_limits_the_container() {
+        let _guard = qemu::testing::exec_lock();
+        let bundle = qemu::testing::scratch("main-run-sized");
+        qemu::testing::fake_bundle(&bundle, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
+        let guest = fake_guest("main-run-sized-guest");
+        let layout = image::testing::layout(
+            &qemu::testing::scratch("main-run-sized-image"),
+            &[("amd64", image::testing::layer())],
+            r#"{"architecture":"ARCH","config":{"Cmd":["true"]}}"#,
+        );
+        let env = with_bundle(&bundle, Some(&guest));
+        let image = layout.to_str().unwrap();
+        let sized = [
+            "run",
+            "--name",
+            "sized",
+            "--cpus",
+            "1.5",
+            "-m",
+            "256m",
+            "--platform",
+            "linux/amd64",
+            image,
+        ];
+        let (code, _, err) = run_with(&env, &sized);
+        assert_eq!(code, 3, "{err}");
+        let seen: hermit_proto::HostMessage =
+            hermit_proto::decode(&std::fs::read_to_string(bundle.join("run.seen")).unwrap()).unwrap();
+        let hermit_proto::HostMessage::Run { limits, .. } = seen else {
+            panic!("{seen:?}")
+        };
+        assert_eq!(limits.nano_cpus, Some(1_500_000_000));
+        assert_eq!(limits.memory, Some(256 * MIB));
+        // Two vCPUs for 1.5 CPUs; the limit, the guest's share and the image in memory (twice its size).
+        let found = containers::Containers::open(&bundle.join("data"))
+            .unwrap()
+            .find("sized")
+            .unwrap();
+        let rootfs = image::Image::open(&layout, qemu::GuestArch::X86_64)
+            .unwrap()
+            .rootfs()
+            .unwrap();
+        let image_mib = u32::try_from(2 * rootfs.content_bytes().div_ceil(MIB)).unwrap();
+        assert_eq!(found.container.resources.vcpus, 2);
+        assert_eq!(
+            found.container.resources.vm_memory_mib,
+            256 + GUEST_OVERHEAD_MIB + image_mib
+        );
+        let (code, out, err) = run_with(&env, &["inspect", "sized"]);
+        assert_eq!(code, 0, "{err}");
+        let shown: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(shown[0]["HostConfig"]["NanoCpus"], 1_500_000_000u64);
+        assert_eq!(shown[0]["HostConfig"]["Memory"], 256 * MIB);
+        assert_eq!(shown[0]["Sandbox"]["Cpus"], 2);
+        // `image inspect` looks at images only, and a name that is neither is reported.
+        let (code, _, err) = run_with(&env, &["image", "inspect", "sized"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("no such image: sized"), "{err}");
+        let (code, out, err) = run_with(&env, &["inspect", "sized", "nothing"]);
+        assert_eq!(code, 1);
+        assert!(out.contains("NanoCpus"), "the container is still shown: {out}");
+        assert!(err.contains("no such image or container: nothing"), "{err}");
+
+        // Without limits nothing is sent, and an agent that cannot apply them is refused rather than ignored.
+        let (code, _, err) = run_with(&env, &["run", "--platform", "linux/amd64", image]);
+        assert_eq!(code, 3, "{err}");
+        assert!(
+            !std::fs::read_to_string(bundle.join("run.seen"))
+                .unwrap()
+                .contains("limits")
+        );
+        std::fs::write(bundle.join("agent.version"), "1,6").unwrap();
+        let (code, _, err) = run_with(&env, &["run", "--cpus", "1", "--platform", "linux/amd64", image]);
+        assert_eq!(code, 125, "{err}");
+        assert!(err.contains("cannot limit a container's CPUs or memory"), "{err}");
+        assert_eq!(run_with(&env, &["run", "--platform", "linux/amd64", image]).0, 3);
+
+        for (flag, value, says) in [
+            ("--cpus", "lots", "use a number of CPUs"),
+            ("--cpus", "100000", "the range of CPUs is from 0.01"),
+            ("--memory", "1m", "at least 6m"),
+        ] {
+            let (code, _, err) = run_with(&env, &["run", flag, value, "--platform", "linux/amd64", image]);
+            assert_eq!(code, 125, "{flag} {value}: {err}");
+            assert!(err.contains(says), "{flag} {value}: {err}");
+        }
+    }
+
+    #[test]
+    fn cpus_and_memory_size_the_sandbox_as_designed() {
+        assert_eq!(parse_cpus("1.5", 4), Ok(Some(1_500_000_000)));
+        assert_eq!(parse_cpus("0.01", 4), Ok(Some(10_000_000)));
+        assert_eq!(parse_cpus("4", 4), Ok(Some(4_000_000_000)));
+        assert_eq!(parse_cpus("0", 4), Ok(None), "0 is no limit, as in Docker");
+        for bad in ["4.5", "0.001", "-1", "NaN", "inf", "two"] {
+            assert!(parse_cpus(bad, 4).is_err(), "{bad}");
+        }
+        assert!(
+            parse_cpus("8", 4)
+                .unwrap_err()
+                .contains("from 0.01 to 4.00, as there are only 4 CPUs available")
+        );
+        let unlimited = sizing(None, None, 0);
+        assert_eq!((unlimited.vcpus, unlimited.vm_memory_mib), (1, memory_for(0)));
+        assert_eq!(sizing(None, None, 300 * MIB).vm_memory_mib, memory_for(300 * MIB));
+        let sized = sizing(Some(1_500_000_000), Some(1 << 30), 0);
+        assert_eq!((sized.vcpus, sized.vm_memory_mib), (2, 1024 + GUEST_OVERHEAD_MIB));
+        assert_eq!((sized.nano_cpus, sized.memory), (Some(1_500_000_000), Some(1 << 30)));
+        assert_eq!(sizing(Some(10_000_000), Some(6 * MIB + 1), 100 * MIB).vcpus, 1);
+        assert_eq!(
+            sizing(None, Some(6 * MIB + 1), 100 * MIB).vm_memory_mib,
+            7 + GUEST_OVERHEAD_MIB + 200
+        );
+        assert_eq!(sizing(Some(2_000_000_000), None, 0).vcpus, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_relays_output_and_exits_with_the_commands_code() {
         let _guard = qemu::testing::exec_lock();
         let bundle = qemu::testing::scratch("main-run");
@@ -2125,6 +2359,7 @@ mod tests {
                 user: None,
                 layers: Vec::new(),
                 hostname: Some(containers::short(&container[0].container.id).to_string()),
+                limits: hermit_proto::Limits::default(),
             }
         );
         // An image opened from a path has no layer disks: the initramfs holds the agent and its files under rootfs/.
@@ -2725,12 +2960,14 @@ mod tests {
 
     #[test]
     fn memory_and_platform_parse_like_docker() {
-        assert_eq!(parse_memory("512m"), Some(512));
-        assert_eq!(parse_memory("2g"), Some(2048));
-        assert_eq!(parse_memory("2GB"), Some(2048));
-        assert_eq!(parse_memory("1048576k"), Some(1024));
-        assert_eq!(parse_memory("536870912"), Some(512));
-        assert_eq!(parse_memory("32m"), None, "too small to boot");
+        assert_eq!(parse_memory("512m"), Some(512 * MIB));
+        assert_eq!(parse_memory("2g"), Some(2048 * MIB));
+        assert_eq!(parse_memory("2GB"), Some(2048 * MIB));
+        assert_eq!(parse_memory("1048576k"), Some(1024 * MIB));
+        assert_eq!(parse_memory("536870913"), Some(536_870_913));
+        assert_eq!(parse_memory("6m"), Some(6 * MIB));
+        assert_eq!(parse_memory("5m"), None, "Docker's minimum is 6m");
+        assert_eq!(parse_memory("9000000g"), None, "too big for any sandbox");
         assert_eq!(parse_memory("lots"), None);
         assert_eq!(memory_for(0), 512);
         assert_eq!(memory_for(300 * 1024 * 1024), 856);

@@ -90,7 +90,7 @@ Everything runs through pixi.
   open (after the handshake), so `rmi` cannot delete a disk being attached.
 - Commands run in crun containers (#21, protocol 1.4; the host refuses an older agent). The agent writes
   `/run/oci-hermit/config.json` (`init::container_config`: Docker's namespaces, capabilities, masked paths, devices,
-  and Docker's seccomp profile, #102; no user namespace) and spawns `/bin/crun --cgroup-manager=cgroupfs run`. crun's `pivot_root`
+  and Docker's seccomp profile, #102; `--cpus`/`-m` as `linux.resources`, protocol 1.7, #24; no user namespace) and spawns `/bin/crun --cgroup-manager=cgroupfs run`. crun's `pivot_root`
   fails on an initramfs root, so the agent first moves its root onto a tmpfs (`leave_initramfs`, as switch_root
   does), taking `/bin/crun` and binding `/rootfs`; never use `--no-pivot`. With `-t`, crun sends the pty over
   `--console-socket` (`SCM_RIGHTS`; the one `unsafe` in the agent). The agent checks the command exists inside the
@@ -118,6 +118,11 @@ Everything runs through pixi.
   `exec -u` resolves against the image's `/etc/passwd` and `/etc/group`, which `run` saves in `launch.json`
   (`users::Accounts`). On Windows, `$(oci-hermit run -d …)` hangs: the monitor inherits the shell's stdout pipe,
   and stable Rust cannot stop that without `unsafe` (#105).
+- `run` sizes each sandbox from the container's limits (`main::sizing`, #24): a vCPU per CPU `--cpus` starts (1
+  without it), and `-m` plus `GUEST_OVERHEAD_MIB` (128) plus twice an initramfs image; without `-m`, `memory_for`.
+  The limits themselves go to the agent in `Run` (`hermit_proto::Limits`, 1.7; the host refuses an older agent when
+  there are any) and the container record keeps them with the VM size (`containers::Resources`), which `inspect`
+  shows. `inspect` looks up containers before images, as Docker does; `image inspect` only images.
 - The store has a lock file (`images/lock`, `File::lock`, hence MSRV 1.89). `Store::open` holds it shared for the
   store's lifetime; only `Store::open_exclusive` (rmi, prune) may delete blobs. It waits up to 2 s, then fails with
   `Busy`: on Unix a child process holds an inherited lock between `fork` and `exec`, so a zero wait is flaky. A pull writes blobs before naming them, so garbage collection without the exclusive lock would

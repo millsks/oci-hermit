@@ -59,6 +59,8 @@ pub struct RunSpec {
     pub user: Option<hermit_proto::User>,
     /// The container's hostname; an `Exec` joins the container `Run` named.
     pub hostname: String,
+    /// The container's CPU and memory limits; an `Exec` runs under the container's.
+    pub limits: hermit_proto::Limits,
 }
 
 /// One early mount.
@@ -371,6 +373,15 @@ pub fn default_seccomp(arch: &str, kernel: (u32, u32)) -> serde_json::Value {
     seccomp_config(&profile, arch, &CAPABILITIES, kernel)
 }
 
+/// The scheduler period a CPU limit is a share of: Docker's 100 ms.
+pub const CPU_PERIOD: u64 = 100_000;
+
+/// `--cpus` as crun's `cpu.max`: a quota of [`CPU_PERIOD`], as Docker sets `NanoCpus`.
+fn cpu_limit(nano_cpus: Option<u64>) -> Option<serde_json::Value> {
+    let quota = nano_cpus? * CPU_PERIOD / 1_000_000_000;
+    Some(serde_json::json!({ "quota": quota.max(1000), "period": CPU_PERIOD }))
+}
+
 /// The OCI runtime configuration (`config.json`) for `spec`, as Docker would make it: new PID, mount, IPC, UTS,
 /// network and cgroup namespaces (no user namespace: the VM is the boundary, and its root is the container's),
 /// Docker's default capabilities and `seccomp` profile, masked and read-only kernel paths, and only the usual
@@ -390,7 +401,7 @@ pub fn container_config(spec: &RunSpec, etc: &str, seccomp: serde_json::Value) -
         }
         rule
     };
-    json!({
+    let mut config = json!({
         "ociVersion": "1.0.2",
         "process": process,
         "root": { "path": ROOTFS, "readonly": false },
@@ -444,7 +455,15 @@ pub fn container_config(spec: &RunSpec, etc: &str, seccomp: serde_json::Value) -
             "readonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"],
             "seccomp": seccomp,
         },
-    })
+    });
+    let resources = &mut config["linux"]["resources"];
+    if let Some(cpu) = cpu_limit(spec.limits.nano_cpus) {
+        resources["cpu"] = cpu;
+    }
+    if let Some(limit) = spec.limits.memory {
+        resources["memory"] = json!({ "limit": limit });
+    }
+    config
 }
 
 /// Log one line to the console. A console write error has nowhere else to go, so it is dropped.
@@ -639,6 +658,7 @@ fn answer(
             user,
             layers,
             hostname,
+            limits,
         } => {
             let hostname = hostname.unwrap_or_else(|| DEFAULT_HOSTNAME.to_string());
             if commands.container.is_some() {
@@ -672,6 +692,7 @@ fn answer(
                     size: rows.zip(cols),
                     user,
                     hostname,
+                    limits,
                 };
                 match sys.start(&spec) {
                     Ok(pid) => {
@@ -711,6 +732,7 @@ fn answer(
                     size: rows.zip(cols),
                     user,
                     hostname: hostname.clone(),
+                    limits: hermit_proto::Limits::default(),
                 };
                 match sys.exec(process, &spec) {
                     Ok(pid) => {
@@ -993,7 +1015,7 @@ mod tests {
         );
         assert!(log.contains("moved the root onto a tmpfs"));
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.6)"));
+        assert!(log.contains("ready (control protocol 1.7)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -1094,7 +1116,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.6)"));
+        assert!(log.contains("ready (control protocol 1.7)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -1126,6 +1148,7 @@ mod tests {
             user: None,
             layers: Vec::new(),
             hostname: None,
+            limits: hermit_proto::Limits::default(),
         })
     }
 
@@ -1290,6 +1313,10 @@ mod tests {
                     user: Some(user.clone()),
                     layers: Vec::new(),
                     hostname: Some("4f2a9c1d0b3e".into()),
+                    limits: hermit_proto::Limits {
+                        nano_cpus: Some(500_000_000),
+                        memory: Some(256 << 20),
+                    },
                 }),
                 Ok(Event::Signal(Signal::Child)),
                 line(&HostMessage::Shutdown),
@@ -1301,6 +1328,8 @@ mod tests {
         assert_eq!(sys.started.len(), 1);
         assert_eq!(sys.started[0].user, Some(user));
         assert_eq!(sys.started[0].hostname, "4f2a9c1d0b3e");
+        assert_eq!(sys.started[0].limits.nano_cpus, Some(500_000_000));
+        assert_eq!(sys.started[0].limits.memory, Some(256 << 20));
         assert!(log.contains("as pid 42, uid 1000"), "{log}");
     }
 
@@ -1317,6 +1346,7 @@ mod tests {
                 user: None,
                 layers,
                 hostname: None,
+                limits: hermit_proto::Limits::default(),
             })
         };
         let layers = vec!["layer0".to_string(), "layer1".to_string()];
@@ -1393,6 +1423,7 @@ mod tests {
                 size: Some((40, 120)),
                 user: None,
                 hostname: DEFAULT_HOSTNAME.into(),
+                limits: hermit_proto::Limits::default(),
             }]
         );
         assert_eq!(
@@ -1500,6 +1531,7 @@ mod tests {
                 user: None,
                 layers: Vec::new(),
                 hostname: Some(bad.to_string()),
+                limits: hermit_proto::Limits::default(),
             })]);
             run_fake(&mut sys);
             assert!(sys.started.is_empty(), "{bad:?}");
@@ -1519,6 +1551,7 @@ mod tests {
             size: Some((24, 80)),
             user,
             hostname: "4f2a9c1d0b3e".into(),
+            limits: hermit_proto::Limits::default(),
         }
     }
 
@@ -1632,6 +1665,37 @@ mod tests {
         assert_eq!(kernel_version("6.18.63-oci-hermit-2\n"), Some((6, 18)));
         assert_eq!(kernel_version("4.8"), Some((4, 8)));
         assert_eq!(kernel_version("six"), None);
+    }
+
+    #[test]
+    fn limits_become_the_containers_cgroup_settings_as_docker_sets_them() {
+        let unlimited = container_config(&spec(false, None), "/run/oci-hermit", serde_json::Value::Null);
+        let resources = &unlimited["linux"]["resources"];
+        assert!(
+            resources.get("cpu").is_none() && resources.get("memory").is_none(),
+            "{resources}"
+        );
+        let mut limited = spec(false, None);
+        limited.limits = hermit_proto::Limits {
+            nano_cpus: Some(1_500_000_000),
+            memory: Some(512 << 20),
+        };
+        let config = container_config(&limited, "/run/oci-hermit", serde_json::Value::Null);
+        let resources = &config["linux"]["resources"];
+        assert_eq!(
+            resources["cpu"],
+            serde_json::json!({ "quota": 150_000, "period": 100_000 })
+        );
+        assert_eq!(resources["memory"], serde_json::json!({ "limit": 512u64 << 20 }));
+        assert!(resources["devices"].is_array(), "the device rules stay");
+        // Docker's smallest --cpus is 0.01, a 1 ms quota; the kernel takes no less.
+        limited.limits = hermit_proto::Limits {
+            nano_cpus: Some(1),
+            memory: None,
+        };
+        let config = container_config(&limited, "/run/oci-hermit", serde_json::Value::Null);
+        assert_eq!(config["linux"]["resources"]["cpu"]["quota"], 1000);
+        assert!(config["linux"]["resources"].get("memory").is_none());
     }
 
     #[test]

@@ -29,6 +29,7 @@ Each `oci-hermit run` is one small virtual machine, started for that command and
    so nothing the command writes reaches the disks. It writes an OCI runtime bundle for the command (its user,
    environment, working directory and terminal) and starts it in a container with crun: its own PID, mount, IPC,
    UTS, network and cgroup namespaces, Docker's default capabilities, a read-only `/sys` and only the usual devices.
+   `--cpus` and `-m` become its cgroup's `cpu.max` and `memory.max` (protocol 1.7); the VM was sized to fit them.
    The agent relays the container's input, output and exit code.
 6. When the command exits, oci-hermit asks the agent to power off, and exits with the command's exit code.
 

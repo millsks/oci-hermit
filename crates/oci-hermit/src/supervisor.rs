@@ -196,6 +196,9 @@ pub struct Command {
     pub layers: Vec<String>,
     /// The container's hostname; the agent picks one when `None`.
     pub hostname: Option<String>,
+    /// The container's CPU and memory limits (protocol 1.7); none by default.
+    #[serde(default, skip_serializing_if = "hermit_proto::Limits::is_none")]
+    pub limits: hermit_proto::Limits,
 }
 
 /// What [`Sandbox::relay`] takes while the container runs: bytes for a command's stdin, the end of that, another
@@ -406,6 +409,16 @@ impl Sandbox {
 
     /// Start one command in the guest, waiting up to `start_timeout` for the agent to say it started.
     pub fn start(&mut self, command: &Command, start_timeout: Duration) -> Result<(), SupervisorError> {
+        // An older agent would ignore the limits and run the container without them.
+        if !command.limits.is_none() && self.version < (1, 7) {
+            return Err(SupervisorError::Refused {
+                message: format!(
+                    "this guest agent cannot limit a container's CPUs or memory (it speaks control protocol {}.{}, \
+                     and that needs 1.7); run without --cpus and --memory, or update oci-hermit's guest files",
+                    self.version.0, self.version.1
+                ),
+            });
+        }
         self.send(&HostMessage::Run {
             argv: command.argv.clone(),
             env: command.env.clone(),
@@ -416,6 +429,7 @@ impl Sandbox {
             user: command.user.clone(),
             layers: command.layers.clone(),
             hostname: command.hostname.clone(),
+            limits: command.limits,
         })?;
         let deadline = Instant::now() + start_timeout;
         match self.receive(deadline, start_timeout)? {
