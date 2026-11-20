@@ -1133,6 +1133,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#container-prune" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        container prune
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#machine-info" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1940,6 +1951,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#container-prune" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        container prune
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#machine-info" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2125,7 +2147,11 @@ the <code>qemu/</code> and <code>guest/</code> folders beside the real file.</p>
 </tr>
 <tr>
 <td><a href="#system-df"><code>system df</code></a></td>
-<td>Show how much space images use</td>
+<td>Show how much space images and containers use</td>
+</tr>
+<tr>
+<td><a href="#container-prune"><code>container prune</code></a></td>
+<td>Remove every stopped container</td>
 </tr>
 <tr>
 <td><a href="#machine-info"><code>machine info</code>, <code>info</code></a></td>
@@ -2860,16 +2886,49 @@ while another oci-hermit is using the store.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a>oci-hermit image exists &lt;IMAGE&gt;
 </code></pre></div>
 <h2 id="system-df">system df<a class="headerlink" href="#system-df" title="Permanent link">&para;</a></h2>
-<p>Show how much space the store uses. There are no containers yet, so every image counts as reclaimable.</p>
+<p>Show how much space the image store and the containers use, as <code>docker system df</code> does.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>system<span class="w"> </span>df
 <a id="__codelineno-43-2" name="__codelineno-43-2" href="#__codelineno-43-2"></a><span class="go">TYPE         TOTAL   ACTIVE   SIZE      RECLAIMABLE</span>
-<a id="__codelineno-43-3" name="__codelineno-43-3" href="#__codelineno-43-3"></a><span class="go">Images       3       0        35.9 MB   35.9 MB (100%)</span>
-<a id="__codelineno-43-4" name="__codelineno-43-4" href="#__codelineno-43-4"></a><span class="go">Containers   0       0        0 B       0 B</span>
+<a id="__codelineno-43-3" name="__codelineno-43-3" href="#__codelineno-43-3"></a><span class="go">Images       3       1        35.9 MB   7.4 MB (20%)</span>
+<a id="__codelineno-43-4" name="__codelineno-43-4" href="#__codelineno-43-4"></a><span class="go">Containers   4       1        52.1 kB   48.6 kB (93%)</span>
+</code></pre></div>
+<p>An image is active when a container (running or not) was made from it; what only the other images need is
+reclaimable, so a layer an active image shares is not. A container is active while it runs; the stopped ones'
+records and logs are reclaimable, which <a href="#container-prune"><code>container prune</code></a> frees. A container's writable layer
+lives in the sandbox's memory, so it takes no disk space once the container stops.</p>
+<h2 id="container-prune">container prune<a class="headerlink" href="#container-prune" title="Permanent link">&para;</a></h2>
+<p>Remove every container that is not running, with its record and logs, as <code>docker container prune</code> does. Running
+containers are never touched; one that starts while <code>prune</code> runs is left alone.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a>oci-hermit container prune [-f]
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-f</code>, <code>--force</code></td>
+<td>Do not ask for confirmation.</td>
+</tr>
+</tbody>
+</table>
+<p>Without <code>-f</code>, it asks <code>Are you sure you want to continue? [y/N]</code> and goes ahead only on <code>y</code> or <code>yes</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-45-1" name="__codelineno-45-1" href="#__codelineno-45-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>container<span class="w"> </span>prune
+<a id="__codelineno-45-2" name="__codelineno-45-2" href="#__codelineno-45-2"></a><span class="go">WARNING! This will remove all stopped containers.</span>
+<a id="__codelineno-45-3" name="__codelineno-45-3" href="#__codelineno-45-3"></a><span class="go">Are you sure you want to continue? [y/N] y</span>
+<a id="__codelineno-45-4" name="__codelineno-45-4" href="#__codelineno-45-4"></a><span class="go">Deleted Containers:</span>
+<a id="__codelineno-45-5" name="__codelineno-45-5" href="#__codelineno-45-5"></a><span class="go">4f2a9c1d0b3e5a7c9e1f3b5d7a9c1e3f5b7d9a1c3e5f7b9d1a3c5e7f9b1d3a5c</span>
+<a id="__codelineno-45-6" name="__codelineno-45-6" href="#__codelineno-45-6"></a><span class="go">1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d</span>
+<a id="__codelineno-45-7" name="__codelineno-45-7" href="#__codelineno-45-7"></a>
+<a id="__codelineno-45-8" name="__codelineno-45-8" href="#__codelineno-45-8"></a><span class="go">Total reclaimed space: 48.6 kB</span>
 </code></pre></div>
 <h2 id="machine-info">machine info<a class="headerlink" href="#machine-info" title="Permanent link">&para;</a></h2>
 <p>Show the emulators, the guests, the defaults <code>run</code> uses, the image store and the registry auth files, and where each
 came from. <code>oci-hermit info</code> is the same command.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a>oci-hermit machine info
+<div class="highlight"><pre><span></span><code><a id="__codelineno-46-1" name="__codelineno-46-1" href="#__codelineno-46-1"></a>oci-hermit machine info
 </code></pre></div>
 <p>A full example is in <a href="../getting-started/#2-check-it">Getting started</a>, and every line is explained in
 <a href="../configuration/#what-machine-info-shows">Configuration</a>. Exits 1 when the QEMU bundle is missing or is not the one
@@ -2877,7 +2936,7 @@ oci-hermit was built for, because nothing can run then; a missing guest is shown
 <h2 id="machine-boot">machine boot<a class="headerlink" href="#machine-boot" title="Permanent link">&para;</a></h2>
 <p>Boot a sandbox until its agent is ready, then stop it: a self-check of QEMU, the kernel and the agent. It needs no
 image.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-45-1" name="__codelineno-45-1" href="#__codelineno-45-1"></a>oci-hermit machine boot [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-47-1" name="__codelineno-47-1" href="#__codelineno-47-1"></a>oci-hermit machine boot [OPTIONS]
 </code></pre></div>
 <table>
 <thead>
@@ -2905,16 +2964,16 @@ image.</p>
 </tr>
 </tbody>
 </table>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-46-1" name="__codelineno-46-1" href="#__codelineno-46-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>boot<span class="w"> </span>--arch<span class="w"> </span>x86_64
-<a id="__codelineno-46-2" name="__codelineno-46-2" href="#__codelineno-46-2"></a><span class="go">booting an x86_64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12666-1794883275416245000/console.log</span>
-<a id="__codelineno-46-3" name="__codelineno-46-3" href="#__codelineno-46-3"></a><span class="go">agent ready after 0.6s (control protocol 1.4)</span>
-<a id="__codelineno-46-4" name="__codelineno-46-4" href="#__codelineno-46-4"></a><span class="go">guest powered off; sandbox stopped</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-48-1" name="__codelineno-48-1" href="#__codelineno-48-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>boot<span class="w"> </span>--arch<span class="w"> </span>x86_64
+<a id="__codelineno-48-2" name="__codelineno-48-2" href="#__codelineno-48-2"></a><span class="go">booting an x86_64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12666-1794883275416245000/console.log</span>
+<a id="__codelineno-48-3" name="__codelineno-48-3" href="#__codelineno-48-3"></a><span class="go">agent ready after 0.6s (control protocol 1.4)</span>
+<a id="__codelineno-48-4" name="__codelineno-48-4" href="#__codelineno-48-4"></a><span class="go">guest powered off; sandbox stopped</span>
 </code></pre></div>
 <p>Exits 0 when the guest booted and powered off, 1 otherwise; the error names the console and QEMU logs.</p>
 <h2 id="version">version<a class="headerlink" href="#version" title="Permanent link">&para;</a></h2>
 <p>Print the version and the control protocol version the host speaks.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-47-1" name="__codelineno-47-1" href="#__codelineno-47-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>version
-<a id="__codelineno-47-2" name="__codelineno-47-2" href="#__codelineno-47-2"></a><span class="go">oci-hermit 0.2.0 (control protocol 1.4)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-49-1" name="__codelineno-49-1" href="#__codelineno-49-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>version
+<a id="__codelineno-49-2" name="__codelineno-49-2" href="#__codelineno-49-2"></a><span class="go">oci-hermit 0.2.0 (control protocol 1.4)</span>
 </code></pre></div>
 <h2 id="exit-codes">Exit codes<a class="headerlink" href="#exit-codes" title="Permanent link">&para;</a></h2>
 <table>
@@ -2950,8 +3009,8 @@ image.</p>
 <h2 id="planned-commands">Planned commands<a class="headerlink" href="#planned-commands" title="Permanent link">&para;</a></h2>
 <p>These are part of the command line already, so <code>--help</code> lists them, but they do nothing yet. Each prints
 <code>oci-hermit:</code><command><code>is not implemented yet; see …/ROADMAP.md</code> and exits 2:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-48-1" name="__codelineno-48-1" href="#__codelineno-48-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>cp<span class="w"> </span>web:/etc/hostname<span class="w"> </span>.
-<a id="__codelineno-48-2" name="__codelineno-48-2" href="#__codelineno-48-2"></a><span class="go">oci-hermit: `cp` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-50-1" name="__codelineno-50-1" href="#__codelineno-50-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>cp<span class="w"> </span>web:/etc/hostname<span class="w"> </span>.
+<a id="__codelineno-50-2" name="__codelineno-50-2" href="#__codelineno-50-2"></a><span class="go">oci-hermit: `cp` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md</span>
 </code></pre></div>
 <table>
 <thead>
@@ -3000,10 +3059,6 @@ image.</p>
 <tr>
 <td><code>diff</code>, <code>export</code></td>
 <td><a href="https://github.com/millsks/oci-hermit/issues/81">#81</a></td>
-</tr>
-<tr>
-<td><code>container prune</code></td>
-<td><a href="https://github.com/millsks/oci-hermit/issues/82">#82</a></td>
 </tr>
 <tr>
 <td><code>healthcheck run</code></td>

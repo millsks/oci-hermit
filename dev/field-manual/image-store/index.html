@@ -1660,13 +1660,14 @@ do; <code>-f</code> removes them all:</p>
 </code></pre></div>
 <p>A name that matches nothing prints <code>oci-hermit: no such image: …</code>, and <code>rmi</code> exits 1.</p>
 <h2 id="free-space">Free space<a class="headerlink" href="#free-space" title="Permanent link">&para;</a></h2>
-<p><code>system df</code> shows how much the store holds:</p>
+<p><code>system df</code> shows how much the store and the containers hold:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>system<span class="w"> </span>df
 <a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="go">TYPE         TOTAL   ACTIVE   SIZE      RECLAIMABLE</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="go">Images       3       0        35.9 MB   35.9 MB (100%)</span>
-<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="go">Containers   0       0        0 B       0 B</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="go">Images       3       1        35.9 MB   7.4 MB (20%)</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="go">Containers   4       1        52.1 kB   48.6 kB (93%)</span>
 </code></pre></div>
-<p>There are no containers yet, so every image counts as reclaimable.</p>
+<p>An image a container was made from is active, and what only the other images need is reclaimable. Stopped
+containers are reclaimable too: <code>container prune</code> removes them.</p>
 <p><code>image prune</code> removes images loaded without a name, and any blob nothing uses (for example the layers of an image
 that was loaded again from a different archive). It asks first; <code>-f</code> skips the question, and <code>-a</code> removes every
 image, named or not:</p>
