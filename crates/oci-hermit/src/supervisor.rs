@@ -212,8 +212,24 @@ pub enum Input {
     Exec(Process, Command),
     /// Send a signal to a command (protocol 1.6); an older agent cannot take one, and it is dropped.
     Signal(Process, i32),
+    /// Copy what this path names out of the container (protocol 1.8), as [`Relayed::Entry`]s.
+    CopyOut(Process, String),
+    /// Copy into the container (protocol 1.8); the entries follow as `Put`, `PutData` and `PutDone`.
+    CopyIn(Process, CopyInto),
+    Put(Process, hermit_proto::Entry),
+    PutData(Process, Vec<u8>),
+    PutDone(Process),
     /// Stop waiting for the command: [`Sandbox::relay`] returns `None` and the caller stops the sandbox.
     Stop,
+}
+
+/// Where a copy into the container goes: see [`HostMessage::CopyIn`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CopyInto {
+    pub path: String,
+    pub name: String,
+    pub dir: bool,
+    pub contents: bool,
 }
 
 /// What [`Sandbox::relay`] reports while the container runs.
@@ -225,11 +241,28 @@ pub enum Relayed<'a> {
         bytes: &'a [u8],
     },
     /// A command from [`Input::Exec`] started.
-    Started { process: Process },
+    Started {
+        process: Process,
+    },
     /// A command from [`Input::Exec`] ended; the container's own command ends the relay instead.
-    Exited { process: Process, code: i32 },
-    /// A command from [`Input::Exec`] could not be started.
-    Failed { process: Process, message: String },
+    Exited {
+        process: Process,
+        code: i32,
+    },
+    /// A command from [`Input::Exec`] could not be started, or a copy failed.
+    Failed {
+        process: Process,
+        message: String,
+    },
+    /// One entry of a copy out of the container, and a file's bytes after it.
+    Entry {
+        process: Process,
+        entry: hermit_proto::Entry,
+    },
+    EntryData {
+        process: Process,
+        bytes: &'a [u8],
+    },
 }
 
 /// What the control reader thread hands over: a frame from the agent, or `None` once QEMU's stdout closed.
@@ -490,6 +523,34 @@ impl Sandbox {
                             self.version.0, self.version.1
                         ),
                     })?,
+                    Input::CopyOut(process, _) | Input::CopyIn(process, _) if self.version < (1, 8) => {
+                        on(Relayed::Failed {
+                            process,
+                            message: format!(
+                                "the guest agent speaks control protocol {}.{}, which has no cp; it needs 1.8 or later \
+                                 (use the guest that came with this oci-hermit)",
+                                self.version.0, self.version.1
+                            ),
+                        })?;
+                    }
+                    Input::CopyOut(process, path) => self.send(&HostMessage::CopyOut { process, path })?,
+                    Input::CopyIn(process, into) => self.send(&HostMessage::CopyIn {
+                        process,
+                        path: into.path,
+                        name: into.name,
+                        dir: into.dir,
+                        contents: into.contents,
+                    })?,
+                    Input::Put(process, entry) => self.send(&HostMessage::Put { process, entry })?,
+                    Input::PutData(process, bytes) => {
+                        for piece in bytes.chunks(hermit_proto::CHUNK) {
+                            self.send(&HostMessage::PutData {
+                                process,
+                                data: hermit_proto::b64::encode(piece),
+                            })?;
+                        }
+                    }
+                    Input::PutDone(process) => self.send(&HostMessage::PutDone { process })?,
                     Input::Exec(process, command) => {
                         self.send(&HostMessage::Exec {
                             process,
@@ -547,6 +608,12 @@ impl Sandbox {
                     on(Relayed::Exited { process, code })?;
                 }
                 GuestMessage::Started { process, .. } if process != MAIN => on(Relayed::Started { process })?,
+                GuestMessage::Entry { process, entry } => on(Relayed::Entry { process, entry })?,
+                GuestMessage::EntryData { process, data } => {
+                    let bytes = hermit_proto::b64::decode(&data)
+                        .ok_or_else(|| SupervisorError::Protocol("copied data that is not base64".into()))?;
+                    on(Relayed::EntryData { process, bytes: &bytes })?;
+                }
                 GuestMessage::Error { process: MAIN, message } => return Err(SupervisorError::Refused { message }),
                 GuestMessage::Error { process, message } => {
                     stdin_open.remove(&process);

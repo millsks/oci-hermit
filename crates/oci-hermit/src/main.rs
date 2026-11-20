@@ -6,6 +6,7 @@
 mod certs;
 mod cli;
 mod containers;
+mod cp;
 mod erofs;
 mod guest;
 mod image;
@@ -60,6 +61,8 @@ struct Env {
     confirm: fn() -> bool,
     /// Asks the user for something `login` needs.
     ask: fn(Ask) -> std::io::Result<String>,
+    /// The home folder, which `cp` never copies to or from (nor its credentials folders).
+    home: Option<PathBuf>,
     /// Starts a container's monitor: this executable, the data folder, the container's ID, its log.
     start_monitor: fn(&std::path::Path, &std::path::Path, &str, &std::path::Path) -> std::io::Result<monitor::Process>,
 }
@@ -205,6 +208,10 @@ fn main() -> ExitCode {
         registry: registry::Settings::from_env(|name| std::env::var_os(name)),
         confirm: confirm_on_stdin,
         ask: ask_on_terminal,
+        home: std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from),
         start_monitor: monitor::spawn,
     };
     ExitCode::from(run(&cli.command, &env, &mut std::io::stdout(), &mut std::io::stderr()))
@@ -335,6 +342,16 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 }
             }
         }
+        cli::Command::Cp { source, destination } => match open_containers(env).and_then(|c| {
+            let data_dir = env.data_dir.as_deref().expect("the container store opened");
+            cp::cp(&c, data_dir, source, destination, env.home.as_deref(), err)
+        }) {
+            Ok(()) => 0,
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         cli::Command::Wait { containers: wanted } => match open_containers(env) {
             Ok(c) => {
                 let data_dir = env.data_dir.as_deref().expect("the container store opened");
@@ -1717,7 +1734,11 @@ fn exec_in(
             }
             monitor::Notice::Failed { message } => failure = Some(message),
             monitor::Notice::Done => return false,
-            monitor::Notice::Booted | monitor::Notice::Stopping | monitor::Notice::Signalled => {}
+            monitor::Notice::Booted
+            | monitor::Notice::Stopping
+            | monitor::Notice::Signalled
+            | monitor::Notice::Entry { .. }
+            | monitor::Notice::EntryData { .. } => {}
         }
         true
     });
@@ -1789,7 +1810,10 @@ fn attach(
                 timings.mark("command");
             }
             monitor::Notice::Failed { message } => failure = Some(message),
-            monitor::Notice::Stopping | monitor::Notice::Signalled => {}
+            monitor::Notice::Stopping
+            | monitor::Notice::Signalled
+            | monitor::Notice::Entry { .. }
+            | monitor::Notice::EntryData { .. } => {}
             monitor::Notice::Done => break,
         }
     }
@@ -1836,6 +1860,7 @@ mod tests {
             registry: registry::Settings::default(),
             confirm: || false,
             ask: |_| Err(std::io::Error::other("no terminal in tests")),
+            home: Some(dir.join("home")),
             start_monitor: monitor::testing::in_thread,
         }
     }
@@ -1854,6 +1879,7 @@ mod tests {
             registry: registry::Settings::default(),
             confirm: || false,
             ask: |_| Err(std::io::Error::other("no terminal in tests")),
+            home: Some(bundle.join("home")),
             start_monitor: monitor::testing::in_thread,
         }
     }
@@ -1892,16 +1918,16 @@ mod tests {
         let (code, out, err) = run_with(&no_qemu("main-none-1"), &["version"]);
         assert_eq!(code, 0);
         assert!(out.starts_with(concat!("oci-hermit ", env!("CARGO_PKG_VERSION"))));
-        assert!(out.contains("control protocol 1.7"));
+        assert!(out.contains("control protocol 1.8"));
         assert!(err.is_empty());
     }
 
     #[test]
     fn stub_commands_exit_not_implemented() {
-        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["cp", "web:/a", "b"]);
+        let (code, out, err) = run_with(&no_qemu("main-none-2"), &["pod", "ps"]);
         assert_eq!(code, NOT_IMPLEMENTED);
         assert!(out.is_empty());
-        assert!(err.contains("`cp` is not implemented yet"));
+        assert!(err.contains("`pod` is not implemented yet"), "{err}");
         assert!(err.contains(ROADMAP));
     }
 
@@ -2384,8 +2410,8 @@ mod tests {
             assert!(out.contains(&format!("booting an {arch} sandbox")));
             assert!(out.contains("agent ready after"));
             assert!(
-                out.contains("(control protocol 1.7)"),
-                "the fake agent speaks 1.7: {out}"
+                out.contains("(control protocol 1.8)"),
+                "the fake agent speaks 1.8: {out}"
             );
             assert!(out.contains("guest powered off; sandbox stopped"));
         }
@@ -2758,6 +2784,61 @@ mod tests {
         assert_eq!((code, out.as_str()), (1, "143\n"));
         assert!(err.contains("no such container: ghost"), "{err}");
         assert_eq!(run_with(&env, &["rm", "patient"]).0, 0);
+
+        // cp copies out of and into a running container, through its monitor; the fake agent sends `hi`.
+        assert_eq!(detached("box").0, 0);
+        let here = bundle.join("here");
+        std::fs::create_dir_all(&here).unwrap();
+        let (code, _, err) = run_with(&env, &["cp", "box:/etc/motd", here.to_str().unwrap()]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(std::fs::read(here.join("motd")).unwrap(), b"hi\n");
+        assert!(
+            err.contains(&format!("Successfully copied 3 B to {}", here.display())),
+            "{err}"
+        );
+        std::fs::write(here.join("note.txt"), b"for the box").unwrap();
+        let note = here.join("note.txt");
+        let (code, _, err) = run_with(&env, &["cp", note.to_str().unwrap(), "box:/tmp/"]);
+        assert_eq!(code, 0, "{err}");
+        let seen = std::fs::read_to_string(bundle.join("copy.seen")).unwrap();
+        let seen: Vec<hermit_proto::HostMessage> = seen.lines().map(|l| hermit_proto::decode(l).unwrap()).collect();
+        assert!(
+            matches!(&seen[0], hermit_proto::HostMessage::CopyIn { path, name, dir: false, contents: false, .. }
+                if path == "/tmp/" && name == "note.txt"),
+            "{seen:?}"
+        );
+        assert!(matches!(&seen[1], hermit_proto::HostMessage::Put { entry, .. } if entry.path.is_empty()));
+        assert!(matches!(&seen[2], hermit_proto::HostMessage::PutData { data, .. }
+            if hermit_proto::b64::decode(data).unwrap() == b"for the box"));
+        assert!(matches!(seen[3], hermit_proto::HostMessage::PutDone { .. }));
+        // What it refuses: the home folder (and its credentials), two containers or none, a relative path.
+        let home = bundle.join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        for (args, says) in [
+            (vec!["cp", "box:/etc", home.to_str().unwrap()], "holds the home folder"),
+            (vec!["cp", "box:/etc", home.join(".ssh/x").to_str().unwrap()], ".ssh"),
+            (
+                vec!["cp", "box:/a", "box:/b"],
+                "copying between containers is not supported",
+            ),
+            (
+                vec!["cp", note.to_str().unwrap(), "copy.txt"],
+                "one side must be a container",
+            ),
+            (vec!["cp", "box:etc", "x"], "must be absolute"),
+            (vec!["cp", "box:/etc", "-"], "tar stream"),
+            (vec!["cp", "nobody:/etc", "x"], "no such container: nobody"),
+        ] {
+            let (code, _, err) = run_with(&env, &args);
+            assert_eq!(code, 1, "{args:?}");
+            assert!(err.contains(says), "{args:?}: {err}");
+        }
+        assert_eq!(run_with(&env, &["kill", "-s", "TERM", "box"]).0, 0);
+        assert_eq!(run_with(&env, &["wait", "box"]).1, "143\n");
+        let (code, _, err) = run_with(&env, &["cp", "box:/etc", here.to_str().unwrap()]);
+        assert_eq!(code, 1);
+        assert!(err.contains("container box is not running"), "{err}");
+        assert_eq!(run_with(&env, &["rm", "box"]).0, 0);
 
         // attach stays until the container ends and exits with its code; a stopped one is refused, as by Docker.
         assert_eq!(detached("glued").0, 0);

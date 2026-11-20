@@ -21,6 +21,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | [`kill`](#kill) | Send a signal to running containers |
 | [`wait`](#wait) | Wait for containers to stop and print their exit codes |
 | [`attach`](#attach) | Connect this terminal to a running container |
+| [`cp`](#cp) | Copy files between a running container and this machine |
 | [`rm`](#rm) | Remove containers |
 | [`pull`](#pull) | Pull an image from a registry |
 | [`manifest inspect`](#manifest-inspect) | Show an image's platforms and digests in a registry, without pulling |
@@ -289,6 +290,47 @@ CONTAINER ID   IMAGE                  COMMAND   CREATED          STATUS         
 ```
 
 A stopped container is refused: `you cannot attach to a stopped container, start it first`.
+
+## cp
+
+Copy files and folders between a running container and this machine, as `docker cp` does. One side is
+`CONTAINER:PATH` (a name or ID, and an absolute path in the container); the other is a path here. Prints
+`Successfully copied <size> to <destination>` on stderr; exits 1 if the copy could not be made.
+
+```
+oci-hermit cp CONTAINER:PATH HOSTPATH
+oci-hermit cp HOSTPATH CONTAINER:PATH
+```
+
+Where it lands follows Docker: a file copied onto a folder goes inside it under its own name, and onto anything
+else becomes that path (its folder must exist); a folder copied onto a folder goes inside it, and onto a missing
+path becomes it; `SRC/.` copies only what the folder holds. A path here is read as `CONTAINER:PATH` only if it is
+not absolute and does not start with `.`, so `./a:b` is a file here.
+
+The rules are those for bind mounts:
+
+- This machine's drive roots, the home folder (and any folder holding it), and credentials folders (`~/.ssh`,
+  `~/.aws`, `~/.kube`, `~/.docker`, `~/.gnupg`, the keychains and Windows' credential stores) are refused, as source
+  or destination, links followed.
+- Nothing leaves the copy: paths in the container resolve inside it (its absolute links point into the container,
+  never out), the container cannot name a file outside the destination, and what is there is never written
+  through a link (a link in the way is replaced, as Docker overwrites). A link inside what is copied is copied as a
+  link (not followed, as `docker cp` without `-L`) only if it points inside the copy; one that points outside is
+  left out, with a warning. On Windows links are left out.
+- Devices, FIFOs and sockets are left out, with a warning. Setuid, setgid and sticky bits are dropped. Files copied
+  into the container belong to root, as with Docker; copied out, they belong to you.
+
+Only a running container can be copied to or from: its files live in its sandbox, so they are gone once it stops
+(Docker keeps a stopped container's files; oci-hermit does not). The container's own mounts (`/proc`, `/sys`,
+`/dev`, `/etc/hosts`) are not part of what is copied. `-` (a tar stream on stdin or stdout) is not supported yet.
+A large copy out holds up the container's output until it is done.
+
+```console
+$ oci-hermit cp ./site web:/srv
+Successfully copied 1.2 MB to web:/srv
+$ oci-hermit cp web:/var/log/nginx/access.log .
+Successfully copied 4.1 kB to .
+```
 
 ## wait
 
@@ -732,13 +774,12 @@ These are part of the command line already, so `--help` lists them, but they do 
 `oci-hermit: `<command>` is not implemented yet; see …/ROADMAP.md` and exits 2:
 
 ```console
-$ oci-hermit cp web:/etc/hostname .
-oci-hermit: `cp` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
+$ oci-hermit pod ps
+oci-hermit: `pod` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md
 ```
 
 | Command | Will | Issue |
 | --- | --- | --- |
-| `cp <SOURCE> <DESTINATION>` | copy files between a container and the host | #23 |
 | `pod create --name <NAME> [-p <PUBLISH>]`, `pod rm <POD>`, `pod ps` | pods: containers that share localhost | #35 |
 | `compose up [-d] [-f <FILE>]`, `compose down [-f <FILE>]` | a Compose subset | #36, #37 |
 

@@ -129,6 +129,24 @@ pub enum Request {
     },
     /// `wait`: answered with [`Notice::Exited`] once the container has ended and its exit code is recorded.
     Wait,
+    /// `cp` out of the container: answered with [`Notice::Entry`]s and their [`Notice::EntryData`], then
+    /// `Exited` (0) and `Done`, or `Failed` and `Done`.
+    CopyOut {
+        path: String,
+    },
+    /// `cp` into the container: the connection then carries `Put`, `PutData` and `PutDone`, and is answered as
+    /// `CopyOut` is, without entries.
+    CopyIn {
+        #[serde(flatten)]
+        into: supervisor::CopyInto,
+    },
+    Put {
+        entry: hermit_proto::Entry,
+    },
+    PutData {
+        data: String,
+    },
+    PutDone,
     /// `attach`: answered with [`Notice::Started`], then the container's output from now on, and
     /// [`Notice::Exited`] and [`Notice::Done`] when it ends. The connection may carry stdin (taken when the container
     /// was started with `-i`) and signals; hanging up detaches.
@@ -144,15 +162,29 @@ pub enum Notice {
     /// The command started.
     Started,
     /// Output, base64-encoded; only a foreground `run` gets it.
-    Output { stream: Stream, data: String },
+    Output {
+        stream: Stream,
+        data: String,
+    },
     /// The command ended with this code, or [`STOPPED`] when it was stopped.
-    Exited { code: i32 },
+    Exited {
+        code: i32,
+    },
     /// The container could not be run.
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
     /// The answer to [`Request::Stop`].
     Stopping,
     /// The answer to [`Request::Signal`] on a connection of its own: the signal was passed on.
     Signalled,
+    /// One entry of a copy out of the container, and a file's bytes after it, base64-encoded.
+    Entry {
+        entry: hermit_proto::Entry,
+    },
+    EntryData {
+        data: String,
+    },
     /// Everything is recorded (and with `--rm` removed); the monitor exits.
     Done,
 }
@@ -406,6 +438,51 @@ fn serve_exec(request: &Request, conn: ipc::Conn, launch: &Launch, execs: &Share
     let _ = to_run.send(Input::Eof(process));
 }
 
+/// Serves one `cp` connection: gives it a process number, as an `exec` has, and passes its entries on.
+fn serve_copy(request: Request, conn: ipc::Conn, execs: &SharedExecs, to_run: &mpsc::Sender<Input>) {
+    let ipc::Conn { reader, mut writer } = conn;
+    let process = {
+        let mut execs = lock(execs);
+        if !execs.open {
+            drop(execs);
+            let message = "the container is not running".to_string();
+            let _ = send(writer.as_mut(), &Notice::Failed { message });
+            let _ = send(writer.as_mut(), &Notice::Done);
+            return;
+        }
+        execs.last += 1;
+        let process = execs.last;
+        execs.clients.insert(
+            process,
+            ExecClient {
+                to: writer,
+                started: false,
+            },
+        );
+        process
+    };
+    let input = match request {
+        Request::CopyOut { path } => Input::CopyOut(process, path),
+        Request::CopyIn { into } => Input::CopyIn(process, into),
+        _ => return,
+    };
+    let receiving = matches!(input, Input::CopyIn(..));
+    if to_run.send(input).is_err() || !receiving {
+        return;
+    }
+    read_messages(reader, |request: Request| match request {
+        Request::Put { entry } => to_run.send(Input::Put(process, entry)).is_ok(),
+        Request::PutData { data } => {
+            b64::decode(&data).is_some_and(|bytes| to_run.send(Input::PutData(process, bytes)).is_ok())
+        }
+        Request::PutDone => {
+            let _ = to_run.send(Input::PutDone(process));
+            false
+        }
+        _ => true,
+    });
+}
+
 /// Run as the monitor of container `id`, writing what goes wrong to `log`; the process's exit code.
 pub fn serve(data_dir: &Path, id: &str, log: &mut dyn Write) -> u8 {
     match monitor(data_dir, id, log) {
@@ -567,6 +644,9 @@ fn accept(
         std::thread::spawn(move || {
             let ipc::Conn { mut reader, mut writer } = conn;
             match read_one(&mut reader) {
+                Some(request @ (Request::CopyOut { .. } | Request::CopyIn { .. })) => {
+                    serve_copy(request, ipc::Conn { reader, writer }, &shared.execs, &to_run);
+                }
                 Some(request @ Request::Exec { .. }) => {
                     serve_exec(
                         &request,
@@ -665,7 +745,7 @@ fn run(
                 }
                 true
             }
-            Request::Attach | Request::Exec { .. } | Request::Wait | Request::Join => true,
+            _ => true,
         });
         // A foreground run whose oci-hermit went away stops with it.
         if !detach {
@@ -743,6 +823,13 @@ fn run(
                 execs.tell(process, &Notice::Started);
             }
             Relayed::Exited { process, code } => lock(execs).finish(process, &Notice::Exited { code }),
+            Relayed::Entry { process, entry } => lock(execs).tell(process, &Notice::Entry { entry }),
+            Relayed::EntryData { process, bytes } => lock(execs).tell(
+                process,
+                &Notice::EntryData {
+                    data: b64::encode(bytes),
+                },
+            ),
             Relayed::Failed { process, message } => lock(execs).finish(process, &Notice::Failed { message }),
         }
         Ok(())

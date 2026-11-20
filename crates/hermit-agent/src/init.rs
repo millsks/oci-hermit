@@ -13,7 +13,9 @@
 //! known by the process number the host gave it, and the first command is process 0. The host can signal the
 //! container's command (1.6), which crun passes on (`crun kill`).
 
-use hermit_proto::{CONTROL_PORT, Frame, GuestMessage, HostMessage, MAIN, PROTOCOL_VERSION, Process, Stream, b64};
+use hermit_proto::{
+    CONTROL_PORT, Entry, Frame, GuestMessage, HostMessage, MAIN, PROTOCOL_VERSION, Process, Stream, b64,
+};
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Write};
 
@@ -157,6 +159,16 @@ pub enum Event {
 }
 
 /// The system calls PID 1 needs.
+/// One item of a copy out of the container: an entry, or bytes of the file the last entry named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Copied {
+    Entry(Entry),
+    Data(Vec<u8>),
+}
+
+/// A copy out of the container, read as it is sent.
+pub type CopyOut = Box<dyn Iterator<Item = io::Result<Copied>>>;
+
 pub trait System {
     /// Create a directory and its parents.
     fn mkdir_all(&mut self, path: &str) -> io::Result<()>;
@@ -187,6 +199,15 @@ pub trait System {
     fn close_stdin(&mut self, process: Process);
     /// Whatever output a command left unread, once it has exited; it is forgotten after that.
     fn drain_output(&mut self, process: Process) -> Vec<(Stream, Vec<u8>)>;
+    /// What `path` names in the container's files, an entry at a time with each file's bytes after it (1.8).
+    fn copy_out(&mut self, path: &str) -> io::Result<CopyOut>;
+    /// Get ready to take a copy into the container's files as `process` (1.8): see [`HostMessage::CopyIn`].
+    fn copy_in(&mut self, process: Process, path: &str, name: &str, dir: bool, contents: bool) -> io::Result<()>;
+    /// One entry of that copy; a file's bytes follow through [`System::put_data`].
+    fn put(&mut self, process: Process, entry: &Entry) -> io::Result<()>;
+    fn put_data(&mut self, process: Process, data: &[u8]) -> io::Result<()>;
+    /// The copy is complete, or (`done` false) given up; either way it is forgotten.
+    fn put_done(&mut self, process: Process, done: bool) -> io::Result<()>;
     /// Reap every child that has exited, without blocking.
     fn reap(&mut self) -> io::Result<Vec<Reaped>>;
     /// Flush filesystem buffers.
@@ -527,11 +548,18 @@ struct Commands {
     running: BTreeMap<i32, Process>,
     /// The container's hostname, once `Run` started it: one container per sandbox.
     container: Option<String>,
+    /// The copies into the container still taking entries.
+    copies: std::collections::BTreeSet<Process>,
 }
 
 impl Commands {
     fn is_running(&self, process: Process) -> bool {
         self.running.values().any(|&p| p == process)
+    }
+
+    /// Whether `process` is free for a new command or copy.
+    fn is_free(&self, process: Process) -> bool {
+        process != MAIN && !self.is_running(process) && !self.copies.contains(&process)
     }
 }
 
@@ -583,6 +611,13 @@ fn send_output(sys: &mut impl System, out: &mut impl Write, process: Process, st
             },
         );
     }
+}
+
+/// Gives up a copy into the container: what it wrote stays, and the host hears why.
+fn abandon(sys: &mut impl System, commands: &mut Commands, process: Process, message: String) -> GuestMessage {
+    commands.copies.remove(&process);
+    let _ = sys.put_done(process, false);
+    failed(process, message)
 }
 
 fn error(message: impl Into<String>) -> GuestMessage {
@@ -772,6 +807,95 @@ fn answer(
             sys.close_stdin(process);
             return ControlFlow::Continue(());
         }
+        HostMessage::CopyOut { process, path } => {
+            if !commands.is_free(process) {
+                failed(process, format!("process {process} is already in use"))
+            } else if commands.container.is_none() || !commands.is_running(MAIN) {
+                failed(process, "the container is not running")
+            } else {
+                match sys.copy_out(&path) {
+                    Err(e) => failed(process, format!("{path}: {e}")),
+                    Ok(items) => {
+                        let mut outcome = GuestMessage::Exited { process, code: 0 };
+                        for item in items {
+                            match item {
+                                Ok(Copied::Entry(entry)) => send(sys, out, &GuestMessage::Entry { process, entry }),
+                                Ok(Copied::Data(bytes)) => {
+                                    for chunk in bytes.chunks(hermit_proto::CHUNK) {
+                                        let data = b64::encode(chunk);
+                                        send(sys, out, &GuestMessage::EntryData { process, data });
+                                    }
+                                }
+                                Err(e) => {
+                                    outcome = failed(process, format!("{path}: {e}"));
+                                    break;
+                                }
+                            }
+                        }
+                        log(out, format_args!("copy {process}: sent {path}"));
+                        outcome
+                    }
+                }
+            }
+        }
+        HostMessage::CopyIn {
+            process,
+            path,
+            name,
+            dir,
+            contents,
+        } => {
+            if !commands.is_free(process) {
+                failed(process, format!("process {process} is already in use"))
+            } else if commands.container.is_none() || !commands.is_running(MAIN) {
+                failed(process, "the container is not running")
+            } else if !hermit_proto::is_entry_path(&name) || name.contains('/') {
+                failed(process, format!("not a file name: {name:?}"))
+            } else {
+                match sys.copy_in(process, &path, &name, dir, contents) {
+                    Ok(()) => {
+                        commands.copies.insert(process);
+                        log(out, format_args!("copy {process}: receiving {path}"));
+                        return ControlFlow::Continue(());
+                    }
+                    Err(e) => failed(process, format!("{path}: {e}")),
+                }
+            }
+        }
+        // Entries for a copy that failed (or was never begun) are dropped: its Error has gone already.
+        HostMessage::Put { process, entry } if commands.copies.contains(&process) => {
+            let outcome = if hermit_proto::is_entry_path(&entry.path) {
+                sys.put(process, &entry)
+            } else {
+                Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("not a path in a copy: {:?}", entry.path),
+                ))
+            };
+            match outcome {
+                Ok(()) => return ControlFlow::Continue(()),
+                Err(e) => abandon(sys, commands, process, format!("{}: {e}", entry.path)),
+            }
+        }
+        HostMessage::PutData { process, data } if commands.copies.contains(&process) => {
+            let outcome = b64::decode(&data)
+                .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "file data is not base64"))
+                .and_then(|bytes| sys.put_data(process, &bytes));
+            match outcome {
+                Ok(()) => return ControlFlow::Continue(()),
+                Err(e) => abandon(sys, commands, process, e.to_string()),
+            }
+        }
+        HostMessage::PutDone { process } if commands.copies.remove(&process) => match sys.put_done(process, true) {
+            Ok(()) => {
+                log(out, format_args!("copy {process}: received"));
+                GuestMessage::Exited { process, code: 0 }
+            }
+            Err(e) => failed(process, e.to_string()),
+        },
+        HostMessage::Put { .. } | HostMessage::PutData { .. } | HostMessage::PutDone { .. } => {
+            return ControlFlow::Continue(());
+        }
         // No reply, whatever happens: a container that has just ended, or a signal it ignores, is not an error.
         HostMessage::Signal { process, signal } => {
             if process != MAIN {
@@ -855,6 +979,11 @@ mod tests {
         execs: Vec<(Process, RunSpec)>,
         exec_error: bool,
         signals: Vec<i32>,
+        /// What `copy_out` gives: its items, then an error when `copy_error` is set.
+        tree: Vec<Copied>,
+        copy_error: bool,
+        /// What copies in received, by process: the target first, then entries and data.
+        received: Vec<(Process, String)>,
     }
 
     impl System for Fake {
@@ -937,6 +1066,41 @@ mod tests {
             self.execs.push((process, spec.clone()));
             Ok(100 + i32::try_from(process).unwrap())
         }
+        fn copy_out(&mut self, path: &str) -> io::Result<CopyOut> {
+            if path == "/missing" {
+                return Err(io::Error::from(ErrorKind::NotFound));
+            }
+            let mut items: Vec<io::Result<Copied>> = self.tree.iter().cloned().map(Ok).collect();
+            if self.copy_error {
+                items.push(Err(io::Error::other("read failed")));
+            }
+            Ok(Box::new(items.into_iter()))
+        }
+        fn copy_in(&mut self, process: Process, path: &str, name: &str, dir: bool, contents: bool) -> io::Result<()> {
+            if path == "/missing/" {
+                return Err(io::Error::from(ErrorKind::NotFound));
+            }
+            self.received
+                .push((process, format!("to {path} as {name} dir={dir} contents={contents}")));
+            Ok(())
+        }
+        fn put(&mut self, process: Process, entry: &Entry) -> io::Result<()> {
+            if entry.path == "denied" {
+                return Err(io::Error::from(ErrorKind::PermissionDenied));
+            }
+            self.received
+                .push((process, format!("{:?} {:?} {:o}", entry.kind, entry.path, entry.mode)));
+            Ok(())
+        }
+        fn put_data(&mut self, process: Process, data: &[u8]) -> io::Result<()> {
+            self.received
+                .push((process, String::from_utf8_lossy(data).into_owned()));
+            Ok(())
+        }
+        fn put_done(&mut self, process: Process, done: bool) -> io::Result<()> {
+            self.received.push((process, format!("done {done}")));
+            Ok(())
+        }
         fn signal(&mut self, signal: i32) -> io::Result<()> {
             self.signals.push(signal);
             if signal == 31 {
@@ -1015,7 +1179,7 @@ mod tests {
         );
         assert!(log.contains("moved the root onto a tmpfs"));
         assert!(log.contains("control channel open on org.oci-hermit.control"));
-        assert!(log.contains("ready (control protocol 1.7)"));
+        assert!(log.contains("ready (control protocol 1.8)"));
         assert!(
             log.contains(hermit_proto::CONSOLE_READY),
             "people read this line: {log}"
@@ -1116,7 +1280,7 @@ mod tests {
         };
         let (_, log) = run_fake(&mut sys);
         assert!(log.contains("no control channel (no port named org.oci-hermit.control)"));
-        assert!(log.contains("ready (control protocol 1.7)"));
+        assert!(log.contains("ready (control protocol 1.8)"));
         assert!(ends_with_power_off(&sys.calls));
     }
 
@@ -1253,6 +1417,141 @@ mod tests {
             error(4, "starting nope: executable file not found in $PATH")
         );
         assert!(log.contains("exec 4: starting [\"nope\"] failed"));
+    }
+
+    #[test]
+    fn copies_files_into_and_out_of_the_running_container() {
+        use hermit_proto::EntryKind;
+        let entry = |path: &str, kind, mode| Entry {
+            path: path.into(),
+            kind,
+            mode,
+            target: None,
+        };
+        let out_of = |process, path: &str| {
+            line(&HostMessage::CopyOut {
+                process,
+                path: path.into(),
+            })
+        };
+        let into = |process, path: &str, name: &str| {
+            line(&HostMessage::CopyIn {
+                process,
+                path: path.into(),
+                name: name.into(),
+                dir: true,
+                contents: false,
+            })
+        };
+        let put = |process, path: &str| {
+            line(&HostMessage::Put {
+                process,
+                entry: entry(path, EntryKind::File, 0o644),
+            })
+        };
+        let data = |process, bytes: &[u8]| {
+            line(&HostMessage::PutData {
+                process,
+                data: b64::encode(bytes),
+            })
+        };
+        let big = vec![b'x'; hermit_proto::CHUNK + 1];
+        let mut sys = Fake {
+            tree: vec![
+                Copied::Entry(entry("", EntryKind::Dir, 0o755)),
+                Copied::Entry(entry("big", EntryKind::File, 0o600)),
+                Copied::Data(big.clone()),
+            ],
+            events: VecDeque::from([
+                // Nothing to copy from or into before the container runs.
+                out_of(1, "/etc"),
+                into(1, "/srv", "site"),
+                run_line(&["sleep", "1d"], false),
+                out_of(1, "/etc"),
+                out_of(MAIN, "/etc"),
+                out_of(2, "/missing"),
+                into(3, "/srv", "site"),
+                into(3, "/srv", "again"),
+                put(3, "site/index.html"),
+                data(3, b"<h1>hi</h1>"),
+                line(&HostMessage::PutDone { process: 3 }),
+                // A bad name, a path that climbs out, an entry the system refuses, and Puts after that are dropped.
+                into(4, "/srv", "a/b"),
+                into(5, "/srv", "site"),
+                put(5, "../escape"),
+                put(5, "after"),
+                into(6, "/srv", "site"),
+                put(6, "denied"),
+                line(&HostMessage::PutDone { process: 6 }),
+                into(7, "/missing/", "site"),
+                line(&HostMessage::Shutdown),
+            ]),
+            ..Fake::default()
+        };
+        run_fake(&mut sys);
+        let error = |process, text: &str| GuestMessage::Error {
+            process,
+            message: text.into(),
+        };
+        let mut expected = vec![
+            error(1, "the container is not running"),
+            error(1, "the container is not running"),
+            GuestMessage::Started { process: MAIN, pid: 42 },
+            GuestMessage::Entry {
+                process: 1,
+                entry: entry("", EntryKind::Dir, 0o755),
+            },
+            GuestMessage::Entry {
+                process: 1,
+                entry: entry("big", EntryKind::File, 0o600),
+            },
+        ];
+        for chunk in big.chunks(hermit_proto::CHUNK) {
+            expected.push(GuestMessage::EntryData {
+                process: 1,
+                data: b64::encode(chunk),
+            });
+        }
+        expected.extend([
+            GuestMessage::Exited { process: 1, code: 0 },
+            error(MAIN, "process 0 is already in use"),
+            error(2, "/missing: entity not found"),
+            error(3, "process 3 is already in use"),
+            GuestMessage::Exited { process: 3, code: 0 },
+            error(4, "not a file name: \"a/b\""),
+            error(5, "../escape: not a path in a copy: \"../escape\""),
+            error(6, "denied: permission denied"),
+            error(7, "/missing/: entity not found"),
+            GuestMessage::ShuttingDown,
+        ]);
+        assert_eq!(replies(&sys), expected);
+        let of = |process| -> Vec<&str> {
+            sys.received
+                .iter()
+                .filter(|r| r.0 == process)
+                .map(|r| r.1.as_str())
+                .collect()
+        };
+        assert_eq!(
+            of(3),
+            [
+                "to /srv as site dir=true contents=false",
+                "File \"site/index.html\" 644",
+                "<h1>hi</h1>",
+                "done true"
+            ]
+        );
+        assert_eq!(of(5), ["to /srv as site dir=true contents=false", "done false"]);
+        assert_eq!(of(6).last(), Some(&"done false"));
+
+        // A read that fails part way ends the copy with an error, after what was sent.
+        let mut sys = Fake {
+            copy_error: true,
+            events: VecDeque::from([run_line(&["sleep", "1d"], false), out_of(1, "/etc")]),
+            ..Fake::default()
+        };
+        run_fake(&mut sys);
+        assert_eq!(replies(&sys)[1], error(1, "/etc: read failed"));
     }
 
     #[test]

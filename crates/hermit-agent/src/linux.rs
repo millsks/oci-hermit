@@ -24,7 +24,7 @@ use nix::sys::stat::Mode;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Pid, chdir, chroot, pipe2};
 
-use crate::init::{self, Event, Mount, ROOTFS, Reaped, RunSpec, Signal, System};
+use crate::init::{self, CopyOut, Event, Mount, ROOTFS, Reaped, RunSpec, Signal, System};
 
 /// crun, in the initramfs and in the root the agent moves to.
 const CRUN: &str = "/bin/crun";
@@ -249,6 +249,8 @@ pub struct Linux {
     framer: Framer,
     pending: VecDeque<Event>,
     runs: BTreeMap<Process, Running>,
+    /// Copies into the container being received (1.8).
+    copies: BTreeMap<Process, crate::copy::Receiving>,
 }
 
 impl Linux {
@@ -623,6 +625,36 @@ impl System for Linux {
             let _ = std::fs::remove_file(&file);
         }
         started
+    }
+
+    fn copy_out(&mut self, path: &str) -> io::Result<CopyOut> {
+        crate::copy::copy_out(ROOTFS, path)
+    }
+
+    fn copy_in(&mut self, process: Process, path: &str, name: &str, dir: bool, contents: bool) -> io::Result<()> {
+        let receiving = crate::copy::copy_in(ROOTFS, path, name, dir, contents)?;
+        self.copies.insert(process, receiving);
+        Ok(())
+    }
+
+    fn put(&mut self, process: Process, entry: &hermit_proto::Entry) -> io::Result<()> {
+        match self.copies.get_mut(&process) {
+            Some(receiving) => receiving.put(entry),
+            None => Err(io::Error::new(ErrorKind::NotFound, "no such copy")),
+        }
+    }
+
+    fn put_data(&mut self, process: Process, data: &[u8]) -> io::Result<()> {
+        match self.copies.get_mut(&process) {
+            Some(receiving) => receiving.write(data),
+            None => Err(io::Error::new(ErrorKind::NotFound, "no such copy")),
+        }
+    }
+
+    fn put_done(&mut self, process: Process, _done: bool) -> io::Result<()> {
+        // Dropping it closes the last file.
+        self.copies.remove(&process);
+        Ok(())
     }
 
     fn signal(&mut self, signal: i32) -> io::Result<()> {

@@ -262,6 +262,25 @@ jobs:
           code=0; timeout 120 tail --pid="$fg" -f /dev/null || code=124
           [ "$code" = 0 ] && { wait "$fg" || code=$?; }
           [ "$code" = 5 ] && [ "$(cat fg.out)" = $'ready\ncaught' ] || { echo "::error::exit $code: $(cat fg.out)"; exit 1; }
+          # cp (#23): a folder in, as root and without setuid bits, and back out the same; a link pointing out is
+          # left out, and the home folder is refused.
+          "$hermit" run -d --name files debian.tar sleep 600 > /dev/null
+          mkdir -p site/css
+          echo '<h1>hi</h1>' > site/index.html
+          head -c 100000 /dev/urandom > site/css/big.bin
+          chmod 4755 site/index.html
+          ln -s css/big.bin site/inside
+          ln -s /etc/passwd site/outside
+          "$hermit" cp site files:/srv
+          inside=$("$hermit" exec files sh -c 'stat -c "%a %u %n" /srv/site/index.html; readlink /srv/site/inside; ls /srv/site')
+          [ "$inside" = $'755 0 /srv/site/index.html\ncss/big.bin\ncss\nindex.html\ninside' ] || { echo "::error::cp in: $inside"; exit 1; }
+          "$hermit" cp files:/srv/site back
+          cmp site/css/big.bin back/css/big.bin
+          cmp site/index.html back/index.html
+          [ "$(readlink back/inside)" = css/big.bin ] && [ ! -e back/outside ]
+          mkdir merged && "$hermit" cp files:/srv/site/. merged && [ -f merged/index.html ]
+          if "$hermit" cp files:/etc "$HOME" 2> cp.err || ! grep -q 'holds the home folder' cp.err; then cat cp.err; exit 1; fi
+          "$hermit" rm -f files > /dev/null
           # container prune (#82) removes every stopped container and never a running one.
           "$hermit" run -d --name stays debian.tar sleep 600 > /dev/null
           "$hermit" container prune -f | tee prune.out

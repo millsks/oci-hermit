@@ -34,12 +34,19 @@
 //!
 //! Since 1.7 `Run` can carry the container's [`Limits`] (`--cpus`, `--memory`), which the agent applies with its
 //! cgroup. An older agent would ignore them, so the host refuses one when there are limits to apply.
+//!
+//! Since 1.8 files can be copied into and out of the running container (`oci-hermit cp`), as a number like an
+//! `Exec`'s: [`HostMessage::CopyOut`] is answered with an [`Entry`] for each file, folder and link, each file's bytes
+//! as [`GuestMessage::EntryData`], and `Exited` (0) at the end; [`HostMessage::CopyIn`] is followed by the host's
+//! [`HostMessage::Put`]s and their [`HostMessage::PutData`], and [`HostMessage::PutDone`], which the agent answers
+//! with `Exited` (0). A copy that fails is answered with `Error` for its number. Where a copy lands follows
+//! `docker cp` ([`copy_target`]).
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 7);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 8);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
@@ -74,7 +81,9 @@ fn is_main(process: &Process) -> bool {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMessage {
     /// First message on a new channel.
-    Hello { version: (u16, u16) },
+    Hello {
+        version: (u16, u16),
+    },
     /// Sync filesystems and power the guest off.
     Shutdown,
     /// Start a command in the image's root filesystem (1.1). One command per session.
@@ -138,6 +147,101 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user: Option<User>,
     },
+    /// Send what `path` (absolute, inside the container) names, as `process` (1.8).
+    CopyOut {
+        process: Process,
+        path: String,
+    },
+    /// Copy into the container (1.8): what the following `Put`s carry goes to `path`, as [`copy_target`] places
+    /// `name` (the source's last part), a folder when `dir`, and only its contents when `contents`.
+    CopyIn {
+        process: Process,
+        path: String,
+        name: String,
+        dir: bool,
+        contents: bool,
+    },
+    /// One entry of a `CopyIn` (1.8); a file's bytes follow as `PutData`.
+    Put {
+        process: Process,
+        entry: Entry,
+    },
+    PutData {
+        process: Process,
+        data: String,
+    },
+    /// The end of a `CopyIn` (1.8).
+    PutDone {
+        process: Process,
+    },
+}
+
+/// One file, folder or link in a copy (1.8), by its path inside the copy: `""` for what was named, then
+/// `name`, `name/inner` and so on, `/`-separated, parents before what they hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    pub path: String,
+    pub kind: EntryKind,
+    /// Permission bits (`0o777` at most; setuid, setgid and sticky bits are not copied).
+    pub mode: u32,
+    /// A link's target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    /// A device, FIFO or socket: named so the other side can say it was left out, never copied.
+    Other,
+}
+
+/// What is at a copy's destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    Missing,
+    File,
+    Dir,
+}
+
+/// Where a copy lands, as `docker cp` decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// At the destination itself: a new file or folder there, a file replaced, or a folder's contents merged in.
+    At,
+    /// Inside the destination folder, under this name.
+    Into(String),
+}
+
+/// Where a copy of a file (or, when `source_dir`, a folder; with `contents`, only what it holds, as `src/.`) named
+/// `name` lands at a destination that is `dest`, given with a trailing `/` when `dest_slash`.
+pub fn copy_target(
+    dest: Existing,
+    dest_slash: bool,
+    source_dir: bool,
+    contents: bool,
+    name: &str,
+) -> Result<Target, String> {
+    match (source_dir, dest) {
+        (_, Existing::Dir) if (source_dir && contents) || name.is_empty() => Ok(Target::At),
+        (_, Existing::Dir) => Ok(Target::Into(name.to_string())),
+        (false, Existing::Missing) if dest_slash => Err("the destination folder does not exist".into()),
+        (false, Existing::File) if dest_slash => Err("the destination is not a folder".into()),
+        (false, _) => Ok(Target::At),
+        (true, Existing::File) => Err("cannot copy a folder onto a file".into()),
+        (true, Existing::Missing) => Ok(Target::At),
+    }
+}
+
+/// Whether `path` is a valid [`Entry::path`]: empty, or `/`-separated names that are not `.` or `..`.
+pub fn is_entry_path(path: &str) -> bool {
+    path.is_empty()
+        || path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains(['\\', '\0']))
 }
 
 /// The identity a command runs as, already resolved against the image's `/etc/passwd` and `/etc/group`.
@@ -206,7 +310,9 @@ pub fn signal_number(name: &str) -> Option<i32> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuestMessage {
     /// Reply to a compatible `Hello`.
-    Ready { version: (u16, u16) },
+    Ready {
+        version: (u16, u16),
+    },
     /// Reply to `Shutdown`, sent before the guest powers off.
     ShuttingDown,
     /// A message was refused or failed; an `Exec` that could not start names its process.
@@ -228,11 +334,21 @@ pub enum GuestMessage {
         stream: Stream,
         data: String,
     },
-    /// A command ended (1.1): its exit status, or 128 plus the signal that killed it.
+    /// A command ended (1.1): its exit status, or 128 plus the signal that killed it. For a copy (1.8), 0 when
+    /// it is complete.
     Exited {
         #[serde(default, skip_serializing_if = "is_main")]
         process: Process,
         code: i32,
+    },
+    /// One entry of a `CopyOut` (1.8); a file's bytes follow as `EntryData`.
+    Entry {
+        process: Process,
+        entry: Entry,
+    },
+    EntryData {
+        process: Process,
+        data: String,
     },
 }
 
@@ -368,6 +484,56 @@ impl Framer {
 }
 
 #[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn copies_land_where_docker_cp_puts_them() {
+        use Existing::*;
+        // A file: onto a missing path or a file it is that path; into a folder it keeps its name.
+        assert_eq!(copy_target(Missing, false, false, false, "a.txt"), Ok(Target::At));
+        assert_eq!(copy_target(File, false, false, false, "a.txt"), Ok(Target::At));
+        assert_eq!(
+            copy_target(Dir, false, false, false, "a.txt"),
+            Ok(Target::Into("a.txt".into()))
+        );
+        assert_eq!(
+            copy_target(Dir, true, false, false, "a.txt"),
+            Ok(Target::Into("a.txt".into()))
+        );
+        assert!(
+            copy_target(Missing, true, false, false, "a.txt").is_err(),
+            "dest/ must be a folder"
+        );
+        assert!(copy_target(File, true, false, false, "a.txt").is_err());
+        // A folder: a missing path becomes it, a folder gets it by name, or its contents with `src/.`.
+        assert_eq!(copy_target(Missing, false, true, false, "site"), Ok(Target::At));
+        assert_eq!(copy_target(Missing, true, true, true, "site"), Ok(Target::At));
+        assert_eq!(
+            copy_target(Dir, false, true, false, "site"),
+            Ok(Target::Into("site".into()))
+        );
+        assert_eq!(copy_target(Dir, false, true, true, "site"), Ok(Target::At));
+        assert_eq!(
+            copy_target(Dir, false, true, false, ""),
+            Ok(Target::At),
+            "the root's contents"
+        );
+        assert!(copy_target(File, false, true, false, "site").is_err());
+    }
+
+    #[test]
+    fn entry_paths_stay_inside_the_copy() {
+        for good in ["", "a", "a/b", "a/.hidden", "a..b"] {
+            assert!(is_entry_path(good), "{good}");
+        }
+        for bad in ["/", "/a", "a/", "a//b", ".", "..", "a/../b", "a/./b", "a\\b", "a\0b"] {
+            assert!(!is_entry_path(bad), "{bad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -420,6 +586,39 @@ mod tests {
             "{\"type\":\"shutting_down\"}\n"
         );
         assert!(decode::<HostMessage>(r#"{"type":"launch_missiles"}"#).is_err());
+        let entry = Entry {
+            path: "etc/motd".into(),
+            kind: EntryKind::Symlink,
+            mode: 0o777,
+            target: Some("../run/motd".into()),
+        };
+        for message in [
+            HostMessage::CopyOut {
+                process: 3,
+                path: "/etc".into(),
+            },
+            HostMessage::CopyIn {
+                process: 4,
+                path: "/srv".into(),
+                name: "site".into(),
+                dir: true,
+                contents: false,
+            },
+            HostMessage::Put {
+                process: 4,
+                entry: entry.clone(),
+            },
+            HostMessage::PutData {
+                process: 4,
+                data: b64::encode(b"x"),
+            },
+            HostMessage::PutDone { process: 4 },
+        ] {
+            assert_eq!(decode::<HostMessage>(&encode(&message).unwrap()).unwrap(), message);
+        }
+        let out = GuestMessage::Entry { process: 3, entry };
+        assert_eq!(decode::<GuestMessage>(&encode(&out).unwrap()).unwrap(), out);
+        assert!(encode(&out).unwrap().contains(r#""kind":"symlink""#));
         // A newer minor version may add fields; this side ignores them.
         assert_eq!(
             decode::<HostMessage>(r#"{"type":"shutdown","added_in_1_1":true}"#).unwrap(),
