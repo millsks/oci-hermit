@@ -1643,12 +1643,12 @@ the Apple M4 Mac's own <code>/bin/sh</code>, and about 12 seconds in Alpine's <c
 <tr>
 <td>CPUs</td>
 <td>1</td>
-<td><code>run --cpus N</code>, <code>machine boot --cpus N</code></td>
+<td><code>run --cpus 1.5</code> (2 emulated CPUs, the container held to 1.5), <code>machine boot --cpus N</code></td>
 </tr>
 <tr>
 <td>Memory for <code>run</code></td>
 <td>512 MiB for a stored image; twice the size plus 256 MiB for one run from a file</td>
-<td><code>run -m 2g</code> (at least <code>64m</code>)</td>
+<td><code>run -m 2g</code> (the container held to 2 GiB, the sandbox 128 MiB more; at least <code>6m</code>)</td>
 </tr>
 <tr>
 <td>Memory for <code>machine boot</code></td>
@@ -1661,7 +1661,8 @@ the Apple M4 Mac's own <code>/bin/sh</code>, and about 12 seconds in Alpine's <c
 from read-only disks, one per layer, so 512 MiB does whatever its size; what the command writes is kept in that RAM
 until the sandbox stops. An image run straight from a file (<code>run image.tar</code>), or one with more than 20 layers,
 travels in the initramfs and is unpacked in the guest's RAM instead, so it gets twice its size plus 256 MiB. If a
-command runs out of memory, raise <code>-m</code>. More CPUs help commands that use several threads; booting does not get faster.</p>
+command runs out of memory, raise <code>-m</code>; with <code>-m</code>, going over it is an out-of-memory kill (exit 137), as in Docker.
+More CPUs help commands that use several threads; booting does not get faster.</p>
 <h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>One container per sandbox.</strong> Each <code>run</code> boots its own VM for one container, in the foreground or with <code>-d</code> in

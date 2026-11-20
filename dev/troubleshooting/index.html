@@ -1816,8 +1816,16 @@ store does not have also leads to a pull.</p>
 <td>The container was started with an older <code>guest/</code> folder. Use the one that came with this <code>oci-hermit</code>, and start the container again.</td>
 </tr>
 <tr>
-<td><code>--memory 10m: use e.g. 512m or 2g, at least 64m</code></td>
-<td><code>-m</code> needs a size with a unit, at least 64 MiB.</td>
+<td><code>--memory 1m: use e.g. 512m or 2g, at least 6m</code></td>
+<td><code>-m</code> needs a size with a unit, at least 6 MiB, as in Docker.</td>
+</tr>
+<tr>
+<td><code>--cpus 16: the range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs available</code></td>
+<td>As with Docker, <code>--cpus</code> may not exceed the host's CPUs.</td>
+</tr>
+<tr>
+<td><code>this guest agent cannot limit a container's CPUs or memory (it speaks control protocol 1.6, and that needs 1.7)</code></td>
+<td><code>--cpus</code> or <code>-m</code> with an older <code>guest/</code> folder. Use the one that came with this <code>oci-hermit</code>, or run without them.</td>
 </tr>
 <tr>
 <td><code>unsupported --platform …</code></td>

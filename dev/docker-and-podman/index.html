@@ -1537,7 +1537,7 @@ nothing out.</p>
 <tr>
 <td><code>--cpus</code>, <code>--memory</code></td>
 <td>Limits for the container.</td>
-<td>The size of the emulated VM.</td>
+<td>The same limits, from the container's cgroup; the emulated VM is sized to fit them (<code>--cpus 1.5</code> gives it 2 CPUs, <code>-m 1g</code> gives it 1 GiB and 128 MiB).</td>
 </tr>
 <tr>
 <td><code>stop</code></td>

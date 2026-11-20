@@ -1585,6 +1585,7 @@ built yet, is in the <a href="../design/">design document</a>.</p>
    so nothing the command writes reaches the disks. It writes an OCI runtime bundle for the command (its user,
    environment, working directory and terminal) and starts it in a container with crun: its own PID, mount, IPC,
    UTS, network and cgroup namespaces, Docker's default capabilities, a read-only <code>/sys</code> and only the usual devices.
+   <code>--cpus</code> and <code>-m</code> become its cgroup's <code>cpu.max</code> and <code>memory.max</code> (protocol 1.7); the VM was sized to fit them.
    The agent relays the container's input, output and exit code.</li>
 <li>When the command exits, oci-hermit asks the agent to power off, and exits with the command's exit code.</li>
 </ol>

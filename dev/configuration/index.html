@@ -1663,12 +1663,14 @@ version and accelerator. A problem here makes <code>machine info</code> exit 1, 
 </code></pre></div>
 <p>Each guest, its sizes and where it was found. A missing one says <code>not found; &lt;platform&gt; images cannot run</code>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="go">sandbox defaults for run:</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">  cpus:       1 (--cpus)</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="go">  memory:     512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB (--memory)</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="go">  network:    none: no egress; -p (127.0.0.1 only) is not implemented yet</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="go">  run dir:    /var/folders/kb/…/T/oci-hermit (a sandbox-* folder per run: initramfs, console.log, qemu.log)</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="go">  cpus:       1 emulated CPU, no limit (--cpus 1.5: 2 CPUs, the container held to 1.5; at most 8, the host's)</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="go">  memory:     512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="go">              (-m 1g: the container held to 1 GiB, in a sandbox 128 MiB larger, plus any image in memory)</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="go">  limits:     `inspect &lt;container&gt;` shows a container's limits and its sandbox</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="go">  network:    none: no egress; -p (127.0.0.1 only) is not implemented yet</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="go">  run dir:    /var/folders/kb/…/T/oci-hermit (a sandbox-* folder per run: initramfs, console.log, qemu.log)</span>
 </code></pre></div>
-<p>What <code>run</code> gives a sandbox unless told otherwise, and where the sandbox folders go.</p>
+<p>What <code>run</code> gives a sandbox unless told otherwise, what <code>--cpus</code> and <code>-m</code> change, and where the sandbox folders go.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="go">image store (pull, load):</span>
 <a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="go">  path:       /Users/me/Library/Application Support/oci-hermit/images (the platform default)</span>
 <a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="go">  images:     3 images under 2 names (one per name and platform)</span>

@@ -2045,7 +2045,7 @@ the <code>qemu/</code> and <code>guest/</code> folders beside the real file.</p>
 </tr>
 <tr>
 <td><a href="#inspect"><code>inspect</code>, <code>image inspect</code></a></td>
-<td>Show details of images as JSON</td>
+<td>Show details of containers and images as JSON</td>
 </tr>
 <tr>
 <td><a href="#tag"><code>tag</code>, <code>image tag</code></a></td>
@@ -2141,11 +2141,11 @@ that exists is read as a path, before any stored name.</p>
 </tr>
 <tr>
 <td><code>--cpus &lt;CPUS&gt;</code></td>
-<td>Number of emulated CPUs. Default 1.</td>
+<td>The CPUs the container may use, as Docker's: a decimal number from <code>0.01</code> up to the host's CPU count (<code>0</code> is no limit). The sandbox gets an emulated CPU for each one started (<code>1.5</code> gives 2), and the container's cgroup holds it to the number given. Without it, 1 emulated CPU and no limit.</td>
 </tr>
 <tr>
 <td><code>-m</code>, <code>--memory &lt;MEMORY&gt;</code></td>
-<td>Memory for the sandbox: a number with <code>k</code>, <code>m</code> or <code>g</code> (<code>512m</code>, <code>2g</code>); bytes without a suffix, as Docker. At least <code>64m</code>. Default: 512 MiB for a stored image, which runs from its layer disks; for an image run from a file, twice its size plus 256 MiB.</td>
+<td>The memory the container may use, as Docker's: a number with <code>k</code>, <code>m</code> or <code>g</code> (<code>512m</code>, <code>2g</code>); bytes without a suffix. At least <code>6m</code>. The container's cgroup holds it to that (more is an out-of-memory kill, exit 137), and the sandbox gets 128 MiB more for the guest, plus room for an image run from a file. Without it, no limit, and the sandbox has 512 MiB for a stored image, which runs from its layer disks, or twice the size of one run from a file plus 256 MiB.</td>
 </tr>
 <tr>
 <td><code>--name &lt;NAME&gt;</code></td>
@@ -2609,25 +2609,51 @@ was saved under; one without a name is stored under its image ID.</p>
 </code></pre></div>
 <p>An image without a name shows <code>&lt;none&gt;</code> as its repository and tag.</p>
 <h2 id="inspect">inspect<a class="headerlink" href="#inspect" title="Permanent link">&para;</a></h2>
-<p>Show details of images as a JSON array, one object per name, close to <code>podman image inspect</code>. <code>image inspect</code> is the
-same command.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a>oci-hermit inspect &lt;IMAGES&gt;...
+<p>Show details of containers and images as a JSON array, one object per name. As with <code>docker inspect</code>, a name or ID is
+looked up among containers first, then images; <code>image inspect</code> looks only at images.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a>oci-hermit inspect &lt;NAMES&gt;...
+<a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a>oci-hermit image inspect &lt;IMAGES&gt;...
 </code></pre></div>
-<p>The fields are <code>Id</code>, <code>Digest</code>, <code>RepoTags</code>, <code>RepoDigests</code>, <code>Created</code>, <code>Author</code>, <code>Architecture</code>, <code>Variant</code>, <code>Os</code>,
-<code>Size</code>, <code>Labels</code>, <code>Config</code>, <code>RootFS</code>, <code>History</code> and <code>ManifestType</code>. An image that is not stored prints
-<code>oci-hermit: no such image: &lt;name&gt;</code> on stderr, and <code>inspect</code> exits 1. An example is in
-<a href="../field-manual/image-store/#look-inside-an-image">Manage the image store</a>.</p>
+<p>An image's fields are close to <code>podman image inspect</code>: <code>Id</code>, <code>Digest</code>, <code>RepoTags</code>, <code>RepoDigests</code>, <code>Created</code>,
+<code>Author</code>, <code>Architecture</code>, <code>Variant</code>, <code>Os</code>, <code>Size</code>, <code>Labels</code>, <code>Config</code>, <code>RootFS</code>, <code>History</code> and <code>ManifestType</code>. An
+example is in <a href="../field-manual/image-store/#look-inside-an-image">Manage the image store</a>.</p>
+<p>A container's are close to <code>docker inspect</code>'s: <code>Id</code>, <code>Created</code>, <code>Path</code>, <code>Args</code>, <code>State</code> (<code>Status</code>, <code>Running</code>,
+<code>ExitCode</code>, <code>Error</code>, <code>StartedAt</code>, <code>FinishedAt</code>), <code>Image</code> (the image ID), <code>Name</code>, <code>Platform</code>, <code>Config</code> (<code>Hostname</code>,
+<code>User</code>, <code>Tty</code>, <code>OpenStdin</code>, <code>Cmd</code>, <code>Image</code>) and <code>HostConfig</code> (<code>NanoCpus</code> and <code>Memory</code>, its <code>--cpus</code> and <code>-m</code> limits,
+0 when there is none; <code>AutoRemove</code>). <code>Sandbox</code> is oci-hermit's own: the VM it runs in (<code>Platform</code>, <code>Cpus</code>, and
+<code>Memory</code> in bytes).</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>run<span class="w"> </span>-d<span class="w"> </span>--name<span class="w"> </span>web<span class="w"> </span>--cpus<span class="w"> </span><span class="m">1</span>.5<span class="w"> </span>-m<span class="w"> </span>1g<span class="w"> </span>debian:bookworm-slim<span class="w"> </span>sleep<span class="w"> </span><span class="m">600</span>
+<a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>inspect<span class="w"> </span>web
+<a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a><span class="go">[</span>
+<a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a><span class="go">  {</span>
+<a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a><span class="go">    "Id": "4f2a9c1d0b3e…",</span>
+<a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a><span class="go">    …</span>
+<a id="__codelineno-30-7" name="__codelineno-30-7" href="#__codelineno-30-7"></a><span class="go">    "HostConfig": {</span>
+<a id="__codelineno-30-8" name="__codelineno-30-8" href="#__codelineno-30-8"></a><span class="go">      "AutoRemove": false,</span>
+<a id="__codelineno-30-9" name="__codelineno-30-9" href="#__codelineno-30-9"></a><span class="go">      "Memory": 1073741824,</span>
+<a id="__codelineno-30-10" name="__codelineno-30-10" href="#__codelineno-30-10"></a><span class="go">      "NanoCpus": 1500000000</span>
+<a id="__codelineno-30-11" name="__codelineno-30-11" href="#__codelineno-30-11"></a><span class="go">    },</span>
+<a id="__codelineno-30-12" name="__codelineno-30-12" href="#__codelineno-30-12"></a><span class="go">    "Sandbox": {</span>
+<a id="__codelineno-30-13" name="__codelineno-30-13" href="#__codelineno-30-13"></a><span class="go">      "Cpus": 2,</span>
+<a id="__codelineno-30-14" name="__codelineno-30-14" href="#__codelineno-30-14"></a><span class="go">      "Memory": 1207959552,</span>
+<a id="__codelineno-30-15" name="__codelineno-30-15" href="#__codelineno-30-15"></a><span class="go">      "Platform": "linux/amd64"</span>
+<a id="__codelineno-30-16" name="__codelineno-30-16" href="#__codelineno-30-16"></a><span class="go">    }</span>
+<a id="__codelineno-30-17" name="__codelineno-30-17" href="#__codelineno-30-17"></a><span class="go">  }</span>
+<a id="__codelineno-30-18" name="__codelineno-30-18" href="#__codelineno-30-18"></a><span class="go">]</span>
+</code></pre></div>
+<p>A name that is neither prints <code>oci-hermit: no such image or container: &lt;name&gt;</code> on stderr (<code>no such image</code> for
+<code>image inspect</code>), and <code>inspect</code> exits 1.</p>
 <h2 id="tag">tag<a class="headerlink" href="#tag" title="Permanent link">&para;</a></h2>
 <p>Give a stored image another name, for every platform stored under the source. Nothing is copied. <code>image tag</code> is the
 same command.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a>oci-hermit tag &lt;SOURCE&gt; &lt;TARGET&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a>oci-hermit tag &lt;SOURCE&gt; &lt;TARGET&gt;
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a>oci-hermit<span class="w"> </span>tag<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20<span class="w"> </span>mine/alpine:test
+<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a>oci-hermit<span class="w"> </span>tag<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20<span class="w"> </span>mine/alpine:test
 </code></pre></div>
 <h2 id="save">save<a class="headerlink" href="#save" title="Permanent link">&para;</a></h2>
 <p>Save images to an archive that <code>oci-hermit load</code>, <code>docker load</code>, <code>podman load</code> and skopeo read. <code>image save</code> is the
 same command.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a>oci-hermit save [OPTIONS] --output &lt;OUTPUT&gt; &lt;IMAGES&gt;...
+<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a>oci-hermit save [OPTIONS] --output &lt;OUTPUT&gt; &lt;IMAGES&gt;...
 </code></pre></div>
 <table>
 <thead>
@@ -2656,7 +2682,7 @@ same command.</p>
 <h2 id="rmi">rmi<a class="headerlink" href="#rmi" title="Permanent link">&para;</a></h2>
 <p>Remove images by name or ID. Blobs no other image uses are deleted. <code>image rm</code> and <code>image remove</code> are the same
 command.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a>oci-hermit rmi [OPTIONS] &lt;IMAGES&gt;...
+<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>oci-hermit rmi [OPTIONS] &lt;IMAGES&gt;...
 </code></pre></div>
 <table>
 <thead>
@@ -2672,14 +2698,14 @@ command.</p>
 </tr>
 </tbody>
 </table>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>rmi<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20
-<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a><span class="go">Untagged: public.ecr.aws/docker/library/alpine:3.20</span>
-<a id="__codelineno-34-3" name="__codelineno-34-3" href="#__codelineno-34-3"></a><span class="go">Deleted: sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>rmi<span class="w"> </span>public.ecr.aws/docker/library/alpine:3.20
+<a id="__codelineno-35-2" name="__codelineno-35-2" href="#__codelineno-35-2"></a><span class="go">Untagged: public.ecr.aws/docker/library/alpine:3.20</span>
+<a id="__codelineno-35-3" name="__codelineno-35-3" href="#__codelineno-35-3"></a><span class="go">Deleted: sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731</span>
 </code></pre></div>
 <p>Exits 1 if any name matched nothing or was refused. Refuses to run while another oci-hermit is using the store.</p>
 <h2 id="image-prune">image prune<a class="headerlink" href="#image-prune" title="Permanent link">&para;</a></h2>
 <p>Remove images loaded without a name, and every blob nothing uses.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a>oci-hermit image prune [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a>oci-hermit image prune [OPTIONS]
 </code></pre></div>
 <table>
 <thead>
@@ -2703,7 +2729,7 @@ command.</p>
 while another oci-hermit is using the store.</p>
 <h2 id="image-history">image history<a class="headerlink" href="#image-history" title="Permanent link">&para;</a></h2>
 <p>Show the steps that built an image, newest first, with the size of the layer each made.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a>oci-hermit image history [OPTIONS] &lt;IMAGE&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a>oci-hermit image history [OPTIONS] &lt;IMAGE&gt;
 </code></pre></div>
 <table>
 <thead>
@@ -2725,19 +2751,19 @@ while another oci-hermit is using the store.</p>
 </table>
 <h2 id="image-exists">image exists<a class="headerlink" href="#image-exists" title="Permanent link">&para;</a></h2>
 <p>Exit 0 if an image is stored, 1 if not. Prints nothing.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a>oci-hermit image exists &lt;IMAGE&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>oci-hermit image exists &lt;IMAGE&gt;
 </code></pre></div>
 <h2 id="system-df">system df<a class="headerlink" href="#system-df" title="Permanent link">&para;</a></h2>
 <p>Show how much space the store uses. There are no containers yet, so every image counts as reclaimable.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>system<span class="w"> </span>df
-<a id="__codelineno-38-2" name="__codelineno-38-2" href="#__codelineno-38-2"></a><span class="go">TYPE         TOTAL   ACTIVE   SIZE      RECLAIMABLE</span>
-<a id="__codelineno-38-3" name="__codelineno-38-3" href="#__codelineno-38-3"></a><span class="go">Images       3       0        35.9 MB   35.9 MB (100%)</span>
-<a id="__codelineno-38-4" name="__codelineno-38-4" href="#__codelineno-38-4"></a><span class="go">Containers   0       0        0 B       0 B</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>system<span class="w"> </span>df
+<a id="__codelineno-39-2" name="__codelineno-39-2" href="#__codelineno-39-2"></a><span class="go">TYPE         TOTAL   ACTIVE   SIZE      RECLAIMABLE</span>
+<a id="__codelineno-39-3" name="__codelineno-39-3" href="#__codelineno-39-3"></a><span class="go">Images       3       0        35.9 MB   35.9 MB (100%)</span>
+<a id="__codelineno-39-4" name="__codelineno-39-4" href="#__codelineno-39-4"></a><span class="go">Containers   0       0        0 B       0 B</span>
 </code></pre></div>
 <h2 id="machine-info">machine info<a class="headerlink" href="#machine-info" title="Permanent link">&para;</a></h2>
 <p>Show the emulators, the guests, the defaults <code>run</code> uses, the image store and the registry auth files, and where each
 came from. <code>oci-hermit info</code> is the same command.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>oci-hermit machine info
+<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>oci-hermit machine info
 </code></pre></div>
 <p>A full example is in <a href="../getting-started/#2-check-it">Getting started</a>, and every line is explained in
 <a href="../configuration/#what-machine-info-shows">Configuration</a>. Exits 1 when the QEMU bundle is missing or is not the one
@@ -2745,7 +2771,7 @@ oci-hermit was built for, because nothing can run then; a missing guest is shown
 <h2 id="machine-boot">machine boot<a class="headerlink" href="#machine-boot" title="Permanent link">&para;</a></h2>
 <p>Boot a sandbox until its agent is ready, then stop it: a self-check of QEMU, the kernel and the agent. It needs no
 image.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>oci-hermit machine boot [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a>oci-hermit machine boot [OPTIONS]
 </code></pre></div>
 <table>
 <thead>
@@ -2773,16 +2799,16 @@ image.</p>
 </tr>
 </tbody>
 </table>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>boot<span class="w"> </span>--arch<span class="w"> </span>x86_64
-<a id="__codelineno-41-2" name="__codelineno-41-2" href="#__codelineno-41-2"></a><span class="go">booting an x86_64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12666-1794883275416245000/console.log</span>
-<a id="__codelineno-41-3" name="__codelineno-41-3" href="#__codelineno-41-3"></a><span class="go">agent ready after 0.6s (control protocol 1.4)</span>
-<a id="__codelineno-41-4" name="__codelineno-41-4" href="#__codelineno-41-4"></a><span class="go">guest powered off; sandbox stopped</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>machine<span class="w"> </span>boot<span class="w"> </span>--arch<span class="w"> </span>x86_64
+<a id="__codelineno-42-2" name="__codelineno-42-2" href="#__codelineno-42-2"></a><span class="go">booting an x86_64 sandbox; console log: /var/folders/kb/…/T/oci-hermit/sandbox-12666-1794883275416245000/console.log</span>
+<a id="__codelineno-42-3" name="__codelineno-42-3" href="#__codelineno-42-3"></a><span class="go">agent ready after 0.6s (control protocol 1.4)</span>
+<a id="__codelineno-42-4" name="__codelineno-42-4" href="#__codelineno-42-4"></a><span class="go">guest powered off; sandbox stopped</span>
 </code></pre></div>
 <p>Exits 0 when the guest booted and powered off, 1 otherwise; the error names the console and QEMU logs.</p>
 <h2 id="version">version<a class="headerlink" href="#version" title="Permanent link">&para;</a></h2>
 <p>Print the version and the control protocol version the host speaks.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>version
-<a id="__codelineno-42-2" name="__codelineno-42-2" href="#__codelineno-42-2"></a><span class="go">oci-hermit 0.2.0 (control protocol 1.4)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>version
+<a id="__codelineno-43-2" name="__codelineno-43-2" href="#__codelineno-43-2"></a><span class="go">oci-hermit 0.2.0 (control protocol 1.4)</span>
 </code></pre></div>
 <h2 id="exit-codes">Exit codes<a class="headerlink" href="#exit-codes" title="Permanent link">&para;</a></h2>
 <table>
@@ -2818,8 +2844,8 @@ image.</p>
 <h2 id="planned-commands">Planned commands<a class="headerlink" href="#planned-commands" title="Permanent link">&para;</a></h2>
 <p>These are part of the command line already, so <code>--help</code> lists them, but they do nothing yet. Each prints
 <code>oci-hermit:</code><command><code>is not implemented yet; see …/ROADMAP.md</code> and exits 2:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>cp<span class="w"> </span>web:/etc/hostname<span class="w"> </span>.
-<a id="__codelineno-43-2" name="__codelineno-43-2" href="#__codelineno-43-2"></a><span class="go">oci-hermit: `cp` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a><span class="gp">$ </span>oci-hermit<span class="w"> </span>cp<span class="w"> </span>web:/etc/hostname<span class="w"> </span>.
+<a id="__codelineno-44-2" name="__codelineno-44-2" href="#__codelineno-44-2"></a><span class="go">oci-hermit: `cp` is not implemented yet; see https://github.com/millsks/oci-hermit/blob/main/ROADMAP.md</span>
 </code></pre></div>
 <table>
 <thead>
