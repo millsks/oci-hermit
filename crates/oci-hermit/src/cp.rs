@@ -20,14 +20,17 @@ pub enum Location {
     Container { container: String, path: String },
 }
 
-/// `CONTAINER:PATH`, or a path on this machine: an absolute one, one starting with `.`, or one without a `:`.
+/// `CONTAINER:PATH`, or a path on this machine: an absolute one, one starting with `.`, or one without a `:`. A
+/// container's name never holds a slash, so `/tmp/a:b` is a path here on every system.
 pub fn location(arg: &str) -> Location {
     let local = Path::new(arg).is_absolute() || arg.starts_with('.') || is_drive_path(arg);
     match arg.split_once(':') {
-        Some((container, path)) if !local && !container.is_empty() => Location::Container {
-            container: container.to_string(),
-            path: path.to_string(),
-        },
+        Some((container, path)) if !local && !container.is_empty() && !container.contains(['/', '\\']) => {
+            Location::Container {
+                container: container.to_string(),
+                path: path.to_string(),
+            }
+        }
         _ => Location::Host(arg.to_string()),
     }
 }
@@ -545,6 +548,8 @@ mod tests {
             assert_eq!(location(local), Location::Host(local.into()), "{local}");
         }
         assert_eq!(location("/tmp/a:b"), Location::Host("/tmp/a:b".into()));
+        assert_eq!(location("dir/a:b"), Location::Host("dir/a:b".into()));
+        assert_eq!(location("dir\\a:b"), Location::Host("dir\\a:b".into()));
         assert_eq!(name_and_contents("/srv/site"), ("site".into(), false));
         assert_eq!(name_and_contents("/srv/site/"), ("site".into(), false));
         assert_eq!(name_and_contents("/srv/site/."), ("site".into(), true));
