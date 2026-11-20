@@ -19,6 +19,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | [`logs`](#logs) | Show a container's output |
 | [`stop`](#stop) | Stop running containers |
 | [`kill`](#kill) | Send a signal to running containers |
+| [`wait`](#wait) | Wait for containers to stop and print their exit codes |
 | [`rm`](#rm) | Remove containers |
 | [`pull`](#pull) | Pull an image from a registry |
 | [`manifest inspect`](#manifest-inspect) | Show an image's platforms and digests in a registry, without pulling |
@@ -235,8 +236,8 @@ ticker
 
 ## kill
 
-Send a signal to running containers' commands. Prints each one as it was given; exits 1 if any is not running or
-could not be signalled.
+Send a signal to running containers' commands. Prints each one as it was given; exits 1 if any is not running
+(`cannot kill container: <name>: container <id> is not running`, as Docker says) or could not be signalled.
 
 ```
 oci-hermit kill [-s <SIGNAL>] <CONTAINERS>...
@@ -252,6 +253,26 @@ container's own command, not to commands started with [`exec`](#exec).
 ```console
 $ oci-hermit kill -s HUP web
 web
+```
+
+## wait
+
+Block until containers stop, then print each one's exit code, one a line, in the order given, as `docker wait`
+does. A container that has already stopped prints the code it stopped with at once (`-1` if it ended without one).
+It waits for them all at the same time, so a `--rm` container's code is printed although it is removed when it
+stops. Exits 0, whatever the codes; 1 if any container is not found.
+
+```
+oci-hermit wait <CONTAINERS>...
+```
+
+The code is the one `run` would have exited with: the command's own, 128 plus the signal that ended it (137 after
+`kill` or a `stop` that ran out of time), or 125 if the container could not run.
+
+```console
+$ oci-hermit run -d --name job debian:bookworm-slim sh -c 'sleep 5; exit 3'
+$ oci-hermit wait job
+3
 ```
 
 ## rm
@@ -662,7 +683,6 @@ Not in the command line yet, and planned:
 | Command | Issue |
 | --- | --- |
 | `create`, `start`, `restart` | #77 |
-| `wait`, `kill` | #78 |
 | `attach` | #79 |
 | `top`, `stats` | #80 |
 | `diff`, `export` | #81 |

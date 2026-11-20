@@ -127,6 +127,8 @@ pub enum Request {
         /// `-i`: keep its stdin open.
         interactive: bool,
     },
+    /// `wait`: answered with [`Notice::Exited`] once the container has ended and its exit code is recorded.
+    Wait,
 }
 
 /// What a monitor tells its clients.
@@ -423,16 +425,19 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     let finished = Arc::new(AtomicBool::new(false));
     let old_agent = Arc::new(AtomicBool::new(false));
     let execs = Execs::new();
+    let waiters: Waiters = Arc::new(Mutex::new(Vec::new()));
     let outcome = match ipc::Listener::bind(data_dir, id) {
         Ok(listener) => {
             let accepting = {
                 let (owner, to_run, finished) = (owner.clone(), to_run.clone(), finished.clone());
                 let (launch, execs, old_agent) = (launch.clone(), execs.clone(), old_agent.clone());
+                let waiters = waiters.clone();
                 std::thread::spawn(move || {
                     let shared = Shared {
                         launch,
                         execs,
                         old_agent,
+                        waiters,
                     };
                     accept(listener, &owner, attached_tx, &to_run, &finished, &shared);
                 })
@@ -441,6 +446,7 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
                 launch: launch.clone(),
                 execs: execs.clone(),
                 old_agent,
+                waiters: waiters.clone(),
             };
             let outcome = run(&shared, &dir, &owner, &attached, to_run, &input, log);
             lock(&execs).close();
@@ -469,6 +475,10 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     if let Err(e) = running.exited(Some(code), error, crate::images::now()) {
         let _ = writeln!(log, "oci-hermit monitor: recording how the container ended: {e}");
     }
+    // Before `--rm` removes the record, so `wait` gets the code either way.
+    for mut waiter in lock(&waiters).drain(..) {
+        let _ = send(waiter.as_mut(), &Notice::Exited { code });
+    }
     if auto_remove && let Err(e) = containers.remove(id) {
         let _ = writeln!(log, "oci-hermit monitor: removing the container: {e}");
     }
@@ -483,7 +493,11 @@ struct Shared {
     execs: SharedExecs,
     /// The agent answered, and speaks a protocol older than 1.6: it takes no signals.
     old_agent: Arc<AtomicBool>,
+    /// `wait` clients, told the exit code once it is recorded.
+    waiters: Waiters,
 }
+
+type Waiters = Arc<Mutex<Vec<Box<dyn Write + Send>>>>;
 
 impl Shared {
     /// Stops the container: its stop signal (or `signal`), then after `timeout` seconds the sandbox is powered off.
@@ -581,6 +595,7 @@ fn accept(
                     };
                     let _ = send(writer.as_mut(), &notice);
                 }
+                Some(Request::Wait) => lock(&shared.waiters).push(writer),
                 _ => {}
             }
         });
@@ -620,7 +635,7 @@ fn run(
                 }
                 true
             }
-            Request::Attach | Request::Exec { .. } => true,
+            Request::Attach | Request::Exec { .. } | Request::Wait => true,
         });
         // A foreground run whose oci-hermit went away stops with it.
         if !detach {
@@ -869,6 +884,66 @@ pub fn stop_command(
     code
 }
 
+/// `wait`: blocks until each container has ended and prints its exit code, in the order asked, as `docker wait`
+/// does; one that has already ended prints the code it ended with (-1 when that is unknown). 1 if any is not found.
+pub fn wait_command(
+    containers: &Containers,
+    data_dir: &Path,
+    wanted: &[String],
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> u8 {
+    let results: Vec<Result<i32, String>> = std::thread::scope(|scope| {
+        let waiting: Vec<_> = wanted
+            .iter()
+            .map(|name| scope.spawn(move || wait(containers, data_dir, name)))
+            .collect();
+        waiting
+            .into_iter()
+            .map(|t| t.join().unwrap_or_else(|_| Err("waiting for it failed".into())))
+            .collect()
+    });
+    let mut status = 0;
+    for result in results {
+        match result {
+            Ok(code) => {
+                let _ = writeln!(out, "{code}");
+            }
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                status = 1;
+            }
+        }
+    }
+    status
+}
+
+/// One container's exit code: from its monitor when it is running, otherwise as recorded.
+fn wait(containers: &Containers, data_dir: &Path, name: &str) -> Result<i32, String> {
+    let listed = containers.find(name).map_err(|e| e.to_string())?;
+    if listed.running
+        && let Ok(mut conn) = ipc::connect(data_dir, &listed.container.id)
+        && send(conn.writer.as_mut(), &Request::Wait).is_ok()
+        && let Some(Notice::Exited { code }) = read_one(conn.reader.as_mut())
+    {
+        return Ok(code);
+    }
+    // It ended before its monitor could answer: once the monitor lets go of it, its record says how.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match containers.find(&listed.container.id) {
+            Ok(l) if !l.running => return Ok(l.state.exit_code.unwrap_or(-1)),
+            Ok(_) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(_) => return Err(format!("container {name}: its monitor does not answer")),
+            Err(_) => {
+                return Err(format!(
+                    "container {name} was removed before its exit code could be read"
+                ));
+            }
+        }
+    }
+}
+
 /// `kill`: sends `signal` to each running container's command, printing each as it was asked for; 1 if any is not
 /// running or could not be signalled. What the signal does is up to the command.
 pub fn kill_command(
@@ -884,7 +959,10 @@ pub fn kill_command(
         let sent = containers.find(name).map_err(|e| e.to_string()).and_then(|l| {
             let container = &l.container.name;
             if !l.running {
-                return Err(format!("container {container} is not running"));
+                return Err(format!(
+                    "cannot kill container: {name}: container {} is not running",
+                    l.container.id
+                ));
             }
             let mut conn = ipc::connect(data_dir, &l.container.id)
                 .map_err(|e| format!("could not signal container {container}: cannot reach its monitor: {e}"))?;
