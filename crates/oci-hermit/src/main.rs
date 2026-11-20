@@ -291,6 +291,16 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
+        cli::Command::Wait { containers: wanted } => match open_containers(env) {
+            Ok(c) => {
+                let data_dir = env.data_dir.as_deref().expect("the container store opened");
+                monitor::wait_command(&c, data_dir, wanted, out, err)
+            }
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         cli::Command::Logs { container, follow } => match open_containers(env)
             .map_err(Into::into)
             .and_then(|c| monitor::logs(&c, container, *follow, out, err))
@@ -2450,7 +2460,49 @@ mod tests {
         assert!(out.contains("Exited (137)"), "{out}");
         let (code, _, err) = run_with(&env, &["kill", "web"]);
         assert_eq!(code, 1);
-        assert!(err.contains("container web is not running"), "{err}");
+        assert!(
+            err.contains(&format!("cannot kill container: web: container {id} is not running")),
+            "Docker's message: {err}"
+        );
+        // wait on a container that has ended prints the code it ended with, as docker wait does.
+        let (code, out, err) = run_with(&env, &["wait", "web"]);
+        assert_eq!((code, out.as_str()), (0, "137\n"), "{err}");
+
+        // wait blocks until a running container ends, then prints its code, for each one in the order asked; a
+        // `--rm` one too, though its record is gone by then.
+        assert_eq!(detached("patient").0, 0);
+        let (code, out, err) = run_with(
+            &env,
+            &[
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                "brief",
+                "--platform",
+                "linux/amd64",
+                image,
+                "wait",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let brief = out.trim_end().to_string();
+        let waited = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| run_with(&env, &["wait", "patient", &brief[..12], "web"]));
+            // Until both are stopped it is still waiting.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(!waiting.is_finished(), "wait returned while the containers ran");
+            assert_eq!(run_with(&env, &["kill", "-s", "TERM", "patient"]).0, 0);
+            // The fake command ends only on SIGTERM; a real one dies of kill's default SIGKILL.
+            assert_eq!(run_with(&env, &["kill", "-s", "TERM", "brief"]).0, 0);
+            waiting.join().unwrap()
+        });
+        assert_eq!((waited.0, waited.1.as_str()), (0, "143\n143\n137\n"), "{}", waited.2);
+        assert!(!run_with(&env, &["ps", "-a"]).1.contains("brief"), "--rm removed it");
+        let (code, out, err) = run_with(&env, &["wait", "patient", "ghost"]);
+        assert_eq!((code, out.as_str()), (1, "143\n"));
+        assert!(err.contains("no such container: ghost"), "{err}");
+        assert_eq!(run_with(&env, &["rm", "patient"]).0, 0);
 
         // rm will not remove a running container; stop sends it SIGTERM, which this one exits on.
         assert_eq!(detached("calm").0, 0);

@@ -103,6 +103,11 @@ pub enum Command {
         #[arg(required = true)]
         containers: Vec<String>,
     },
+    /// Block until one or more containers stop, then print their exit codes
+    Wait {
+        #[arg(required = true)]
+        containers: Vec<String>,
+    },
     /// Remove one or more containers
     Rm {
         /// Stop running containers first
@@ -152,6 +157,7 @@ impl Command {
             Command::Ps { .. } => "ps",
             Command::Stop { .. } => "stop",
             Command::Kill { .. } => "kill",
+            Command::Wait { .. } => "wait",
             Command::Rm { .. } => "rm",
             Command::Cp { .. } => "cp",
             Command::Pod(_) => "pod",

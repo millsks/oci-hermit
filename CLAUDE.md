@@ -112,7 +112,8 @@ Everything runs through pixi.
   (`Env::start_monitor` = `monitor::testing::in_thread`). `stop` sends the image's `StopSignal` (SIGTERM) through
   `Signal` (protocol 1.6, `crun kill` in the guest), then powers the sandbox off after `-t` (10 s; 137); `kill` and
   Ctrl-C at a foreground `run` (tokio `signal`) send `Signal` too. A container's command is PID 1 of its namespace,
-  so signals it has no handler for are ignored: `stop` on `sleep` takes the full grace period, as in Docker. `exec` (protocol 1.5) is another connection to the monitor: it sends `Exec` with a process number from 1
+  so signals it has no handler for are ignored: `stop` on `sleep` takes the full grace period, as in Docker. `wait` (#78) sends
+  `Wait` to each monitor at once; the monitor answers `Exited` after recording the state and before `--rm` removes it. `exec` (protocol 1.5) is another connection to the monitor: it sends `Exec` with a process number from 1
   (`run`'s command is 0, and `process` is left out of messages about it, so 1.4 peers are unaffected); the agent
   runs it with `crun exec --process`, and `relay` routes its I/O to that client only, never to `container.log`.
   `exec -u` resolves against the image's `/etc/passwd` and `/etc/group`, which `run` saves in `launch.json`

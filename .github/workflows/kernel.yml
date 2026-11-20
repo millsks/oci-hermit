@@ -237,6 +237,11 @@ jobs:
           "$hermit" kill -s HUP hup
           [ "$(timeout 120 "$hermit" logs -f hup)" = $'ready\nhup' ]
           "$hermit" ps -a | grep ' hup$' | grep -q 'Exited (9)'
+          # wait prints the code it ended with (#78); kill refuses it now, as Docker does.
+          [ "$("$hermit" wait hup)" = 9 ]
+          if "$hermit" kill hup 2> kill.err || ! grep -q 'cannot kill container: hup: container .* is not running' kill.err; then
+            cat kill.err; exit 1
+          fi
           # A foreground run passes the signals it gets on to its container, as docker run does.
           # shellcheck disable=SC2016 # runs in the guest's shell
           "$hermit" run debian.tar sh -c 'trap "echo caught; exit 5" TERM; echo ready; while :; do sleep 1; done' > fg.out &
