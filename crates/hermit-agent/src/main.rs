@@ -6,6 +6,8 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
+mod copy;
 #[cfg(any(target_os = "linux", test))]
 mod init;
 #[cfg(target_os = "linux")]
