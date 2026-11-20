@@ -262,6 +262,13 @@ jobs:
           code=0; timeout 120 tail --pid="$fg" -f /dev/null || code=124
           [ "$code" = 0 ] && { wait "$fg" || code=$?; }
           [ "$code" = 5 ] && [ "$(cat fg.out)" = $'ready\ncaught' ] || { echo "::error::exit $code: $(cat fg.out)"; exit 1; }
+          # container prune (#82) removes every stopped container and never a running one.
+          "$hermit" run -d --name stays debian.tar sleep 600 > /dev/null
+          "$hermit" container prune -f | tee prune.out
+          grep -q '^Total reclaimed space: ' prune.out
+          if [ "$("$hermit" ps -aq | wc -l)" != 1 ] || ! "$hermit" ps | grep -q ' stays$'; then "$hermit" ps -a; exit 1; fi
+          "$hermit" system df | grep -Eq '^Containers +1 +1 '
+          "$hermit" rm -f stays > /dev/null
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
         run: cat "${{ runner.temp }}"/oci-hermit/sandbox-*/console.log "${{ runner.temp }}"/oci-hermit/sandbox-*/qemu.log || true

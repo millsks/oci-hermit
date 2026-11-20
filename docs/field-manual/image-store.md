@@ -135,16 +135,17 @@ A name that matches nothing prints `oci-hermit: no such image: …`, and `rmi` e
 
 ## Free space
 
-`system df` shows how much the store holds:
+`system df` shows how much the store and the containers hold:
 
 ```console
 $ oci-hermit system df
 TYPE         TOTAL   ACTIVE   SIZE      RECLAIMABLE
-Images       3       0        35.9 MB   35.9 MB (100%)
-Containers   0       0        0 B       0 B
+Images       3       1        35.9 MB   7.4 MB (20%)
+Containers   4       1        52.1 kB   48.6 kB (93%)
 ```
 
-There are no containers yet, so every image counts as reclaimable.
+An image a container was made from is active, and what only the other images need is reclaimable. Stopped
+containers are reclaimable too: `container prune` removes them.
 
 `image prune` removes images loaded without a name, and any blob nothing uses (for example the layers of an image
 that was loaded again from a different archive). It asks first; `-f` skips the question, and `-a` removes every

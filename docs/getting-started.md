@@ -301,7 +301,7 @@ oci-hermit image exists alpine && echo stored     # exit 0 if stored, 1 if not
 oci-hermit save -o alpine.tar alpine              # every platform stored; --platform for one
 oci-hermit rmi mine/alpine:test                   # removes the name; blobs go when nothing uses them
 oci-hermit image prune                            # images loaded without a name; -a for every image
-oci-hermit system df                              # how much space the store uses
+oci-hermit system df                              # how much space images and containers use
 ```
 
 - **Names and IDs:** images go by their full name (`docker.io/library/alpine:latest`; `alpine` means the same) or by
