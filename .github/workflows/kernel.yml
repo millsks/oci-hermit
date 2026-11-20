@@ -108,8 +108,11 @@ jobs:
           cp -R "guest/out/$arch/licenses" "guest/out/sandbox/$arch/licenses"
           pixi run -e package python -I packaging/licenses.py glibc "guest/out/sandbox/$arch" "$PWD/.pixi/envs/agent"
           pixi run -e package python -I packaging/licenses.py crun "guest/out/sandbox/$arch" "guest/out/crun-$arch"
+          pixi run -e package python -I packaging/licenses.py seccomp "guest/out/sandbox/$arch" crates/hermit-agent/seccomp
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
       - name: Run commands from a Debian image
+        # About 2 minutes when it works; a hang must not hold the runner for the 6-hour job limit.
+        timeout-minutes: 20
         env:
           OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}/qemu/out
           OCI_HERMIT_GUEST_DIR: ${{ github.workspace }}/guest/out/sandbox
@@ -159,6 +162,15 @@ jobs:
           grep -qx 'sys-read-only' <<< "$inside"
           # Another user gets no capabilities at all.
           grep -qx 'CapEff:.0000000000000000' <<< "$("$hermit" run -u nobody debian.tar grep CapEff /proc/self/status)"
+          # Docker's default seccomp profile (#102): a filter is on, and what it blocks fails with EPERM, keyctl
+          # included, which no capability guards. Raw syscalls (perl-base is in every Debian image), by number:
+          # unshare, mount, keyctl.
+          [ "$("$hermit" run debian.tar sh -c 'grep "^Seccomp:" /proc/self/status | cut -f2')" = 2 ]
+          # shellcheck disable=SC2016 # runs in the guest's perl
+          errnos=$("$hermit" run debian.tar perl -e '
+            my @n = `uname -m` =~ /x86_64/ ? (272, 165, 250) : (97, 40, 219);
+            print join(" ", map { syscall($_, 0, 0, 0, 0, 0) == -1 ? $!+0 : "ok" } @n), "\n"')
+          [ "$errnos" = "1 1 1" ] || { echo "::error::unshare, mount, keyctl gave '$errnos', expected EPERM (1) each"; exit 1; }
           # A command the image does not have fails before the container starts.
           set +e
           "$hermit" run debian.tar no-such-command 2> missing.err
@@ -184,6 +196,7 @@ jobs:
           "$hermit" exec idle sh -c 'echo shared > /tmp/note'
           [ "$("$hermit" exec idle cat /tmp/note)" = shared ] || { echo "::error::exec did not share the container's files"; exit 1; }
           [ "$("$hermit" exec -u nobody idle id -u)" = 65534 ]
+          [ "$("$hermit" exec idle sh -c 'grep "^Seccomp:" /proc/self/status | cut -f2')" = 2 ]
           # shellcheck disable=SC2016 # expands in the guest's shell
           [ "$("$hermit" exec -w /tmp -e GREETING=hello idle sh -c 'echo "$GREETING from $(pwd)"')" = "hello from /tmp" ]
           [ "$(echo piped | "$hermit" exec -i idle cat)" = piped ]
@@ -195,11 +208,13 @@ jobs:
           "$hermit" rm -f idle
           if "$hermit" ps -a | grep -q ' idle$'; then echo "::error::rm -f left idle"; exit 1; fi
           # stop sends SIGTERM first: a command that handles it ends on its own terms.
+          # Each waits for "ready" first: a signal sent before the trap is set is ignored by PID 1, and the test hangs.
           # shellcheck disable=SC2016 # runs in the guest's shell
-          "$hermit" run -d --name calm debian.tar sh -c 'trap "echo bye; exit 0" TERM; while :; do sleep 1; done' > /dev/null
+          "$hermit" run -d --name calm debian.tar sh -c 'trap "echo bye; exit 0" TERM; echo ready; while :; do sleep 1; done' > /dev/null
+          for _ in $(seq 120); do "$hermit" logs calm | grep -q ready && break; sleep 1; done
           "$hermit" stop calm
           "$hermit" ps -a | grep ' calm$' | grep -q 'Exited (0)' || { "$hermit" ps -a; exit 1; }
-          [ "$("$hermit" logs calm)" = bye ]
+          [ "$("$hermit" logs calm)" = $'ready\nbye' ]
           # One that ignores it (sleep as PID 1 has no handler) is killed when -t runs out.
           "$hermit" run -d --name stubborn debian.tar sleep 1000 > /dev/null
           start=$SECONDS
@@ -208,9 +223,10 @@ jobs:
           "$hermit" ps -a | grep ' stubborn$' | grep -q 'Exited (137)'
           # kill passes any signal on.
           # shellcheck disable=SC2016 # runs in the guest's shell
-          "$hermit" run -d --name hup debian.tar sh -c 'trap "echo hup; exit 9" HUP; while :; do sleep 1; done' > /dev/null
+          "$hermit" run -d --name hup debian.tar sh -c 'trap "echo hup; exit 9" HUP; echo ready; while :; do sleep 1; done' > /dev/null
+          for _ in $(seq 120); do "$hermit" logs hup | grep -q ready && break; sleep 1; done
           "$hermit" kill -s HUP hup
-          [ "$("$hermit" logs -f hup)" = hup ]
+          [ "$(timeout 120 "$hermit" logs -f hup)" = $'ready\nhup' ]
           "$hermit" ps -a | grep ' hup$' | grep -q 'Exited (9)'
           # A foreground run passes the signals it gets on to its container, as docker run does.
           # shellcheck disable=SC2016 # runs in the guest's shell
@@ -218,7 +234,8 @@ jobs:
           fg=$!
           for _ in $(seq 120); do grep -q ready fg.out && break; sleep 1; done
           kill -TERM "$fg"
-          code=0; wait "$fg" || code=$?
+          code=0; timeout 120 tail --pid="$fg" -f /dev/null || code=124
+          [ "$code" = 0 ] && { wait "$fg" || code=$?; }
           [ "$code" = 5 ] && [ "$(cat fg.out)" = $'ready\ncaught' ] || { echo "::error::exit $code: $(cat fg.out)"; exit 1; }
       - name: Show the sandbox console
         if: ${{ !cancelled() }}

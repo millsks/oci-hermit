@@ -100,6 +100,7 @@ jobs:
           cp -R "guest/out/$arch/licenses" "$dest/licenses"
           pixi run -e package python -I packaging/licenses.py glibc "$dest" "$PWD/.pixi/envs/agent"
           pixi run -e package python -I packaging/licenses.py crun "$dest" "guest/out/crun-$arch"
+          pixi run -e package python -I packaging/licenses.py seccomp "$dest" crates/hermit-agent/seccomp
           ls -lR "$dest"
       - uses: actions/upload-artifact@v7
         with:

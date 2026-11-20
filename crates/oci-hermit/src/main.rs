@@ -2174,7 +2174,16 @@ mod tests {
             row.contains(" Up ") && row.ends_with("web") && row.starts_with(&id[..12]),
             "{out}"
         );
-        let (code, out, err) = run_with(&env, &["logs", "web"]);
+        // `Started` can arrive before the monitor has logged the command's first output, so give it a moment.
+        let mut logged = run_with(&env, &["logs", "web"]);
+        for _ in 0..100 {
+            if !logged.1.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            logged = run_with(&env, &["logs", "web"]);
+        }
+        let (code, out, err) = logged;
         assert_eq!((code, out.as_str(), err.as_str()), (0, "hi\n", ""));
 
         // exec runs another command in it, by name or ID, and exits with that command's code; its output is not

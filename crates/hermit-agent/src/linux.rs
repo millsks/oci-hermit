@@ -579,7 +579,12 @@ impl System for Linux {
         std::fs::create_dir_all(BUNDLE).map_err(fs_error(format!("creating {BUNDLE}")))?;
         std::fs::write(format!("{BUNDLE}/hosts"), init::hosts_file(&spec.hostname))?;
         std::fs::write(format!("{BUNDLE}/hostname"), format!("{}\n", spec.hostname))?;
-        let config = serde_json::to_vec_pretty(&init::container_config(spec, BUNDLE)).map_err(io::Error::other)?;
+        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map_err(fs_error("reading the kernel's version".into()))?;
+        let kernel = init::kernel_version(&release).unwrap_or((0, 0));
+        let seccomp = init::default_seccomp(std::env::consts::ARCH, kernel);
+        let config = init::container_config(spec, BUNDLE, seccomp);
+        let config = serde_json::to_vec_pretty(&config).map_err(io::Error::other)?;
         std::fs::write(format!("{BUNDLE}/config.json"), config).map_err(fs_error("writing config.json".into()))?;
         let socket = format!("{BUNDLE}/console.sock");
         let console = console_listener(spec.tty, &socket)?;

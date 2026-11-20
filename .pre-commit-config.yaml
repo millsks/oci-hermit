@@ -8,9 +8,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
+        # Vendored as published, byte for byte: its sha256 is recorded.
+        exclude: ^crates/hermit-agent/seccomp/default\.json$
       - id: trailing-whitespace
-        # A unified diff's blank context lines are a single space.
-        exclude: ^qemu/patches/
+        # A unified diff's blank context lines are a single space; vendored files stay as published.
+        exclude: ^(qemu/patches/|crates/hermit-agent/seccomp/default\.json$)
       - id: check-yaml
         # mkdocs.yml names a Python function with a !!python/name tag (the Mermaid fence); check its syntax only.
         args: [--unsafe]
