@@ -111,6 +111,8 @@ jobs:
           pixi run -e package python -I packaging/licenses.py seccomp "guest/out/sandbox/$arch" crates/hermit-agent/seccomp
           pixi run cargo run -q -p oci-hermit -- machine boot --arch "$arch" --timeout 180
       - name: Run commands from a Debian image
+        # About 2 minutes when it works; a hang must not hold the runner for the 6-hour job limit.
+        timeout-minutes: 20
         env:
           OCI_HERMIT_QEMU_DIR: ${{ github.workspace }}/qemu/out
           OCI_HERMIT_GUEST_DIR: ${{ github.workspace }}/guest/out/sandbox
@@ -206,11 +208,13 @@ jobs:
           "$hermit" rm -f idle
           if "$hermit" ps -a | grep -q ' idle$'; then echo "::error::rm -f left idle"; exit 1; fi
           # stop sends SIGTERM first: a command that handles it ends on its own terms.
+          # Each waits for "ready" first: a signal sent before the trap is set is ignored by PID 1, and the test hangs.
           # shellcheck disable=SC2016 # runs in the guest's shell
-          "$hermit" run -d --name calm debian.tar sh -c 'trap "echo bye; exit 0" TERM; while :; do sleep 1; done' > /dev/null
+          "$hermit" run -d --name calm debian.tar sh -c 'trap "echo bye; exit 0" TERM; echo ready; while :; do sleep 1; done' > /dev/null
+          for _ in $(seq 120); do "$hermit" logs calm | grep -q ready && break; sleep 1; done
           "$hermit" stop calm
           "$hermit" ps -a | grep ' calm$' | grep -q 'Exited (0)' || { "$hermit" ps -a; exit 1; }
-          [ "$("$hermit" logs calm)" = bye ]
+          [ "$("$hermit" logs calm)" = $'ready\nbye' ]
           # One that ignores it (sleep as PID 1 has no handler) is killed when -t runs out.
           "$hermit" run -d --name stubborn debian.tar sleep 1000 > /dev/null
           start=$SECONDS
@@ -219,9 +223,10 @@ jobs:
           "$hermit" ps -a | grep ' stubborn$' | grep -q 'Exited (137)'
           # kill passes any signal on.
           # shellcheck disable=SC2016 # runs in the guest's shell
-          "$hermit" run -d --name hup debian.tar sh -c 'trap "echo hup; exit 9" HUP; while :; do sleep 1; done' > /dev/null
+          "$hermit" run -d --name hup debian.tar sh -c 'trap "echo hup; exit 9" HUP; echo ready; while :; do sleep 1; done' > /dev/null
+          for _ in $(seq 120); do "$hermit" logs hup | grep -q ready && break; sleep 1; done
           "$hermit" kill -s HUP hup
-          [ "$("$hermit" logs -f hup)" = hup ]
+          [ "$(timeout 120 "$hermit" logs -f hup)" = $'ready\nhup' ]
           "$hermit" ps -a | grep ' hup$' | grep -q 'Exited (9)'
           # A foreground run passes the signals it gets on to its container, as docker run does.
           # shellcheck disable=SC2016 # runs in the guest's shell
@@ -229,7 +234,8 @@ jobs:
           fg=$!
           for _ in $(seq 120); do grep -q ready fg.out && break; sleep 1; done
           kill -TERM "$fg"
-          code=0; wait "$fg" || code=$?
+          code=0; timeout 120 tail --pid="$fg" -f /dev/null || code=124
+          [ "$code" = 0 ] && { wait "$fg" || code=$?; }
           [ "$code" = 5 ] && [ "$(cat fg.out)" = $'ready\ncaught' ] || { echo "::error::exit $code: $(cat fg.out)"; exit 1; }
       - name: Show the sandbox console
         if: ${{ !cancelled() }}
