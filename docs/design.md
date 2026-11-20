@@ -203,7 +203,7 @@ oci-hermit machine boot [--arch x86_64|aarch64]   # boot a sandbox until its age
 | `--network` | Only `none` and pod-shared; no bridge or host |
 | Refused flags | `--privileged`, `--cap-add`, `--device`, host PID or IPC namespaces |
 | `-v` | Read-only unless `:rw` |
-| `--cpus`, `--memory` | Size the emulated VM |
+| `--cpus`, `--memory` | Limit the container, as Docker does, with its cgroup; the emulated VM is sized to fit (a vCPU per CPU started, 128 MiB over the memory limit) |
 | Compose | `services`, `image`, `ports`, `environment`, `command`, `depends_on`, `healthcheck`, `volumes`; `build:` rejected |
 
 A Compose project runs as one pod in one sandbox VM.

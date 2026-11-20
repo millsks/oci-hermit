@@ -350,6 +350,7 @@ fn exec_command(launch: &Launch, request: &Request) -> Result<supervisor::Comman
         user,
         layers: Vec::new(),
         hostname: None,
+        limits: hermit_proto::Limits::default(),
     })
 }
 
@@ -1123,6 +1124,7 @@ mod tests {
                 user,
                 layers: vec!["layer0".into()],
                 hostname: Some("4f2a9c1d0b3e".into()),
+                limits: hermit_proto::Limits::default(),
             },
             interactive: false,
             detach: true,
@@ -1289,6 +1291,7 @@ mod tests {
                 user: None,
                 layers: Vec::new(),
                 hostname: None,
+                limits: hermit_proto::Limits::default(),
             },
             interactive: true,
             detach: false,

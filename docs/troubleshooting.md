@@ -149,7 +149,9 @@ store does not have also leads to a pull.
 | `the container name "<name>" is already in use by container …` | A kept container has that name. Remove it (`oci-hermit rm <name>`), or choose another name; `--rm` stops runs from keeping their containers. |
 | `container <name> is not running` | From `exec`: it runs commands only in a running container. Start one with `run -d`. |
 | `the guest agent speaks control protocol 1.4, which has no exec; it needs 1.5 or later` | The container was started with an older `guest/` folder. Use the one that came with this `oci-hermit`, and start the container again. |
-| `--memory 10m: use e.g. 512m or 2g, at least 64m` | `-m` needs a size with a unit, at least 64 MiB. |
+| `--memory 1m: use e.g. 512m or 2g, at least 6m` | `-m` needs a size with a unit, at least 6 MiB, as in Docker. |
+| `--cpus 16: the range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs available` | As with Docker, `--cpus` may not exceed the host's CPUs. |
+| `this guest agent cannot limit a container's CPUs or memory (it speaks control protocol 1.6, and that needs 1.7)` | `--cpus` or `-m` with an older `guest/` folder. Use the one that came with this `oci-hermit`, or run without them. |
 | `unsupported --platform …` | Only `linux/amd64` and `linux/arm64` run. |
 
 All of these make `run` (or `exec`) exit with 125.

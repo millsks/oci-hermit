@@ -31,12 +31,15 @@
 //!
 //! Since 1.6 the host can [`HostMessage::Signal`] the container's command (`stop`, `kill`, Ctrl-C), which the agent
 //! passes on with `crun kill`. Signals are Linux's numbers ([`signal_number`]), the same on every guest architecture.
+//!
+//! Since 1.7 `Run` can carry the container's [`Limits`] (`--cpus`, `--memory`), which the agent applies with its
+//! cgroup. An older agent would ignore them, so the host refuses one when there are limits to apply.
 
 use serde::{Deserialize, Serialize};
 
 /// Protocol version, `(major, minor)`. A different major version is refused; a newer minor adds only messages or
 /// fields the other side may ignore.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 6);
+pub const PROTOCOL_VERSION: (u16, u16) = (1, 7);
 
 /// The virtio-serial port name the control channel uses.
 pub const CONTROL_PORT: &str = "org.oci-hermit.control";
@@ -99,6 +102,9 @@ pub enum HostMessage {
         /// The container's hostname (1.4); the agent picks one when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hostname: Option<String>,
+        /// The container's CPU and memory limits (1.7); none when absent.
+        #[serde(default, skip_serializing_if = "Limits::is_none")]
+        limits: Limits,
     },
     /// Bytes for a command's stdin, base64-encoded (1.1).
     Stdin {
@@ -142,6 +148,23 @@ pub struct User {
     /// Supplementary group IDs.
     #[serde(default)]
     pub groups: Vec<u32>,
+}
+
+/// A container's resource limits, as Docker's `--cpus` and `--memory` set them; `None` is no limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limits {
+    /// CPU time in billionths of a CPU (Docker's `NanoCpus`): 1.5 CPUs is 1 500 000 000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nano_cpus: Option<u64>,
+    /// Memory in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<u64>,
+}
+
+impl Limits {
+    pub fn is_none(&self) -> bool {
+        self.nano_cpus.is_none() && self.memory.is_none()
+    }
 }
 
 /// Linux's signal names, as `docker kill -s` and an image's `StopSignal` give them, by number.
@@ -444,13 +467,31 @@ mod tests {
             }),
             layers: vec!["layer0".into(), "layer1".into()],
             hostname: Some("4f2a9c1d0b3e".into()),
+            limits: Limits {
+                nano_cpus: Some(1_500_000_000),
+                memory: Some(1 << 30),
+            },
         };
         assert_eq!(decode::<HostMessage>(&encode(&run).unwrap()).unwrap(), run);
+        // No limits leaves the field out, so a 1.6 agent sees what it knows.
+        let unlimited = HostMessage::Run {
+            argv: vec!["id".into()],
+            env: vec![],
+            cwd: "/".into(),
+            tty: false,
+            rows: None,
+            cols: None,
+            user: None,
+            layers: vec![],
+            hostname: None,
+            limits: Limits::default(),
+        };
+        assert!(!encode(&unlimited).unwrap().contains("limits"));
         // A 1.1 host sends no user, a 1.2 host no layers and a 1.3 host no hostname, and that still decodes.
         let old = r#"{"type":"run","argv":["id"],"env":[],"cwd":"/","tty":false}"#;
         assert!(matches!(
             decode::<HostMessage>(old).unwrap(),
-            HostMessage::Run { user: None, ref layers, hostname: None, .. } if layers.is_empty()
+            HostMessage::Run { user: None, ref layers, hostname: None, limits, .. } if layers.is_empty() && limits.is_none()
         ));
         let output = GuestMessage::Output {
             process: MAIN,

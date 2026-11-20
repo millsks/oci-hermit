@@ -145,8 +145,10 @@ guest (kernel and agent each sandbox boots):
   aarch64:    /Users/me/oci-hermit/guest/aarch64 (kernel 5.9 MB, agent 1.2 MB, found beside oci-hermit)
 
 sandbox defaults for run:
-  cpus:       1 (--cpus)
-  memory:     512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB (--memory)
+  cpus:       1 emulated CPU, no limit (--cpus 1.5: 2 CPUs, the container held to 1.5; at most 8, the host's)
+  memory:     512 MiB for a stored image (its layers are disks); twice the size of one run from a file, plus 256 MiB
+              (-m 1g: the container held to 1 GiB, in a sandbox 128 MiB larger, plus any image in memory)
+  limits:     `inspect <container>` shows a container's limits and its sandbox
   network:    none: no egress; -p (127.0.0.1 only) is not implemented yet
   run dir:    /var/folders/kb/…/T/oci-hermit (a sandbox-* folder per run: initramfs, console.log, qemu.log)
 

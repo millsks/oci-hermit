@@ -886,6 +886,7 @@ mod tests {
             size: None,
             user: None,
             hostname: init::DEFAULT_HOSTNAME.into(),
+            limits: hermit_proto::Limits::default(),
         };
         assert_eq!(sys.start(&spec).unwrap_err().kind(), ErrorKind::AlreadyExists);
         assert_eq!(sys.exec(MAIN, &spec).unwrap_err().kind(), ErrorKind::AlreadyExists);

@@ -171,6 +171,15 @@ jobs:
             my @n = `uname -m` =~ /x86_64/ ? (272, 165, 250) : (97, 40, 219);
             print join(" ", map { syscall($_, 0, 0, 0, 0, 0) == -1 ? $!+0 : "ok" } @n), "\n"')
           [ "$errnos" = "1 1 1" ] || { echo "::error::unshare, mount, keyctl gave '$errnos', expected EPERM (1) each"; exit 1; }
+          # --cpus and -m (#24): a vCPU for each CPU started, and the container's cgroup holds it to the limits.
+          limits=$("$hermit" run --cpus 1.5 -m 64m debian.tar sh -c 'nproc; cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max')
+          [ "$limits" = $'2\n150000 100000\n67108864' ] || { echo "::error::--cpus 1.5 -m 64m gave: $limits"; exit 1; }
+          [ "$("$hermit" run debian.tar sh -c 'nproc; cat /sys/fs/cgroup/memory.max')" = $'1\nmax' ]
+          # More than the limit is the kernel's OOM kill, 137, as in Docker.
+          code=0
+          # shellcheck disable=SC2016 # runs in the guest's perl
+          "$hermit" run -m 64m debian.tar perl -e '$x = "a" x (200 * 1024 * 1024)' || code=$?
+          [ "$code" = 137 ] || { echo "::error::200 MB in a 64m container exited with $code, not 137"; exit 1; }
           # A command the image does not have fails before the container starts.
           set +e
           "$hermit" run debian.tar no-such-command 2> missing.err

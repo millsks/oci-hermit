@@ -344,10 +344,10 @@ pub struct RunArgs {
     /// Image platform, e.g. linux/amd64 or linux/arm64
     #[arg(long)]
     pub platform: Option<String>,
-    /// Number of emulated CPUs
+    /// CPUs the container may use, e.g. 1.5; the sandbox gets a vCPU for each one started
     #[arg(long)]
-    pub cpus: Option<u32>,
-    /// Memory for the sandbox, e.g. 1g or 512m
+    pub cpus: Option<String>,
+    /// Memory the container may use, e.g. 1g or 512m; the sandbox gets 128 MiB more
     #[arg(short, long)]
     pub memory: Option<String>,
     /// Run as this user instead of the image's: name|uid[:group|gid]
