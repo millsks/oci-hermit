@@ -129,6 +129,10 @@ pub enum Request {
     },
     /// `wait`: answered with [`Notice::Exited`] once the container has ended and its exit code is recorded.
     Wait,
+    /// `attach`: answered with [`Notice::Started`], then the container's output from now on, and
+    /// [`Notice::Exited`] and [`Notice::Done`] when it ends. The connection may carry stdin (taken when the container
+    /// was started with `-i`) and signals; hanging up detaches.
+    Join,
 }
 
 /// What a monitor tells its clients.
@@ -186,7 +190,7 @@ pub fn read_messages<T: DeserializeOwned>(mut from: impl Read, mut each: impl Fn
 
 /// One message, read a byte at a time so nothing after it is taken from the reader: the first line on a new
 /// connection says what it is for.
-fn read_one<T: DeserializeOwned>(from: &mut dyn Read) -> Option<T> {
+pub fn read_one<T: DeserializeOwned>(from: &mut dyn Read) -> Option<T> {
     let mut line = Vec::new();
     let mut byte = [0u8];
     while line.len() < hermit_proto::MAX_LINE {
@@ -426,18 +430,20 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     let old_agent = Arc::new(AtomicBool::new(false));
     let execs = Execs::new();
     let waiters: Waiters = Arc::new(Mutex::new(Vec::new()));
+    let joined: Waiters = Arc::new(Mutex::new(Vec::new()));
     let outcome = match ipc::Listener::bind(data_dir, id) {
         Ok(listener) => {
             let accepting = {
                 let (owner, to_run, finished) = (owner.clone(), to_run.clone(), finished.clone());
                 let (launch, execs, old_agent) = (launch.clone(), execs.clone(), old_agent.clone());
-                let waiters = waiters.clone();
+                let (waiters, joined) = (waiters.clone(), joined.clone());
                 std::thread::spawn(move || {
                     let shared = Shared {
                         launch,
                         execs,
                         old_agent,
                         waiters,
+                        joined,
                     };
                     accept(listener, &owner, attached_tx, &to_run, &finished, &shared);
                 })
@@ -447,6 +453,7 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
                 execs: execs.clone(),
                 old_agent,
                 waiters: waiters.clone(),
+                joined: joined.clone(),
             };
             let outcome = run(&shared, &dir, &owner, &attached, to_run, &input, log);
             lock(&execs).close();
@@ -479,6 +486,9 @@ fn monitor(data_dir: &Path, id: &str, log: &mut dyn Write) -> Result<(), Box<dyn
     for mut waiter in lock(&waiters).drain(..) {
         let _ = send(waiter.as_mut(), &Notice::Exited { code });
     }
+    for mut client in lock(&joined).drain(..) {
+        let _ = send(client.as_mut(), &Notice::Exited { code }).and_then(|()| send(client.as_mut(), &Notice::Done));
+    }
     if auto_remove && let Err(e) = containers.remove(id) {
         let _ = writeln!(log, "oci-hermit monitor: removing the container: {e}");
     }
@@ -495,6 +505,8 @@ struct Shared {
     old_agent: Arc<AtomicBool>,
     /// `wait` clients, told the exit code once it is recorded.
     waiters: Waiters,
+    /// `attach` clients, given the output as it comes.
+    joined: Waiters,
 }
 
 type Waiters = Arc<Mutex<Vec<Box<dyn Write + Send>>>>;
@@ -596,6 +608,24 @@ fn accept(
                     let _ = send(writer.as_mut(), &notice);
                 }
                 Some(Request::Wait) => lock(&shared.waiters).push(writer),
+                Some(Request::Join) => {
+                    if send(writer.as_mut(), &Notice::Started).is_err() {
+                        return;
+                    }
+                    lock(&shared.joined).push(writer);
+                    let interactive = shared.launch.interactive;
+                    // Until it hangs up: its input, if the container takes any, and its signals.
+                    read_messages(reader, |request: Request| match request {
+                        Request::Stdin { data } if interactive => {
+                            b64::decode(&data).is_some_and(|bytes| to_run.send(Input::Data(MAIN, bytes)).is_ok())
+                        }
+                        Request::Signal { signal } => {
+                            let _ = shared.signal(&to_run, signal);
+                            true
+                        }
+                        _ => true,
+                    });
+                }
                 _ => {}
             }
         });
@@ -635,7 +665,7 @@ fn run(
                 }
                 true
             }
-            Request::Attach | Request::Exec { .. } | Request::Wait => true,
+            Request::Attach | Request::Exec { .. } | Request::Wait | Request::Join => true,
         });
         // A foreground run whose oci-hermit went away stops with it.
         if !detach {
@@ -682,6 +712,12 @@ fn run(
             } => {
                 // A full disk must not stop the container, so a log write that fails only loses that output.
                 let _ = write_record(&mut container_log, stream, bytes).and_then(|()| container_log.flush());
+                let output = Notice::Output {
+                    stream,
+                    data: b64::encode(bytes),
+                };
+                // An `attach` that has gone away is dropped.
+                lock(&shared.joined).retain_mut(|client| send(client.as_mut(), &output).is_ok());
                 if !detach {
                     notify(
                         owner,
@@ -1219,6 +1255,16 @@ mod tests {
     /// monitor on a thread.
     #[cfg(unix)]
     fn detached(name: &str, version: &str, stop_signal: i32) -> (PathBuf, Containers, String, Process) {
+        detached_with(name, version, stop_signal, false)
+    }
+
+    /// As [`detached`], started with `-i` when `interactive`.
+    fn detached_with(
+        name: &str,
+        version: &str,
+        stop_signal: i32,
+        interactive: bool,
+    ) -> (PathBuf, Containers, String, Process) {
         use crate::qemu::GuestArch;
         let dir = scratch(name);
         crate::qemu::testing::fake_bundle(&dir, "QEMU emulator version 11.1.3 (oci-hermit-qemu-4)", "tcg");
@@ -1232,6 +1278,7 @@ mod tests {
         launch.command.argv = vec!["wait".into()];
         launch.command.layers.clear();
         launch.stop_signal = stop_signal;
+        launch.interactive = interactive;
         launch.boot_timeout_secs = 10;
         std::fs::write(
             containers.dir(&made.id).join(LAUNCH),
@@ -1245,6 +1292,49 @@ mod tests {
         assert_eq!(next(&mut conn), Notice::Booted);
         assert_eq!(next(&mut conn), Notice::Started);
         (dir, containers, made.id, process)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attached_clients_get_the_output_from_now_on_and_pass_input_and_signals_on() {
+        let _guard = crate::qemu::testing::exec_lock();
+        let (dir, containers, id, _process) = detached_with("monitor-join", "1,7", SIGTERM, true);
+        // Clients see output from when they join, so let the command's greeting be logged first.
+        let log = containers.dir(&id).join(LOG);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::metadata(&log).map_or(0, |m| m.len()) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let join = || {
+            let mut conn = ipc::connect(&dir, &id).unwrap();
+            send(conn.writer.as_mut(), &Request::Join).unwrap();
+            assert_eq!(next(&mut conn), Notice::Started);
+            conn
+        };
+        let (mut first, mut second, gone) = (join(), join(), join());
+        drop(gone);
+        // The fake command echoes its stdin: both attached clients see it, though only one typed it; one that
+        // hung up is dropped without stopping anything.
+        let ping = Request::Stdin {
+            data: b64::encode(b"ping\n"),
+        };
+        send(first.writer.as_mut(), &ping).unwrap();
+        let echoed = Notice::Output {
+            stream: Stream::Stdout,
+            data: b64::encode(b"ping\n"),
+        };
+        assert_eq!(next(&mut first), echoed);
+        assert_eq!(next(&mut second), echoed);
+        // Hanging up detaches: the container goes on, and the other client still gets its output.
+        drop(first);
+        assert!(containers.find(&id).unwrap().running);
+        send(second.writer.as_mut(), &ping).unwrap();
+        assert_eq!(next(&mut second), echoed);
+        // A signal from an attached client reaches the command, which ends on SIGTERM; the client hears how.
+        send(second.writer.as_mut(), &Request::Signal { signal: SIGTERM }).unwrap();
+        assert_eq!(next(&mut second), Notice::Exited { code: 143 });
+        assert_eq!(next(&mut second), Notice::Done);
+        assert_eq!(containers.find(&id).unwrap().state.exit_code, Some(143));
     }
 
     #[cfg(unix)]

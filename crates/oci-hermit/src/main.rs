@@ -291,6 +291,18 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
+        cli::Command::Attach {
+            detach_keys,
+            no_stdin,
+            sig_proxy,
+            container,
+        } => match attach_to(container, detach_keys.as_deref(), *no_stdin, *sig_proxy, env, out, err) {
+            Ok(code) => u8::try_from(code.rem_euclid(256)).unwrap_or(1),
+            Err(e) => {
+                let _ = writeln!(err, "oci-hermit: {e}");
+                1
+            }
+        },
         cli::Command::Wait { containers: wanted } => match open_containers(env) {
             Ok(c) => {
                 let data_dir = env.data_dir.as_deref().expect("the container store opened");
@@ -1442,6 +1454,142 @@ fn forward_stdin(to_monitor: ToMonitor) {
     });
 }
 
+/// The detach keys as Docker reads `--detach-keys`: comma-separated, each a character or `ctrl-` and one of `a`-`z`,
+/// `@`, `[`, `\`, `]`, `^` or `_`.
+fn parse_detach_keys(text: &str) -> Result<Vec<u8>, String> {
+    let bad = || format!("--detach-keys {text}: use keys such as ctrl-p,ctrl-q or ctrl-a,x");
+    text.split(',')
+        .map(|key| match key.strip_prefix("ctrl-") {
+            Some(c) if c.len() == 1 => match c.as_bytes()[0].to_ascii_lowercase() {
+                b @ b'a'..=b'z' => Ok(b - b'a' + 1),
+                b @ (b'@' | b'[' | b'\\' | b']' | b'^' | b'_') => Ok(b & 0x1f),
+                _ => Err(bad()),
+            },
+            None if key.len() == 1 && key.is_ascii() => Ok(key.as_bytes()[0]),
+            _ => Err(bad()),
+        })
+        .collect()
+}
+
+/// Finds the detach keys in typed input. Bytes that might begin them are held back until it is clear they do not.
+struct DetachKeys {
+    keys: Vec<u8>,
+    matched: usize,
+}
+
+impl DetachKeys {
+    fn new(keys: Vec<u8>) -> DetachKeys {
+        DetachKeys { keys, matched: 0 }
+    }
+
+    /// The bytes to pass on, and whether the keys were typed (anything after them is dropped).
+    fn feed(&mut self, input: &[u8]) -> (Vec<u8>, bool) {
+        let mut pass = Vec::with_capacity(input.len());
+        for &byte in input {
+            if byte == self.keys[self.matched] {
+                self.matched += 1;
+                if self.matched == self.keys.len() {
+                    return (pass, true);
+                }
+            } else {
+                // Not the keys after all: what was held back goes on, and this byte may start them again.
+                pass.extend_from_slice(&self.keys[..self.matched]);
+                self.matched = usize::from(byte == self.keys[0]);
+                if self.matched == 0 {
+                    pass.push(byte);
+                }
+            }
+        }
+        (pass, false)
+    }
+}
+
+/// What `attach` waits on: the monitor, or the detach keys.
+enum Attached {
+    Notice(monitor::Notice),
+    Detached,
+}
+
+/// `attach`: this terminal on a running container's command, as `docker attach`: its output from now on, and this
+/// terminal's input if the container was started with `-i`, until it exits (with its code) or the detach keys leave
+/// it running (0).
+fn attach_to(
+    wanted: &str,
+    detach_keys: Option<&str>,
+    no_stdin: bool,
+    sig_proxy: bool,
+    env: &Env,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let keys = parse_detach_keys(detach_keys.unwrap_or("ctrl-p,ctrl-q"))?;
+    let containers = open_containers(env)?;
+    let data_dir = env.data_dir.as_deref().expect("the container store opened");
+    let listed = containers.find(wanted)?;
+    let container = &listed.container;
+    let stopped = || "you cannot attach to a stopped container, start it first".to_string();
+    if !listed.running {
+        return Err(stopped().into());
+    }
+    let ipc::Conn { mut reader, mut writer } = ipc::connect(data_dir, &container.id).map_err(|_| stopped())?;
+    monitor::send(writer.as_mut(), &monitor::Request::Join)?;
+    if monitor::read_one::<monitor::Notice>(reader.as_mut()) != Some(monitor::Notice::Started) {
+        return Err(stopped().into());
+    }
+    let (events, received) = std::sync::mpsc::channel();
+    let notices = events.clone();
+    std::thread::spawn(move || {
+        monitor::read_messages(reader, |notice| notices.send(Attached::Notice(notice)).is_ok());
+    });
+    let to_monitor: ToMonitor = std::sync::Arc::new(std::sync::Mutex::new(writer));
+    let raw = (container.tty && std::io::IsTerminal::is_terminal(&std::io::stdin()))
+        .then(RawTerminal::enable)
+        .flatten();
+    // With a terminal Ctrl-C is a key the container gets, as in Docker.
+    if sig_proxy && !container.tty {
+        forward_signals(to_monitor.clone());
+    }
+    if container.interactive && !no_stdin {
+        let to_monitor = to_monitor.clone();
+        std::thread::spawn(move || {
+            let mut keys = DetachKeys::new(keys);
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; hermit_proto::CHUNK];
+            // At the end of this input the container keeps its stdin, as with Docker.
+            while let Ok(n @ 1..) = std::io::Read::read(&mut stdin, &mut buf) {
+                let (pass, detached) = keys.feed(&buf[..n]);
+                let request = monitor::Request::Stdin {
+                    data: hermit_proto::b64::encode(&pass),
+                };
+                if (!pass.is_empty() && tell_monitor(&to_monitor, &request).is_err()) || detached {
+                    let _ = events.send(Attached::Detached);
+                    return;
+                }
+            }
+        });
+    }
+    let mut code = None;
+    for event in received {
+        match event {
+            Attached::Detached => return Ok(0),
+            Attached::Notice(monitor::Notice::Output { stream, data }) => {
+                let bytes = hermit_proto::b64::decode(&data).ok_or("the monitor sent output that is not base64")?;
+                let sink: &mut dyn Write = match stream {
+                    hermit_proto::Stream::Stdout => out,
+                    hermit_proto::Stream::Stderr => err,
+                };
+                sink.write_all(&bytes)?;
+                sink.flush()?;
+            }
+            Attached::Notice(monitor::Notice::Exited { code: ended }) => code = Some(ended),
+            Attached::Notice(monitor::Notice::Done) => break,
+            Attached::Notice(_) => {}
+        }
+    }
+    drop(raw);
+    code.ok_or_else(|| format!("container {} stopped without saying how it ended", container.name).into())
+}
+
 /// `exec`: run a command in a running container, through its monitor, and exit with its exit code; 125 when it
 /// cannot be started.
 fn exec_command(args: &cli::ExecArgs, env: &Env, out: &mut impl Write, err: &mut impl Write) -> u8 {
@@ -2300,6 +2448,32 @@ mod tests {
     }
 
     #[test]
+    fn detach_keys_read_and_match_as_docker_does() {
+        assert_eq!(parse_detach_keys("ctrl-p,ctrl-q"), Ok(vec![0x10, 0x11]));
+        assert_eq!(parse_detach_keys("ctrl-A,x"), Ok(vec![0x01, b'x']));
+        assert_eq!(
+            parse_detach_keys("ctrl-@,ctrl-[,ctrl-\\,ctrl-_"),
+            Ok(vec![0, 0x1b, 0x1c, 0x1f])
+        );
+        for bad in ["", "ctrl-", "ctrl-1", "ctrl-pq", "esc", "p,,q", "é"] {
+            assert!(parse_detach_keys(bad).unwrap_err().contains("ctrl-p,ctrl-q"), "{bad}");
+        }
+
+        let mut keys = DetachKeys::new(vec![0x10, 0x11]);
+        assert_eq!(keys.feed(b"ls\r"), (b"ls\r".to_vec(), false));
+        // Split across reads, the keys still detach, and what came before them goes on.
+        assert_eq!(keys.feed(b"ab\x10"), (b"ab".to_vec(), false));
+        assert_eq!(keys.feed(b"\x11after"), (Vec::new(), true));
+        // A false start goes on as typed, and Ctrl-P twice still leaves one that may start the keys.
+        let mut keys = DetachKeys::new(vec![0x10, 0x11]);
+        assert_eq!(keys.feed(b"\x10x"), (b"\x10x".to_vec(), false));
+        assert_eq!(keys.feed(b"\x10\x10"), (b"\x10".to_vec(), false));
+        assert_eq!(keys.feed(b"\x11"), (Vec::new(), true));
+        let mut one = DetachKeys::new(vec![0x1d]);
+        assert_eq!(one.feed(b"a\x1db"), (b"a".to_vec(), true));
+    }
+
+    #[test]
     fn cpus_and_memory_size_the_sandbox_as_designed() {
         assert_eq!(parse_cpus("1.5", 4), Ok(Some(1_500_000_000)));
         assert_eq!(parse_cpus("0.01", 4), Ok(Some(10_000_000)));
@@ -2503,6 +2677,27 @@ mod tests {
         assert_eq!((code, out.as_str()), (1, "143\n"));
         assert!(err.contains("no such container: ghost"), "{err}");
         assert_eq!(run_with(&env, &["rm", "patient"]).0, 0);
+
+        // attach stays until the container ends and exits with its code; a stopped one is refused, as by Docker.
+        assert_eq!(detached("glued").0, 0);
+        let attached = std::thread::scope(|scope| {
+            let attaching = scope.spawn(|| run_with(&env, &["attach", "glued"]));
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(!attaching.is_finished(), "attach returned while the container ran");
+            assert_eq!(run_with(&env, &["kill", "-s", "TERM", "glued"]).0, 0);
+            attaching.join().unwrap()
+        });
+        assert_eq!(attached.0, 143, "{}", attached.2);
+        let (code, _, err) = run_with(&env, &["attach", "glued"]);
+        assert_eq!(code, 1);
+        assert!(
+            err.contains("you cannot attach to a stopped container, start it first"),
+            "{err}"
+        );
+        let (code, _, err) = run_with(&env, &["attach", "--detach-keys", "ctrl-", "glued"]);
+        assert_eq!(code, 1);
+        assert!(err.contains("--detach-keys ctrl-: use keys such as"), "{err}");
+        assert_eq!(run_with(&env, &["rm", "glued"]).0, 0);
 
         // rm will not remove a running container; stop sends it SIGTERM, which this one exits on.
         assert_eq!(detached("calm").0, 0);

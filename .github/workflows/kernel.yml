@@ -237,6 +237,17 @@ jobs:
           "$hermit" kill -s HUP hup
           [ "$(timeout 120 "$hermit" logs -f hup)" = $'ready\nhup' ]
           "$hermit" ps -a | grep ' hup$' | grep -q 'Exited (9)'
+          # attach (#79): input reaches a -i container's command and attach ends with it; the detach keys leave it.
+          # shellcheck disable=SC2016 # runs in the guest's shell
+          "$hermit" run -di --name chat debian.tar sh -c 'read line; echo "got $line"; exit 4' > /dev/null
+          code=0; got=$(echo hi | "$hermit" attach chat) || code=$?
+          [ "$code" = 4 ] && [ "$got" = "got hi" ] || { echo "::error::attach gave $code: $got"; exit 1; }
+          "$hermit" run -di --name keep debian.tar cat > /dev/null
+          printf 'kept\n\020\021' | "$hermit" attach keep > /dev/null
+          for _ in $(seq 60); do "$hermit" logs keep | grep -q kept && break; sleep 1; done
+          "$hermit" logs keep | grep -qx kept
+          "$hermit" ps | grep -q ' keep$' || { echo "::error::the detach keys stopped the container"; exit 1; }
+          "$hermit" rm -f chat keep > /dev/null
           # wait prints the code it ended with (#78); kill refuses it now, as Docker does.
           [ "$("$hermit" wait hup)" = 9 ]
           if "$hermit" kill hup 2> kill.err || ! grep -q 'cannot kill container: hup: container .* is not running' kill.err; then
