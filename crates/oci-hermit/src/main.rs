@@ -303,6 +303,38 @@ fn run(command: &cli::Command, env: &Env, out: &mut impl Write, err: &mut impl W
                 1
             }
         },
+        cli::Command::Container(cli::ContainerCommand::Prune { force }) => {
+            if !force {
+                let _ = write!(
+                    out,
+                    "WARNING! This will remove all stopped containers.\nAre you sure you want to continue? [y/N] "
+                );
+                if !(env.confirm)() {
+                    let _ = writeln!(out);
+                    return 0;
+                }
+            }
+            match open_containers(env)
+                .map_err(containers::ContainerError::Invalid)
+                .and_then(|c| c.prune())
+            {
+                Ok((removed, freed)) => {
+                    if !removed.is_empty() {
+                        let _ = writeln!(out, "Deleted Containers:");
+                        for id in &removed {
+                            let _ = writeln!(out, "{id}");
+                        }
+                        let _ = writeln!(out);
+                    }
+                    let _ = writeln!(out, "Total reclaimed space: {}", registry::size(freed));
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(err, "oci-hermit: {e}");
+                    1
+                }
+            }
+        }
         cli::Command::Wait { containers: wanted } => match open_containers(env) {
             Ok(c) => {
                 let data_dir = env.data_dir.as_deref().expect("the container store opened");
@@ -848,7 +880,11 @@ fn image_command(
                 Some(dir) if dir.join("images").is_dir() => Some(store::Store::open(dir)?),
                 _ => None,
             };
-            images::disk_usage(store.as_ref(), out)?;
+            let usage = match &env.data_dir {
+                Some(dir) if dir.join("containers").is_dir() => open_containers(env)?.usage()?,
+                _ => containers::Usage::default(),
+            };
+            images::disk_usage(store.as_ref(), &usage, out)?;
         }
         _ => unreachable!("only image commands come here"),
     }
@@ -2250,6 +2286,51 @@ mod tests {
             assert_eq!(code, 1, "{args:?}");
             assert!(err.contains("no home folder"), "{args:?}: {err}");
         }
+    }
+
+    #[test]
+    fn container_prune_asks_then_removes_only_stopped_containers() {
+        let env = no_qemu("main-container-prune");
+        let containers = containers::Containers::open(env.data_dir.as_ref().unwrap()).unwrap();
+        let spec = |name: &str| containers::Spec {
+            name: Some(name.into()),
+            image: "debian".into(),
+            image_id: "sha256:abc".into(),
+            command: vec!["true".into()],
+            ..containers::Spec::default()
+        };
+        let old = containers.create(spec("old"), 1).unwrap();
+        let busy = containers.create(spec("busy"), 2).unwrap();
+        let _running = containers.start(&busy.id, 3).unwrap();
+        let (_, out, _) = run_with(&env, &["system", "df"]);
+        assert!(out.lines().any(|l| l.starts_with("Containers   2       1 ")), "{out}");
+        assert!(out.contains("%)"), "the stopped one is reclaimable: {out}");
+
+        // Asked and told no, nothing goes.
+        let (code, out, _) = run_with(&env, &["container", "prune"]);
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with("WARNING! This will remove all stopped containers.\nAre you sure"),
+            "{out}"
+        );
+        assert_eq!(containers.list().unwrap().len(), 2);
+        let (code, out, err) = run_with(&env, &["container", "prune", "-f"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.starts_with(&format!("Deleted Containers:\n{}\n\nTotal reclaimed space: ", old.id)),
+            "{out}"
+        );
+        assert!(!out.ends_with("space: 0 B\n"), "its record took space: {out}");
+        let left = containers.list().unwrap();
+        assert_eq!(
+            (left.len(), left[0].container.name.as_str()),
+            (1, "busy"),
+            "the running one is kept"
+        );
+        let (_, out, _) = run_with(&env, &["container", "prune", "-f"]);
+        assert_eq!(out, "Total reclaimed space: 0 B\n");
+        let (_, out, _) = run_with(&env, &["system", "df"]);
+        assert!(out.lines().any(|l| l.starts_with("Containers   1       1 ")), "{out}");
     }
 
     #[test]

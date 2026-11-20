@@ -610,37 +610,64 @@ pub fn history(
     Ok(())
 }
 
-/// `system df`: what the store holds. There are no containers yet, so every image counts as reclaimable.
-pub fn disk_usage(store: Option<&Store>, out: &mut impl Write) -> Result<(), ImageError> {
-    let (count, bytes) = match store {
+/// `system df`: what the store and the containers hold. An image a container was made from is active, and what only
+/// unused images need is reclaimable (a layer they share with an active one is not).
+pub fn disk_usage(
+    store: Option<&Store>,
+    containers: &crate::containers::Usage,
+    out: &mut impl Write,
+) -> Result<(), ImageError> {
+    let (count, active, bytes, reclaimable) = match store {
         Some(store) => {
-            let mut ids: Vec<String> = all(store)?.into_iter().map(|i| i.id).collect();
+            let images = all(store)?;
+            let mut ids: Vec<&String> = images.iter().map(|i| &i.id).collect();
             ids.sort();
             ids.dedup();
             let bytes = crate::store::usage(store.path().parent().unwrap_or(store.path())).map_or(0, |u| u.bytes);
-            (ids.len(), bytes)
+            // What the active images need: their manifests and configs, and each layer once.
+            let mut layers: Vec<&(String, u64)> = Vec::new();
+            let mut needed = 0;
+            let mut active = 0;
+            for id in &ids {
+                if !containers.images.contains(id) {
+                    continue;
+                }
+                active += 1;
+                for image in images.iter().filter(|i| &i.id == *id) {
+                    needed += image.size - image.layers.iter().map(|l| l.1).sum::<u64>();
+                    for layer in &image.layers {
+                        if !layers.iter().any(|l| l.0 == layer.0) {
+                            layers.push(layer);
+                            needed += layer.1;
+                        }
+                    }
+                }
+            }
+            (ids.len(), active, bytes, bytes.saturating_sub(needed))
         }
-        None => (0, 0),
+        None => (0, 0, 0, 0),
     };
-    let reclaimable = if bytes == 0 {
-        registry::size(0)
-    } else {
-        format!("{} (100%)", registry::size(bytes))
+    let share = |part: u64, whole: u64| {
+        if part == 0 {
+            registry::size(0)
+        } else {
+            format!("{} ({}%)", registry::size(part), part * 100 / whole.max(part))
+        }
     };
     let rows = vec![
         vec![
             "Images".into(),
             count.to_string(),
-            "0".into(),
+            active.to_string(),
             registry::size(bytes),
-            reclaimable,
+            share(reclaimable, bytes),
         ],
         vec![
             "Containers".into(),
-            "0".into(),
-            "0".into(),
-            registry::size(0),
-            registry::size(0),
+            containers.total.to_string(),
+            containers.running.to_string(),
+            registry::size(containers.bytes),
+            share(containers.reclaimable, containers.bytes),
         ],
     ];
     let _ = write!(
@@ -1184,16 +1211,36 @@ mod tests {
     #[test]
     fn disk_usage_counts_images_and_bytes() {
         let mut out = Vec::new();
-        disk_usage(None, &mut out).unwrap();
+        let none = crate::containers::Usage::default();
+        disk_usage(None, &none, &mut out).unwrap();
         let out = text(out);
         assert!(out.contains("Images       0       0        0 B    0 B"), "{out}");
 
         let (_, store) = fixture("images-df");
         let mut out = Vec::new();
-        disk_usage(Some(&store), &mut out).unwrap();
+        disk_usage(Some(&store), &none, &mut out).unwrap();
         let out = text(out);
-        assert!(out.contains("Images       3"), "{out}");
+        assert!(out.contains("Images       3       0"), "{out}");
         assert!(out.contains("(100%)"), "{out}");
+
+        // An image a container was made from is active, and only what the others alone need is reclaimable.
+        let images = all(&store).unwrap();
+        let used = crate::containers::Usage {
+            total: 3,
+            running: 1,
+            bytes: 400,
+            reclaimable: 100,
+            images: vec![images[0].id.clone()],
+        };
+        let mut out = Vec::new();
+        disk_usage(Some(&store), &used, &mut out).unwrap();
+        let out = text(out);
+        assert!(out.contains("Images       3       1"), "{out}");
+        assert!(!out.contains("(100%)"), "{out}");
+        assert!(
+            out.contains("Containers   3       1        400 B    100 B (25%)"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -447,6 +447,46 @@ impl Containers {
         Ok(())
     }
 
+    /// Removes every container that is not running, as `container prune`: their IDs, oldest first, and the bytes
+    /// their folders (record, launch files and logs) took. One that starts meanwhile is left alone.
+    pub fn prune(&self) -> Result<(Vec<String>, u64), ContainerError> {
+        let mut stopped: Vec<Listed> = self.list()?.into_iter().filter(|l| !l.running).collect();
+        stopped.sort_by_key(|l| l.container.created);
+        let (mut removed, mut freed) = (Vec::new(), 0);
+        for listed in stopped {
+            let id = &listed.container.id;
+            let bytes = folder_bytes(&self.dir.join(id));
+            match self.remove(id) {
+                Ok(()) => {
+                    removed.push(id.clone());
+                    freed += bytes;
+                }
+                Err(ContainerError::Running(_) | ContainerError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((removed, freed))
+    }
+
+    /// What `system df` says of containers.
+    pub fn usage(&self) -> Result<Usage, ContainerError> {
+        let mut usage = Usage::default();
+        for listed in self.list()? {
+            let bytes = folder_bytes(&self.dir.join(&listed.container.id));
+            usage.total += 1;
+            usage.bytes += bytes;
+            if listed.running {
+                usage.running += 1;
+            } else {
+                usage.reclaimable += bytes;
+            }
+            if !usage.images.contains(&listed.container.image_id) {
+                usage.images.push(listed.container.image_id);
+            }
+        }
+        Ok(usage)
+    }
+
     /// Clears folders left without a container.json by a remove that could not finish. Callers hold the lock.
     fn sweep(&self) {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
@@ -459,6 +499,34 @@ impl Containers {
             }
         }
     }
+}
+
+/// The containers' share of the data folder, for `system df`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub total: usize,
+    pub running: usize,
+    /// What their folders take.
+    pub bytes: u64,
+    /// What the stopped ones' folders take, which `container prune` would free.
+    pub reclaimable: u64,
+    /// The image IDs they were made from.
+    pub images: Vec<String>,
+}
+
+/// The bytes the files under `dir` take.
+fn folder_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => folder_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// A container this process is running; dropping it without [`Running::exited`] leaves it `Exited (unknown)`.

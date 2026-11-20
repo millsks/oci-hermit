@@ -61,6 +61,9 @@ pub enum Command {
     /// Manage oci-hermit's data
     #[command(subcommand)]
     System(SystemCommand),
+    /// Manage containers
+    #[command(subcommand)]
+    Container(ContainerCommand),
     /// Run a command in a new container
     Run(RunArgs),
     /// Run a command in a running container
@@ -164,6 +167,7 @@ impl Command {
             Command::Manifest(_) => "manifest",
             Command::Info => "info",
             Command::System(_) => "system",
+            Command::Container(_) => "container",
             Command::Run(_) => "run",
             Command::Exec(_) => "exec",
             Command::Logs { .. } => "logs",
@@ -331,8 +335,18 @@ pub enum ImageCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum SystemCommand {
-    /// Show how much space images use
+    /// Show how much space images and containers use
     Df,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContainerCommand {
+    /// Remove every stopped container
+    Prune {
+        /// Do not ask first
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Args)]

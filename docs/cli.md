@@ -35,7 +35,8 @@ the `qemu/` and `guest/` folders beside the real file.
 | [`image prune`](#image-prune) | Remove unnamed images, or all of them |
 | [`image history`](#image-history) | Show the steps that built an image |
 | [`image exists`](#image-exists) | Exit 0 if an image is stored, 1 if not |
-| [`system df`](#system-df) | Show how much space images use |
+| [`system df`](#system-df) | Show how much space images and containers use |
+| [`container prune`](#container-prune) | Remove every stopped container |
 | [`machine info`, `info`](#machine-info) | Show what oci-hermit uses and where it keeps things |
 | [`machine boot`](#machine-boot) | Boot a sandbox until its agent is ready, then stop it |
 | [`version`](#version) | Print version information |
@@ -628,13 +629,44 @@ oci-hermit image exists <IMAGE>
 
 ## system df
 
-Show how much space the store uses. There are no containers yet, so every image counts as reclaimable.
+Show how much space the image store and the containers use, as `docker system df` does.
 
 ```console
 $ oci-hermit system df
 TYPE         TOTAL   ACTIVE   SIZE      RECLAIMABLE
-Images       3       0        35.9 MB   35.9 MB (100%)
-Containers   0       0        0 B       0 B
+Images       3       1        35.9 MB   7.4 MB (20%)
+Containers   4       1        52.1 kB   48.6 kB (93%)
+```
+
+An image is active when a container (running or not) was made from it; what only the other images need is
+reclaimable, so a layer an active image shares is not. A container is active while it runs; the stopped ones'
+records and logs are reclaimable, which [`container prune`](#container-prune) frees. A container's writable layer
+lives in the sandbox's memory, so it takes no disk space once the container stops.
+
+## container prune
+
+Remove every container that is not running, with its record and logs, as `docker container prune` does. Running
+containers are never touched; one that starts while `prune` runs is left alone.
+
+```
+oci-hermit container prune [-f]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-f`, `--force` | Do not ask for confirmation. |
+
+Without `-f`, it asks `Are you sure you want to continue? [y/N]` and goes ahead only on `y` or `yes`.
+
+```console
+$ oci-hermit container prune
+WARNING! This will remove all stopped containers.
+Are you sure you want to continue? [y/N] y
+Deleted Containers:
+4f2a9c1d0b3e5a7c9e1f3b5d7a9c1e3f5b7d9a1c3e5f7b9d1a3c5e7f9b1d3a5c
+1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d
+
+Total reclaimed space: 48.6 kB
 ```
 
 ## machine info
@@ -719,6 +751,5 @@ Not in the command line yet, and planned:
 | `create`, `start`, `restart` | #77 |
 | `top`, `stats` | #80 |
 | `diff`, `export` | #81 |
-| `container prune` | #82 |
 | `healthcheck run` | #83 |
 | `port` | #84 |
