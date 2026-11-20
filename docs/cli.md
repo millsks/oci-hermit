@@ -20,6 +20,7 @@ the `qemu/` and `guest/` folders beside the real file.
 | [`stop`](#stop) | Stop running containers |
 | [`kill`](#kill) | Send a signal to running containers |
 | [`wait`](#wait) | Wait for containers to stop and print their exit codes |
+| [`attach`](#attach) | Connect this terminal to a running container |
 | [`rm`](#rm) | Remove containers |
 | [`pull`](#pull) | Pull an image from a registry |
 | [`manifest inspect`](#manifest-inspect) | Show an image's platforms and digests in a registry, without pulling |
@@ -78,7 +79,7 @@ oci-hermit run [OPTIONS] <IMAGE> [COMMAND]...
 | `-m`, `--memory <MEMORY>` | The memory the container may use, as Docker's: a number with `k`, `m` or `g` (`512m`, `2g`); bytes without a suffix. At least `6m`. The container's cgroup holds it to that (more is an out-of-memory kill, exit 137), and the sandbox gets 128 MiB more for the guest, plus room for an image run from a file. Without it, no limit, and the sandbox has 512 MiB for a stored image, which runs from its layer disks, or twice the size of one run from a file plus 256 MiB. |
 | `--name <NAME>` | The container's name: a letter or digit, then letters, digits, `_`, `.` or `-`. Without one, a name such as `quiet_nautilus` is made up. A name stays taken until the container is removed. |
 | `--rm` | Remove the container when the command ends. Without it the container is kept, exited, for `ps -a`, until `rm`. |
-| `-d`, `--detach` | Run in the background: print the container's ID once its command started, and leave it running until it exits or is stopped. See [logs](#logs) and [stop](#stop). With `-i`, its stdin stays open (nothing writes to it yet), so `-dit … sh` keeps a shell waiting. |
+| `-d`, `--detach` | Run in the background: print the container's ID once its command started, and leave it running until it exits or is stopped. See [logs](#logs) and [stop](#stop). With `-i`, its stdin stays open, so `-dit … sh` keeps a shell waiting for [attach](#attach). |
 | `-p`, `--publish <PUBLISH>` | Planned (#27): `[127.0.0.1:]HOST:CONTAINER`, always bound to 127.0.0.1. Refused today. |
 | `-v`, `--volume <VOLUME>` | Planned (#33): `SRC:DST`, with `:ro` or `:rw`; read-only by default. Refused today. |
 | `--pod <POD>` | Planned (#35). Refused today. |
@@ -254,6 +255,39 @@ container's own command, not to commands started with [`exec`](#exec).
 $ oci-hermit kill -s HUP web
 web
 ```
+
+## attach
+
+Connect this terminal to a running container's command, as `docker attach` does: its output from now on (earlier
+output is in [`logs`](#logs)), and this terminal's input if the container was started with `-i`. `attach` ends when
+the container does, with its exit code, or when you type the detach keys, which leave it running (exit 0). Several
+`attach`es can watch one container at once.
+
+```
+oci-hermit attach [OPTIONS] <CONTAINER>
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--detach-keys <KEYS>` | The keys that detach, comma-separated: `ctrl-` and a letter or one of `@ [ \ ] ^ _`, or a plain character. Default `ctrl-p,ctrl-q`. They are not passed on; typed otherwise, they are. |
+| `--no-stdin` | Do not pass this terminal's input on. |
+| `--sig-proxy <BOOL>` | Pass Ctrl-C and `SIGTERM` on to the command (default `true`). For a container with a terminal (`-t`), Ctrl-C is a key the container gets instead, as with Docker. With `--sig-proxy=false`, Ctrl-C ends `attach` and leaves the container running. |
+
+For a container with a terminal, `attach` puts this one in raw mode, as `run -it` does, so the shell gets every key.
+Ending `attach`'s own input (a pipe running out) does not close the container's.
+
+```console
+$ oci-hermit run -dit --name box debian:bookworm-slim bash
+$ oci-hermit attach box
+root@4f2a9c1d0b3e:/# echo hello
+hello
+root@4f2a9c1d0b3e:/#          # Ctrl-P Ctrl-Q
+$ oci-hermit ps
+CONTAINER ID   IMAGE                  COMMAND   CREATED          STATUS          NAMES
+4f2a9c1d0b3e   debian:bookworm-slim   bash      30 seconds ago   Up 30 seconds   box
+```
+
+A stopped container is refused: `you cannot attach to a stopped container, start it first`.
 
 ## wait
 
@@ -683,7 +717,6 @@ Not in the command line yet, and planned:
 | Command | Issue |
 | --- | --- |
 | `create`, `start`, `restart` | #77 |
-| `attach` | #79 |
 | `top`, `stats` | #80 |
 | `diff`, `export` | #81 |
 | `container prune` | #82 |

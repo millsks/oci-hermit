@@ -103,6 +103,19 @@ pub enum Command {
         #[arg(required = true)]
         containers: Vec<String>,
     },
+    /// Connect this terminal to a running container's command; Ctrl-P Ctrl-Q leaves it running
+    Attach {
+        /// The keys that detach, e.g. ctrl-p,ctrl-q (the default) or ctrl-a,x
+        #[arg(long)]
+        detach_keys: Option<String>,
+        /// Do not pass this terminal's input on
+        #[arg(long)]
+        no_stdin: bool,
+        /// Pass Ctrl-C and SIGTERM on to the command (not with a terminal, which sends Ctrl-C as a key)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        sig_proxy: bool,
+        container: String,
+    },
     /// Block until one or more containers stop, then print their exit codes
     Wait {
         #[arg(required = true)]
@@ -158,6 +171,7 @@ impl Command {
             Command::Stop { .. } => "stop",
             Command::Kill { .. } => "kill",
             Command::Wait { .. } => "wait",
+            Command::Attach { .. } => "attach",
             Command::Rm { .. } => "rm",
             Command::Cp { .. } => "cp",
             Command::Pod(_) => "pod",

@@ -24,7 +24,7 @@ no admin, no hypervisor and no WSL.
 | `crates/oci-hermit/src/login.rs` | `login`/`logout`: checks credentials with the registry (reqwest: `/v2/` with Basic, or its token server for a Bearer challenge), then writes Podman's `auth.json` (0600); never prints secrets |
 | `crates/oci-hermit/src/erofs.rs` | a layer tarball as a read-only EROFS image, in user space (#16): whiteouts as 0:0 devices, opaque dirs as `trusted.overlay.opaque`, the layer's own `trusted.*` xattrs dropped; `Store::layer_disk` caches one per layer digest under `erofs/<FORMAT>/`. Bump `erofs::FORMAT` whenever the output changes |
 | `crates/oci-hermit/src/containers.rs` | the container state store (#20): `<data>/containers/<id>/{container.json,state.json}`; `ps`, `rm` (`-f` stops first); `run` records each container and `--rm` removes it |
-| `crates/oci-hermit/src/monitor.rs` | the per-container monitor (#22): hidden `__monitor` process that owns QEMU, `container.log`, the exit code; `run` (attach, `-d`), `exec`, `logs [-f]`, `stop` talk to it |
+| `crates/oci-hermit/src/monitor.rs` | the per-container monitor (#22): hidden `__monitor` process that owns QEMU, `container.log`, the exit code; `run` (attach, `-d`), `exec`, `attach`, `wait`, `logs [-f]`, `stop`, `kill` talk to it |
 | `crates/oci-hermit/src/ipc.rs` | the monitor's channel: Unix socket in `<data>/sockets/` (0700), or a named pipe on Windows (tokio, blocked on from threads) |
 | `crates/oci-hermit/src/rootfs.rs` | applies layers in memory (whiteouts, opaque dirs, hard links); refuses paths that climb out with `..` |
 | `crates/oci-hermit/src/users.rs` | resolves the image's `User` (or `-u`) against the image's own `/etc/passwd` and `/etc/group`, as runc does |
@@ -113,7 +113,9 @@ Everything runs through pixi.
   `Signal` (protocol 1.6, `crun kill` in the guest), then powers the sandbox off after `-t` (10 s; 137); `kill` and
   Ctrl-C at a foreground `run` (tokio `signal`) send `Signal` too. A container's command is PID 1 of its namespace,
   so signals it has no handler for are ignored: `stop` on `sleep` takes the full grace period, as in Docker. `wait` (#78) sends
-  `Wait` to each monitor at once; the monitor answers `Exited` after recording the state and before `--rm` removes it. `exec` (protocol 1.5) is another connection to the monitor: it sends `Exec` with a process number from 1
+  `Wait` to each monitor at once; the monitor answers `Exited` after recording the state and before `--rm` removes it. `attach` (#79) sends `Join`:
+  the monitor sends it `Started`, then each output record (no backlog), and takes its `Stdin` (only if the container
+  has `-i`) and `Signal`; the detach keys are found client-side (`DetachKeys`), and hanging up leaves the container. `exec` (protocol 1.5) is another connection to the monitor: it sends `Exec` with a process number from 1
   (`run`'s command is 0, and `process` is left out of messages about it, so 1.4 peers are unaffected); the agent
   runs it with `crun exec --process`, and `relay` routes its I/O to that client only, never to `container.log`.
   `exec -u` resolves against the image's `/etc/passwd` and `/etc/group`, which `run` saves in `launch.json`
